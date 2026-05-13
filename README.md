@@ -1,3 +1,5 @@
+*THIS APP IS VIBE-CODED IN XCODE USING CHATGPT PLUS
+
 # Vestigo
 
 Vestigo is an iOS movie and series tracking app built in SwiftUI. It started as GlassWatch and was later renamed to Vestigo. The app is designed to combine movie and TV discovery, search, watchlist management, watched-history tracking, ratings, collections, streaming availability, and personalized recommendations into one clean iOS app.
