@@ -10,6 +10,16 @@ import Foundation
 import Combine
 import UniformTypeIdentifiers
 
+#if canImport(UIKit)
+@MainActor
+private func dismissKeyboardNow() {
+    UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+}
+#else
+@MainActor
+private func dismissKeyboardNow() {}
+#endif
+
 // MARK: - App Entry
 
 struct ContentView: View {
@@ -59,8 +69,6 @@ struct ContentView: View {
         #if os(iOS)
         .tabBarMinimizeBehavior(.onScrollDown)
         #endif
-        .contentShape(Rectangle())
-        .highPriorityGesture(edgeBackGesture)
         .preferredColorScheme(model.settings.appearance == .dark ? .dark : .light)
         .task { await model.bootstrap() }
         .sheet(item: $model.selectedItem) { item in
@@ -70,16 +78,17 @@ struct ContentView: View {
             PersonDetailView(person: person, model: model)
         }
     }
-
-    private var edgeBackGesture: some Gesture {
-        DragGesture(minimumDistance: 18, coordinateSpace: .global)
-            .onEnded { value in
-                guard value.startLocation.x <= 24 else { return }
-                guard value.translation.width > 70 else { return }
-                guard abs(value.translation.height) < 80 else { return }
-                model.goBack()
-            }
-    }
+// Disabled because a high-priority full-screen DragGesture makes light one-finger ScrollView drags unreliable on device.
+// Back navigation should be handled by NavigationStack/system gestures instead of competing with scrolling.
+//    private var edgeBackGesture: some Gesture {
+//        DragGesture(minimumDistance: 18, coordinateSpace: .global)
+//            .onEnded { value in
+//                guard value.startLocation.x <= 24 else { return }
+//                guard value.translation.width > 70 else { return }
+//                guard abs(value.translation.height) < 80 else { return }
+//                model.goBack()
+//            }
+//    }
 }
 
 // MARK: - Root Navigation
@@ -1857,6 +1866,9 @@ private struct DetailView: View {
             .padding(.top, 6)
             .padding(.bottom, 110)
         }
+        .scrollDismissesKeyboard(.immediately)
+        .scrollIndicators(.hidden)
+        .scrollViewTouchTuning()
     }
 
     private var headerSection: some View {
@@ -2056,6 +2068,7 @@ private struct CastCarousel: View {
                 .sectionTitle()
             scrollRow
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var scrollRow: some View {
@@ -2067,7 +2080,10 @@ private struct CastCarousel: View {
             }
             .padding(.vertical, 4)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .scrollClipDisabled()
+        .scrollIndicators(.hidden)
+        .scrollViewTouchTuning(axis: .horizontal)
     }
 }
 
@@ -2178,6 +2194,9 @@ private struct PersonDetailView: View {
             .padding(.top, 6)
             .padding(.bottom, 110)
         }
+        .scrollDismissesKeyboard(.immediately)
+        .scrollIndicators(.hidden)
+        .scrollViewTouchTuning()
     }
 
     private var header: some View {
@@ -2257,6 +2276,7 @@ private struct MediaListRow: View {
         }
         .padding(12)
         .liquidGlass(cornerRadius: 22)
+        .appScrollTouchSafe()
         .contextMenu {
             MediaItemContextMenuActions(item: item, hideWatched: false, model: model, swipeContext: .none) {
                 showCollections = true
@@ -2459,6 +2479,7 @@ private struct SeasonDropdownView: View {
             }
         }
         .liquidGlass(cornerRadius: 22)
+        .appScrollTouchSafe()
     }
 
     private var isSeasonWatched: Bool {
@@ -2619,6 +2640,9 @@ private struct AddToCollectionSheet: View {
                 .padding(.top, 8)
                 .ignoresSafeArea(edges: .bottom)
             }
+            .scrollDismissesKeyboard(.immediately)
+            .scrollIndicators(.hidden)
+            .scrollViewTouchTuning()
         }
         .presentationBackground(.clear)
         .presentationCornerRadius(36)
@@ -2636,21 +2660,28 @@ private struct BaseScreen<Content: View>: View {
     var body: some View {
         ZStack {
             AppBackground(settings: settings)
-
-            ScrollView {
+                .ignoresSafeArea()
+            
+            ScrollView(.vertical, showsIndicators: false) {
                 VStack(alignment: .leading, spacing: 18) {
                     HStack(alignment: .center) {
                         Text(title)
                             .font(.system(size: 34, weight: .black, design: .rounded))
-                        Spacer()
+                        Spacer(minLength: 0)
                     }
+                    
                     content
                 }
                 .padding(16)
                 .padding(.bottom, 94)
+                .containerRelativeFrame(.horizontal, alignment: .leading)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
             }
-            .scrollClipDisabled()
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            .scrollDismissesKeyboard(.immediately)
             .scrollContentBackground(.hidden)
+            .scrollIndicators(.hidden)
+            .scrollViewTouchTuning(axis: .vertical)
         }
     }
 }
@@ -2675,7 +2706,7 @@ private struct MediaSection: View {
                 }
             }
             .buttonStyle(.plain)
-
+            
             if items.isEmpty {
                 StatusBubble(title: "Nothing here yet", text: "This section will fill after more data loads or after you rate more watched items.")
             } else {
@@ -2687,9 +2718,13 @@ private struct MediaSection: View {
                     }
                     .padding(.vertical, 8)
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .scrollClipDisabled()
+                .scrollIndicators(.hidden)
+                .scrollViewTouchTuning(axis: .horizontal)
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -2926,6 +2961,7 @@ private struct ProviderRow: View {
         }
         .padding(12)
         .liquidGlass(cornerRadius: 22)
+        .appScrollTouchSafe()
     }
     
     private var providerLogo: some View {
@@ -3590,6 +3626,7 @@ private struct CollectionRow: View {
         }
         .padding(14)
         .liquidGlass(cornerRadius: 22)
+        .appScrollTouchSafe()
     }
 }
 
@@ -3605,6 +3642,7 @@ private struct StatusBubble: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(14)
         .liquidGlass(cornerRadius: 22)
+        .appScrollTouchSafe()
     }
 }
 
@@ -5524,7 +5562,6 @@ private enum RuntimeSearchFilter: String, Codable, CaseIterable, Identifiable {
     var isActive: Bool { self != .any }
 }
 private extension MediaFilter { var title: String { self == .both ? "Both" : (self == .movie ? "Movies" : "Series") }; var tmdbPath: String { self == .both ? "all" : (self == .movie ? "movie" : "tv") } }
-
 private enum ViewMode: String, Codable { case tile, list }
 private enum SortOption: String, CaseIterable, Identifiable { case releaseDate, myRating, tmdbRating; var id: String { rawValue } }
 private enum GenreSort: String, Codable, CaseIterable, Identifiable { case tmdbRating, releaseDate; var id: String { rawValue }; var title: String { self == .tmdbRating ? "TMDb rating" : "Released" }; var tmdbSort: String { self == .tmdbRating ? "vote_average.desc" : "primary_release_date.desc" } }
@@ -5804,6 +5841,10 @@ private extension MediaItem {
 
 private extension View {
     @ViewBuilder
+    func appScrollTouchSafe() -> some View {
+        self
+    }
+    @ViewBuilder
     func liquidGlass(cornerRadius: CGFloat = 24) -> some View {
         let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
 
@@ -5874,7 +5915,93 @@ private extension View {
                 .background(.clear, in: Capsule())
         }
     }
+
+    @ViewBuilder
+    func edgeBackGesture(isEnabled: Bool = true, action: @escaping () -> Void) -> some View {
+        if isEnabled {
+            self
+                .background(alignment: .leading) {
+                    Color.clear
+                        .frame(width: 18)
+                        .contentShape(Rectangle())
+                        .gesture(
+                            DragGesture(minimumDistance: 18, coordinateSpace: .global)
+                                .onEnded { value in
+                                    let mostlyHorizontal = abs(value.translation.width) > abs(value.translation.height) * 2.0
+                                    let swipedRight = value.translation.width > 84
+
+                                    if mostlyHorizontal && swipedRight {
+                                        action()
+                                    }
+                                }
+                        )
+                }
+        } else {
+            self
+        }
+    }
 }
+
+#if canImport(UIKit)
+private struct ScrollViewTouchTuningView: UIViewRepresentable {
+    let axis: Axis.Set
+
+    func makeUIView(context: Context) -> UIView {
+        let view = UIView(frame: .zero)
+        view.isUserInteractionEnabled = false
+        DispatchQueue.main.async { configureNearestScrollView(from: view) }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { configureNearestScrollView(from: view) }
+        return view
+    }
+
+    func updateUIView(_ uiView: UIView, context: Context) {
+        DispatchQueue.main.async { configureNearestScrollView(from: uiView) }
+    }
+
+    private func configureNearestScrollView(from view: UIView) {
+        var current = view.superview
+
+        while let candidate = current {
+            if let scrollView = candidate as? UIScrollView {
+                configure(scrollView)
+                return
+            }
+
+            current = candidate.superview
+        }
+    }
+
+    private func configure(_ scrollView: UIScrollView) {
+        scrollView.panGestureRecognizer.minimumNumberOfTouches = 1
+        scrollView.delaysContentTouches = false
+        scrollView.canCancelContentTouches = true
+        scrollView.keyboardDismissMode = .onDrag
+        scrollView.isDirectionalLockEnabled = true
+        scrollView.showsVerticalScrollIndicator = false
+        scrollView.showsHorizontalScrollIndicator = false
+
+        if axis == .horizontal {
+            scrollView.alwaysBounceHorizontal = true
+            scrollView.alwaysBounceVertical = false
+        } else {
+            scrollView.alwaysBounceVertical = true
+            scrollView.alwaysBounceHorizontal = false
+        }
+    }
+}
+
+private extension View {
+    func scrollViewTouchTuning(axis: Axis.Set = .vertical) -> some View {
+        background(ScrollViewTouchTuningView(axis: axis))
+    }
+}
+#else
+private extension View {
+    func scrollViewTouchTuning(axis: Axis.Set = .vertical) -> some View {
+        self
+    }
+}
+#endif
 
 
 // MARK: - Adaptive Layout
