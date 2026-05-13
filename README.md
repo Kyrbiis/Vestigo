@@ -1,4 +1,4 @@
-*THIS APP IS VIBE-CODED IN XCODE USING CHATGPT PLUS
+*This app is vibe-coded in Xcode using ChatGPT
 
 # Vestigo
 
