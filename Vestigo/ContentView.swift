@@ -68,6 +68,11 @@ struct ContentView: View {
         .tint(model.settings.accentColor)
         #if os(iOS)
         .tabBarMinimizeBehavior(.onScrollDown)
+        .background(
+            TabBarRetapObserver(selectedTab: model.selectedTab) {
+                model.reselectCurrentTab()
+            }
+        )
         #endif
         .preferredColorScheme(model.settings.appearance == .dark ? .dark : .light)
         .task { await model.bootstrap() }
@@ -78,18 +83,68 @@ struct ContentView: View {
             PersonDetailView(person: person, model: model)
         }
     }
-// Disabled because a high-priority full-screen DragGesture makes light one-finger ScrollView drags unreliable on device.
-// Back navigation should be handled by NavigationStack/system gestures instead of competing with scrolling.
-//    private var edgeBackGesture: some Gesture {
-//        DragGesture(minimumDistance: 18, coordinateSpace: .global)
-//            .onEnded { value in
-//                guard value.startLocation.x <= 24 else { return }
-//                guard value.translation.width > 70 else { return }
-//                guard abs(value.translation.height) < 80 else { return }
-//                model.goBack()
-//            }
-//    }
 }
+
+#if os(iOS)
+private struct TabBarRetapObserver: UIViewControllerRepresentable {
+    let selectedTab: AppTab
+    let onRetap: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onRetap: onRetap)
+    }
+
+    func makeUIViewController(context: Context) -> UIViewController {
+        let controller = UIViewController()
+
+        DispatchQueue.main.async {
+            context.coordinator.attach(from: controller, selectedIndex: selectedTab.sortIndex)
+        }
+
+        return controller
+    }
+
+    func updateUIViewController(_ uiViewController: UIViewController, context: Context) {
+        context.coordinator.onRetap = onRetap
+
+        DispatchQueue.main.async {
+            context.coordinator.attach(from: uiViewController, selectedIndex: selectedTab.sortIndex)
+        }
+    }
+
+    final class Coordinator: NSObject, UITabBarControllerDelegate {
+        var onRetap: () -> Void
+        private weak var tabBarController: UITabBarController?
+        private var lastSelectedIndex: Int?
+
+        init(onRetap: @escaping () -> Void) {
+            self.onRetap = onRetap
+        }
+
+        func attach(from viewController: UIViewController, selectedIndex: Int) {
+            guard let tabBarController = viewController.tabBarController else { return }
+
+            if self.tabBarController !== tabBarController {
+                self.tabBarController = tabBarController
+                tabBarController.delegate = self
+            }
+
+            lastSelectedIndex = selectedIndex
+        }
+
+        func tabBarController(_ tabBarController: UITabBarController, didSelect viewController: UIViewController) {
+            let selectedIndex = tabBarController.selectedIndex
+
+            if selectedIndex == lastSelectedIndex {
+                onRetap()
+            }
+
+            lastSelectedIndex = selectedIndex
+        }
+    }
+}
+#endif
+
 
 // MARK: - Root Navigation
 
@@ -315,10 +370,16 @@ private final class VestigoModel: ObservableObject {
             async let pop = tmdb.popular(filter: mediaFilter)
             async let now = tmdb.newReleases(filter: mediaFilter)
             async let soon = tmdb.upcoming(filter: mediaFilter)
+            let today = Calendar.current.startOfDay(for: Date())
+            let realUpcoming = (try await soon).filter { item in
+                guard let releaseDate = item.releaseDateValue else { return false }
+                return releaseDate > today
+            }
+
             trending = preparedResults(try await tr, hideWatched: settings.hideWatchedFromHome)
             popular = preparedResults(try await pop, hideWatched: settings.hideWatchedFromHome)
             newReleases = preparedResults(try await now, hideWatched: settings.hideWatchedFromHome)
-            upcoming = preparedResults(try await soon, hideWatched: settings.hideWatchedFromHome)
+            upcoming = preparedResults(realUpcoming, hideWatched: settings.hideWatchedFromHome)
             await loadSmartRecommendations()
         } catch {
             if LoadErrorFilter.shouldIgnore(error) {
@@ -676,12 +737,20 @@ private final class VestigoModel: ObservableObject {
 
     func selectTab(_ tab: AppTab) {
         guard tab != selectedTab else {
-            resetPath(for: tab)
+            reselectCurrentTab()
             return
         }
 
         tabTransitionDirection = tab.sortIndex > selectedTab.sortIndex ? .forward : .backward
         selectedTab = tab
+    }
+
+    func reselectCurrentTab() {
+        if isAtRoot(selectedTab) {
+            reloadRoot(for: selectedTab)
+        } else {
+            resetPath(for: selectedTab)
+        }
     }
 
     func goBack() {
@@ -705,7 +774,21 @@ private final class VestigoModel: ObservableObject {
         }
     }
 
+    private func isAtRoot(_ tab: AppTab) -> Bool {
+        switch tab {
+        case .home:
+            return homePath.isEmpty && selectedItem == nil && selectedPerson == nil
+        case .search:
+            return searchPath.isEmpty && selectedItem == nil && selectedPerson == nil
+        case .watchlist, .collections, .settings:
+            return selectedItem == nil && selectedPerson == nil
+        }
+    }
+
     private func resetPath(for tab: AppTab) {
+        selectedItem = nil
+        selectedPerson = nil
+
         switch tab {
         case .home:
             homePath.removeAll()
@@ -713,6 +796,42 @@ private final class VestigoModel: ObservableObject {
             searchPath.removeAll()
         case .watchlist, .collections, .settings:
             break
+        }
+    }
+
+    private func reloadRoot(for tab: AppTab) {
+        selectedItem = nil
+        selectedPerson = nil
+
+        switch tab {
+        case .home:
+            homePath.removeAll()
+            mediaFilter = settings.defaultHomeFilter
+            homeViewMode = .tile
+            Task { await loadHome() }
+
+        case .search:
+            searchPath.removeAll()
+            searchViewMode = .tile
+            searchText = ""
+            searchResults = []
+            searchPeopleResults = []
+            searchFieldIsFocused = false
+            searchFiltersExpanded = false
+            expandedSearchFilterSections.removeAll()
+            selectedRuntimeFilters.removeAll()
+            selectedDateFilters.removeAll()
+            minimumTMDbRatingFilter = .one
+            searchFilter = settings.defaultSearchFilter
+
+        case .watchlist:
+            objectWillChange.send()
+
+        case .collections:
+            objectWillChange.send()
+
+        case .settings:
+            objectWillChange.send()
         }
     }
 
@@ -834,13 +953,15 @@ private struct SearchView: View {
         BaseScreen(title: "Search", filter: .constant(model.searchFilter.mediaFilter ?? .movie), settings: model.settings) {
             VStack(spacing: 18) {
                 SearchBubble(text: $model.searchText, isFocused: $searchIsFocused) {
-                    saveCurrentSearchToHistory()
-                    searchIsFocused = false
-                    model.searchFieldIsFocused = false
+                    commitSearchInput()
                 }
                 .onChange(of: model.searchText) { _, _ in model.updateSearch() }
                 .onChange(of: searchIsFocused) { _, newValue in
-                    model.searchFieldIsFocused = newValue
+                    if !newValue {
+                        commitSearchInput()
+                    } else {
+                        model.searchFieldIsFocused = true
+                    }
                 }
                 if !model.searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     SearchFilterPills(filter: $model.searchFilter) {
@@ -888,6 +1009,14 @@ private struct SearchView: View {
                 }
             }
         }
+    }
+    
+    private func commitSearchInput() {
+        searchIsFocused = false
+        model.searchFieldIsFocused = false
+        model.searchText = model.searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        saveCurrentSearchToHistory()
+        model.updateSearch()
     }
     
     private func saveCurrentSearchToHistory() {
@@ -3103,10 +3232,15 @@ private struct SearchBubble: View {
     var body: some View {
         HStack(spacing: 10) {
             Image(systemName: "magnifyingglass")
-            TextField("Search movies, series, people", text: $text)
-                .disableAutocorrection(true)
+            TextField("Search movies, series, people...", text: $text)
+                .textFieldStyle(.plain)
                 .focused(isFocused)
-                .onSubmit(onSubmit)
+                .textInputAutocapitalization(.words)
+                .autocorrectionDisabled(false)
+                .submitLabel(.search)
+                .onSubmit {
+                    onSubmit()
+                }
         }
         .padding(.horizontal, 14)
         .frame(height: 52)
