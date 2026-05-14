@@ -822,7 +822,7 @@ private final class VestigoModel: ObservableObject {
                 
                 return (lhs.releaseDateValue ?? .distantPast) > (rhs.releaseDateValue ?? .distantPast)
             }
-        
+    
         collectionRecommendations[collectionID] = preparedResults(filtered, hideWatched: true)
     }
     
