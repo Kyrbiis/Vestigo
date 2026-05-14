@@ -10,21 +10,13 @@ import Foundation
 import Combine
 import UniformTypeIdentifiers
 
-#if canImport(UIKit)
-@MainActor
-private func dismissKeyboardNow() {
-    UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
-}
-#else
-@MainActor
-private func dismissKeyboardNow() {}
-#endif
 
 // MARK: - App Entry
 
 struct ContentView: View {
     @StateObject private var model = VestigoModel()
     @Namespace private var tabNamespace
+    @State private var showSettingsSheet = false
 
     private var selectedTabBinding: Binding<AppTab> {
         Binding(
@@ -46,6 +38,12 @@ struct ContentView: View {
                     Label(AppTab.search.title, systemImage: AppTab.search.icon)
                 }
                 .tag(AppTab.search)
+            
+            AppTabRoot(tab: .forYou, model: model)
+                .tabItem {
+                    Label(AppTab.forYou.title, systemImage: AppTab.forYou.icon)
+                }
+                .tag(AppTab.forYou)
 
             AppTabRoot(tab: .watchlist, model: model)
                 .tabItem {
@@ -58,12 +56,6 @@ struct ContentView: View {
                     Label(AppTab.collections.title, systemImage: AppTab.collections.icon)
                 }
                 .tag(AppTab.collections)
-
-            AppTabRoot(tab: .settings, model: model)
-                .tabItem {
-                    Label(AppTab.settings.title, systemImage: AppTab.settings.icon)
-                }
-                .tag(AppTab.settings)
         }
         .tint(model.settings.accentColor)
         #if os(iOS)
@@ -82,6 +74,15 @@ struct ContentView: View {
         .sheet(item: $model.selectedPerson) { person in
             PersonDetailView(person: person, model: model)
         }
+        .sheet(isPresented: $showSettingsSheet) {
+            SettingsSheetSurface(model: model)
+                .presentationBackground(.clear)
+                .presentationCornerRadius(54)
+        }
+        .environment(\.openSettingsSheet, OpenSettingsSheetAction {
+            showSettingsSheet = true
+        })
+        .favouriteReplacementOverlay(model: model)
     }
 }
 
@@ -145,6 +146,25 @@ private struct TabBarRetapObserver: UIViewControllerRepresentable {
 }
 #endif
 
+private struct OpenSettingsSheetAction {
+    let action: () -> Void
+
+    func callAsFunction() {
+        action()
+    }
+}
+
+private struct OpenSettingsSheetKey: EnvironmentKey {
+    static let defaultValue = OpenSettingsSheetAction {}
+}
+
+private extension EnvironmentValues {
+    var openSettingsSheet: OpenSettingsSheetAction {
+        get { self[OpenSettingsSheetKey.self] }
+        set { self[OpenSettingsSheetKey.self] = newValue }
+    }
+}
+
 
 // MARK: - Root Navigation
 
@@ -194,6 +214,9 @@ private struct AppTabRoot: View {
                     #endif
                     .background(Color.clear)
                 }
+                
+            case .forYou:
+                ForYouView(model: model)
 
             case .watchlist:
                 WatchlistView(model: model)
@@ -201,8 +224,6 @@ private struct AppTabRoot: View {
             case .collections:
                 CollectionsView(model: model)
 
-            case .settings:
-                SettingsView(model: model)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -222,7 +243,7 @@ private final class VestigoModel: ObservableObject {
     @Published var watchlistViewMode: ViewMode = .tile
     @Published var collectionViewMode: ViewMode = .tile
     @Published var sortOption: SortOption = .tmdbRating
-
+    
     @Published var searchFiltersExpanded = false
     @Published var expandedSearchFilterSections: Set<SearchFilterSection> = []
     @Published var selectedRuntimeFilters: Set<SearchRuntimeFilter> = []
@@ -236,6 +257,10 @@ private final class VestigoModel: ObservableObject {
     @Published var newReleases: [MediaItem] = []
     @Published var upcoming: [MediaItem] = []
     @Published var recommendations: [MediaItem] = []
+    @Published var moreLikeLastWatched: [MediaItem] = []
+    @Published var moreLikeFavourite: [MediaItem] = []
+    @Published var fromTopGenre: [MediaItem] = []
+    @Published var trySomethingNewRecommendations: [MediaItem] = []
     @Published var seriesNext: [MediaItem] = []
     @Published var searchResults: [MediaItem] = []
     @Published var searchPeopleResults: [PersonSummary] = []
@@ -243,7 +268,8 @@ private final class VestigoModel: ObservableObject {
     @Published var detailsCache: [MediaKey: MediaDetail] = [:]
     @Published var providerCache: [MediaKey: [StreamingOption]] = [:]
     @Published var personCreditsCache: [Int: [MediaItem]] = [:]
-
+    @Published var collectionRecommendations: [UUID: [MediaItem]] = [:]
+    
     @Published var library = UserLibrary()
     @Published var settings = AppSettings()
     @Published var selectedItem: MediaItem?
@@ -254,16 +280,21 @@ private final class VestigoModel: ObservableObject {
     @Published var errorText: String?
     @Published var exportDocument = ExportDocument(text: "")
     @Published var showExporter = false
-
+    @Published var pendingFavouriteReplacement: MediaItem?
+    @Published var showFavouriteReplacementAlert = false
+    @Published var forYouResetToken = UUID()
+    @Published var watchlistResetToken = UUID()
+    @Published var collectionsResetToken = UUID()
+    
     private let tmdb = TMDbService()
     private let streaming = StreamingAvailabilityService()
     private var searchTask: Task<Void, Never>?
     private var saveTask: Task<Void, Never>?
-
+    
     var filteredSearchResults: [MediaItem] {
         searchResults.filter { item in
             guard searchFilter != .people else { return true }
-
+            
             if let minimumTMDbRatingFilter, item.voteAverage < minimumTMDbRatingFilter.minimumRating {
                 return false
             }
@@ -274,43 +305,43 @@ private final class VestigoModel: ObservableObject {
                     return false
                 }
             }
-
+            
             if !selectedRuntimeFilters.isEmpty {
                 guard let runtime = item.runtime, runtime > 0 else {
                     return true
                 }
-
+                
                 guard selectedRuntimeFilters.contains(where: { $0.contains(runtime) }) else {
                     return false
                 }
             }
-
+            
             return true
         }
     }
-
+    
     var activeSearchFilterCount: Int {
         selectedRuntimeFilters.count + selectedDateFilters.count + (minimumTMDbRatingFilter == nil ? 0 : 1)
     }
     
     func prioritisedForLanguage(_ items: [MediaItem]) -> [MediaItem] {
         guard settings.prioritiseEnglish else { return items }
-
+        
         return items.sorted { lhs, rhs in
             let lhsEnglish = lhs.originalLanguage == nil || lhs.originalLanguage == "en"
             let rhsEnglish = rhs.originalLanguage == nil || rhs.originalLanguage == "en"
-
+            
             if lhsEnglish != rhsEnglish {
                 return lhsEnglish
             }
-
+            
             return false
         }
     }
-
+    
     func filteredForAnimePreference(_ items: [MediaItem]) -> [MediaItem] {
         guard settings.hideAnimeResults else { return items }
-
+        
         let animeGenreIDs: Set<Int> = [16]
         let animeKeywords = [
             "anime",
@@ -322,25 +353,25 @@ private final class VestigoModel: ObservableObject {
             "shoujo",
             "isekai"
         ]
-
+        
         return items.filter { item in
             if !animeGenreIDs.isDisjoint(with: Set(item.genreIDs)) {
                 return false
             }
-
+            
             let searchableText = "\(item.title) \(item.overview)".lowercased()
             return !animeKeywords.contains { searchableText.contains($0) }
         }
     }
-
+    
     func filteredForWatchedPreference(_ items: [MediaItem], hideWatched: Bool) -> [MediaItem] {
         guard hideWatched else { return items }
-
+        
         return items.filter { item in
             !library.isWatched(item.key)
         }
     }
-
+    
     func preparedResults(_ items: [MediaItem], hideWatched: Bool = false) -> [MediaItem] {
         filteredForWatchedPreference(
             filteredForAnimePreference(
@@ -361,7 +392,7 @@ private final class VestigoModel: ObservableObject {
         loadLocal()
         await loadHome()
     }
-
+    
     func loadHome() async {
         isLoading = true
         errorText = nil
@@ -375,7 +406,7 @@ private final class VestigoModel: ObservableObject {
                 guard let releaseDate = item.releaseDateValue else { return false }
                 return releaseDate > today
             }
-
+            
             trending = preparedResults(try await tr, hideWatched: settings.hideWatchedFromHome)
             popular = preparedResults(try await pop, hideWatched: settings.hideWatchedFromHome)
             newReleases = preparedResults(try await now, hideWatched: settings.hideWatchedFromHome)
@@ -389,25 +420,29 @@ private final class VestigoModel: ObservableObject {
         }
         isLoading = false
     }
-
+    
     func loadSmartRecommendations() async {
         let watchedHistory = library.watchedItems
         guard watchedHistory.count >= 3 else {
             recommendations = []
+            moreLikeLastWatched = []
+            moreLikeFavourite = []
+            fromTopGenre = []
+            trySomethingNewRecommendations = []
             seriesNext = []
             return
         }
-
+        
         let strength = min(max(settings.recommendationStrength, 1), 5)
         let normalizedStrength = (strength - 1) / 4
         // Lower values broaden recommendations; higher values lean harder on highly rated watched history.
         let unratedWatchedWeight = 0.65 - (normalizedStrength * 0.45)
         let ratingInfluence = 0.35 + (normalizedStrength * 0.65)
         let lowRatingPenaltyMultiplier = 0.15 + (normalizedStrength * 0.85)
-
+        
         func historyWeight(for historyItem: MediaItem) -> Double {
             let rating = library.ratings[historyItem.key]
-
+            
             if let rating {
                 let centeredRating = (rating - 2.5) / 2.5
                 if centeredRating >= 0 {
@@ -419,77 +454,155 @@ private final class VestigoModel: ObservableObject {
                 return unratedWatchedWeight
             }
         }
-
+        
+        func relatedResults(_ items: [MediaItem], seed: MediaItem) -> [MediaItem] {
+            var results = items
+                .uniqued()
+                .filter { item in
+                    !item.isUpcoming && !library.isWatched(item.key)
+                }
+            
+            if settings.prioritiseEnglish {
+                results = results.filter { item in
+                    (item.originalLanguage ?? "en") == "en"
+                }
+            }
+            
+            return results.sortedBySimilarity(to: seed)
+        }
+        
         func genreSimilarity(_ candidate: MediaItem, _ historyItem: MediaItem) -> Double {
             let candidateGenres = Set(candidate.genreIDs)
             let historyGenres = Set(historyItem.genreIDs)
             guard !candidateGenres.isEmpty, !historyGenres.isEmpty else { return 0 }
-
+            
             let overlap = candidateGenres.intersection(historyGenres).count
             let possible = max(candidateGenres.union(historyGenres).count, 1)
             return Double(overlap) / Double(possible)
         }
-
+        
         let historyLimit = strength >= 4 ? 10 : 14
         let rankedHistory = watchedHistory
             .sorted { lhs, rhs in
                 let lhsRating = library.ratings[lhs.key] ?? 2.5
                 let rhsRating = library.ratings[rhs.key] ?? 2.5
-
+                
                 if lhsRating != rhsRating {
                     return lhsRating > rhsRating
                 }
-
+                
                 return lhs.voteAverage > rhs.voteAverage
             }
             .prefix(historyLimit)
-
+        
         var scoredRecommendations: [MediaKey: (item: MediaItem, score: Double)] = [:]
         var nextItems: [MediaItem] = []
-
+        
         for record in rankedHistory {
             let weight = historyWeight(for: record)
-
+            
             do {
                 let rec = try await tmdb.recommendations(for: record.key)
-
+                
                 for (index, candidate) in rec.enumerated() {
                     guard !library.isWatched(candidate.key) else { continue }
-
+                    
                     let positionScore = 1.0 / (1.0 + Double(index) * 0.08)
                     let similarityBoost = genreSimilarity(candidate, record) * (0.35 + normalizedStrength * 0.45)
                     let tmdbBoost = min(candidate.voteAverage, 10) * 0.025
                     let score = (positionScore + similarityBoost + tmdbBoost) * weight
-
+                    
                     var entry = scoredRecommendations[candidate.key] ?? (candidate, 0)
                     entry.score += score
                     scoredRecommendations[candidate.key] = entry
                 }
-
+                
                 let related = try await tmdb.sameSeriesOrSimilar(for: record.key)
                 nextItems.append(contentsOf: related)
             } catch { }
         }
-
+        
         let sortedRecommendations = scoredRecommendations.values
             .filter { $0.score > 0 }
             .sorted { lhs, rhs in
                 if lhs.score != rhs.score {
                     return lhs.score > rhs.score
                 }
-
+                
                 if lhs.item.voteAverage != rhs.item.voteAverage {
                     return lhs.item.voteAverage > rhs.item.voteAverage
                 }
-
+                
                 return (lhs.item.releaseDateValue ?? .distantPast) > (rhs.item.releaseDateValue ?? .distantPast)
             }
             .map(\.item)
-
-        recommendations = preparedResults(sortedRecommendations, hideWatched: settings.hideWatchedFromHome)
-        seriesNext = preparedResults(nextItems.uniqued().filter { !library.isWatched($0.key) }, hideWatched: settings.hideWatchedFromHome)
+        
+        let visibleRecommendations = preparedResults(
+            sortedRecommendations.filter { !library.isWatched($0.key) },
+            hideWatched: true
+        )
+        recommendations = visibleRecommendations
+        seriesNext = preparedResults(nextItems.uniqued().filter { !library.isWatched($0.key) }, hideWatched: true)
+        
+        if let lastWatched = library.lastWatchedItem {
+            do {
+                moreLikeLastWatched = preparedResults(
+                    relatedResults(try await tmdb.recommendations(for: lastWatched.key), seed: lastWatched),
+                    hideWatched: true
+                )
+            } catch {
+                moreLikeLastWatched = []
+            }
+        } else {
+            moreLikeLastWatched = []
+        }
+        
+        var favouriteRecommendations: [MediaItem] = []
+        for favourite in [library.favouriteMovie, library.favouriteSeries].compactMap({ $0 }) {
+            do {
+                favouriteRecommendations.append(contentsOf: try await tmdb.recommendations(for: favourite.key))
+            } catch { }
+        }
+        
+        if let primaryFavouriteSeed = [library.favouriteMovie, library.favouriteSeries].compactMap({ $0 }).first {
+            moreLikeFavourite = preparedResults(
+                relatedResults(favouriteRecommendations, seed: primaryFavouriteSeed),
+                hideWatched: true
+            )
+        } else {
+            moreLikeFavourite = []
+        }
+        
+        let watchedGenreIDs = watchedHistory.flatMap(\.genreIDs)
+        if let topGenreID = watchedGenreIDs.frequencySorted().first {
+            fromTopGenre = visibleRecommendations
+                .filter { !$0.isUpcoming && $0.genreIDs.contains(topGenreID) }
+                .filter { settings.prioritiseEnglish ? (($0.originalLanguage ?? "en") == "en") : true }
+        } else {
+            fromTopGenre = []
+        }
+        
+        let watchedGenreSet = Set(watchedGenreIDs)
+        trySomethingNewRecommendations = preparedResults(
+            (popular + trending + newReleases)
+                .uniqued()
+                .filter { item in
+                    !item.isUpcoming &&
+                    !library.isWatched(item.key) &&
+                    watchedGenreSet.isDisjoint(with: Set(item.genreIDs)) &&
+                    (settings.prioritiseEnglish ? ((item.originalLanguage ?? "en") == "en") : true)
+                }
+                .sorted { lhs, rhs in
+                    if lhs.voteAverage != rhs.voteAverage {
+                        return lhs.voteAverage > rhs.voteAverage
+                    }
+                    
+                    return (lhs.releaseDateValue ?? .distantPast) > (rhs.releaseDateValue ?? .distantPast)
+                },
+            hideWatched: true
+        )
     }
-
+    
     func updateSearch() {
         searchTask?.cancel()
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -498,7 +611,7 @@ private final class VestigoModel: ObservableObject {
             searchPeopleResults = []
             return
         }
-
+        
         searchTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: 250_000_000)
             guard let self, !Task.isCancelled else { return }
@@ -518,14 +631,14 @@ private final class VestigoModel: ObservableObject {
                             .sortedBySearchRelevance(query),
                         hideWatched: self.settings.hideWatchedFromSearch
                     )
-
+                    
                     let enrichedResults: [MediaItem]
                     if !self.selectedRuntimeFilters.isEmpty {
                         enrichedResults = await self.enrichSearchResultsWithRuntimeIfNeeded(baseResults)
                     } else {
                         enrichedResults = baseResults
                     }
-
+                    
                     await MainActor.run {
                         self.searchResults = enrichedResults
                         self.searchPeopleResults = []
@@ -544,20 +657,20 @@ private final class VestigoModel: ObservableObject {
         guard !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         guard searchFilter != .people else { return }
         guard !selectedRuntimeFilters.isEmpty else { return }
-
+        
         updateSearch()
     }
     
     private func enrichSearchResultsWithRuntimeIfNeeded(_ items: [MediaItem]) async -> [MediaItem] {
         var enriched: [MediaItem] = []
         enriched.reserveCapacity(items.count)
-
+        
         for item in items {
             guard item.kind == .movie, item.runtime == nil else {
                 enriched.append(item)
                 continue
             }
-
+            
             do {
                 let detail = try await tmdb.detail(for: item)
                 detailsCache[item.key] = detail
@@ -566,20 +679,20 @@ private final class VestigoModel: ObservableObject {
                 enriched.append(item)
             }
         }
-
+        
         return enriched
     }
-
+    
     func loadGenre(_ genre: GenreDefinition, filter: MediaFilter = .both, sort: GenreSort = .tmdbRating) async {
         let cacheKey = genreCacheKey(genreID: genre.tmdbID, filter: filter, sort: sort)
-
+        
         do {
             let items = try await tmdb.discover(
                 genreID: genre.tmdbID,
                 filter: filter,
                 sort: sort
             )
-
+            
             await MainActor.run {
                 genreResults[cacheKey] = preparedResults(items, hideWatched: settings.hideWatchedFromSearch)
             }
@@ -589,11 +702,11 @@ private final class VestigoModel: ObservableObject {
             }
         }
     }
-
+    
     func genreCacheKey(genreID: Int, filter: MediaFilter = .both, sort: GenreSort = .tmdbRating) -> String {
         "\(genreID)-category-\(filter.rawValue)-\(sort.rawValue)"
     }
-
+    
     func loadDetail(_ item: MediaItem) async {
         if detailsCache[item.key] == nil {
             do { detailsCache[item.key] = try await tmdb.detail(for: item) } catch { }
@@ -606,7 +719,7 @@ private final class VestigoModel: ObservableObject {
             }
         }
     }
-
+    
     func loadPersonCredits(_ person: PersonSummary) async {
         guard personCreditsCache[person.id] == nil else { return }
         do {
@@ -615,27 +728,104 @@ private final class VestigoModel: ObservableObject {
             personCreditsCache[person.id] = []
         }
     }
-
+    
     func toggleWatchlist(_ item: MediaItem) {
         library.toggleWatchlist(item)
         saveLocalSoon()
     }
-
+    
     func toggleWatched(_ item: MediaItem) {
         let wasWatched = library.isWatched(item.key)
-
+        
+        library.items[item.key] = item
         library.toggleWatched(item)
-
+        library.recordWatchOrderChange(for: item)
+        
+        if library.isWatched(item.key) {
+            removeFromForYouRecommendations(item)
+        }
+        if library.isWatched(item.key) {
+            removeFromCollectionRecommendations(item)
+        }
+        
         let isNowWatched = library.isWatched(item.key)
-
+        
         if !wasWatched, isNowWatched, settings.removeItemsFromWatchlist {
             library.watchlist.remove(item.key)
         }
-
+        
         generateDynamicCollections(from: item)
         saveLocalSoon()
+        
+        if isNowWatched {
+            let cachedCollectionIDs = Array(collectionRecommendations.keys)
+            Task {
+                for collectionID in cachedCollectionIDs {
+                    await loadCollectionRecommendations(for: collectionID)
+                }
+            }
+        }
     }
-
+    
+    private func removeFromForYouRecommendations(_ item: MediaItem) {
+        recommendations.removeAll { $0.key == item.key }
+        moreLikeLastWatched.removeAll { $0.key == item.key }
+        moreLikeFavourite.removeAll { $0.key == item.key }
+        fromTopGenre.removeAll { $0.key == item.key }
+        trySomethingNewRecommendations.removeAll { $0.key == item.key }
+        seriesNext.removeAll { $0.key == item.key }
+    }
+    
+    private func removeFromCollectionRecommendations(_ item: MediaItem) {
+        for key in collectionRecommendations.keys {
+            collectionRecommendations[key]?.removeAll { $0.key == item.key }
+        }
+    }
+    
+    func loadCollectionRecommendations(for collectionID: UUID) async {
+        guard let collection = library.collections.first(where: { $0.id == collectionID }) else {
+            collectionRecommendations[collectionID] = []
+            return
+        }
+        
+        let collectionItems = collection.itemKeys.compactMap { library.items[$0] }
+        guard !collectionItems.isEmpty else {
+            collectionRecommendations[collectionID] = []
+            return
+        }
+        
+        let existingKeys = Set(collection.itemKeys)
+        var candidates: [MediaItem] = []
+        
+        for item in collectionItems.prefix(12) {
+            do {
+                candidates.append(contentsOf: try await tmdb.sameSeriesOrSimilar(for: item.key))
+                candidates.append(contentsOf: try await tmdb.recommendations(for: item.key))
+            } catch { }
+        }
+        
+        let collectionGenreIDs = Set(collectionItems.flatMap(\.genreIDs))
+        
+        let filtered = candidates
+            .uniqued()
+            .filter { item in
+                !item.isUpcoming &&
+                !existingKeys.contains(item.key) &&
+                !library.isWatched(item.key) &&
+                (settings.prioritiseEnglish ? ((item.originalLanguage ?? "en") == "en") : true) &&
+                (collectionGenreIDs.isEmpty || !collectionGenreIDs.isDisjoint(with: Set(item.genreIDs)))
+            }
+            .sorted { lhs, rhs in
+                if lhs.voteAverage != rhs.voteAverage {
+                    return lhs.voteAverage > rhs.voteAverage
+                }
+                
+                return (lhs.releaseDateValue ?? .distantPast) > (rhs.releaseDateValue ?? .distantPast)
+            }
+        
+        collectionRecommendations[collectionID] = preparedResults(filtered, hideWatched: true)
+    }
+    
     func setRating(_ rating: Double, for item: MediaItem) {
         guard library.isWatched(item.key) else { return }
         library.items[item.key] = item
@@ -643,6 +833,50 @@ private final class VestigoModel: ObservableObject {
         generateDynamicCollections(from: item)
         saveLocalSoon()
         Task { await loadSmartRecommendations() }
+    }
+    
+    func requestToggleFavourite(_ item: MediaItem) {
+        guard item.kind == .movie || item.kind == .tv else { return }
+        guard library.isWatched(item.key) else { return }
+
+        if library.isFavourite(item) {
+            library.clearFavourite(for: item.kind)
+            saveLocalSoon()
+            objectWillChange.send()
+            return
+        }
+
+        if let current = currentFavourite(for: item.kind), current.key != item.key {
+            if settings.warnBeforeReplacingFavourite {
+                pendingFavouriteReplacement = item
+                showFavouriteReplacementAlert = true
+                objectWillChange.send()
+                return
+            } else {
+                library.setFavourite(item)
+                saveLocalSoon()
+                objectWillChange.send()
+                return
+            }
+        }
+
+        library.setFavourite(item)
+        saveLocalSoon()
+        objectWillChange.send()
+    }
+
+    func confirmFavouriteReplacement() {
+        guard let item = pendingFavouriteReplacement else { return }
+
+        library.setFavourite(item)
+        pendingFavouriteReplacement = nil
+        showFavouriteReplacementAlert = false
+        saveLocalSoon()
+        objectWillChange.send()
+    }
+
+    func currentFavourite(for kind: MediaKind) -> MediaItem? {
+        library.favouriteItem(for: kind)
     }
 
     func toggleEpisode(show: MediaItem, season: Int, episode: Int) {
@@ -694,6 +928,7 @@ private final class VestigoModel: ObservableObject {
             do {
                 if let first = try await tmdb.search(query: title, filter: .both, includeAdult: !settings.hideAdultResults).first {
                     library.markWatched(first)
+                    library.recordWatchOrderChange(for: first)
                     generateDynamicCollections(from: first)
                 }
             } catch { }
@@ -769,7 +1004,7 @@ private final class VestigoModel: ObservableObject {
             if !homePath.isEmpty { homePath.removeLast() }
         case .search:
             if !searchPath.isEmpty { searchPath.removeLast() }
-        case .watchlist, .collections, .settings:
+        case .forYou, .watchlist, .collections:
             break
         }
     }
@@ -780,7 +1015,7 @@ private final class VestigoModel: ObservableObject {
             return homePath.isEmpty && selectedItem == nil && selectedPerson == nil
         case .search:
             return searchPath.isEmpty && selectedItem == nil && selectedPerson == nil
-        case .watchlist, .collections, .settings:
+        case .forYou, .watchlist, .collections:
             return selectedItem == nil && selectedPerson == nil
         }
     }
@@ -794,7 +1029,7 @@ private final class VestigoModel: ObservableObject {
             homePath.removeAll()
         case .search:
             searchPath.removeAll()
-        case .watchlist, .collections, .settings:
+        case .forYou, .watchlist, .collections:
             break
         }
     }
@@ -824,13 +1059,17 @@ private final class VestigoModel: ObservableObject {
             minimumTMDbRatingFilter = .one
             searchFilter = settings.defaultSearchFilter
 
+        case .forYou:
+            forYouResetToken = UUID()
+            Task { await loadSmartRecommendations() }
+
         case .watchlist:
+            sortOption = .tmdbRating
+            watchlistResetToken = UUID()
             objectWillChange.send()
 
         case .collections:
-            objectWillChange.send()
-
-        case .settings:
+            collectionsResetToken = UUID()
             objectWillChange.send()
         }
     }
@@ -871,13 +1110,116 @@ private final class VestigoModel: ObservableObject {
     }
 }
 
+private extension View {
+    func favouriteReplacementOverlay(model: VestigoModel) -> some View {
+        overlay {
+            if model.showFavouriteReplacementAlert,
+               let candidate = model.pendingFavouriteReplacement,
+               let current = model.currentFavourite(for: candidate.kind) {
+                FavouriteReplacementOverlay(
+                    current: current,
+                    candidate: candidate,
+                    cancel: {
+                        model.pendingFavouriteReplacement = nil
+                        model.showFavouriteReplacementAlert = false
+                    },
+                    replace: {
+                        model.confirmFavouriteReplacement()
+                    }
+                )
+            }
+        }
+    }
+}
+
+private struct FavouriteReplacementOverlay: View {
+    let current: MediaItem
+    let candidate: MediaItem
+    let cancel: () -> Void
+    let replace: () -> Void
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.34)
+                .ignoresSafeArea()
+
+            VStack(alignment: .leading, spacing: 14) {
+                Text("Replace favourite?")
+                    .font(.title3.bold())
+                    .foregroundStyle(.primary)
+
+                Text("You can only have one favourite \(candidate.kind.label.lowercased()). \(current.title) will no longer be marked favourite.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                HStack(spacing: 10) {
+                    Button("Cancel") {
+                        cancel()
+                    }
+                    .buttonStyle(.plain)
+                    .font(.headline.bold())
+                    .foregroundStyle(.primary)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 44)
+                    .liquidGlass(cornerRadius: 22)
+
+                    Button("Replace") {
+                        replace()
+                    }
+                    .buttonStyle(.plain)
+                    .font(.headline.bold())
+                    .foregroundStyle(.red)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 44)
+                    .liquidGlass(cornerRadius: 22)
+                }
+            }
+            .padding(18)
+            .frame(maxWidth: 330)
+            .background {
+                RoundedRectangle(cornerRadius: 28, style: .continuous)
+                    .fill(.black.opacity(0.42))
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 28, style: .continuous))
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: 28, style: .continuous)
+                    .strokeBorder(.white.opacity(0.18), lineWidth: 1.1)
+            }
+            .padding(.horizontal, 26)
+        }
+        .transition(.opacity.combined(with: .scale(scale: 0.97)))
+        .zIndex(999)
+    }
+}
+
+
 // MARK: - Home
 
 private struct HomeView: View {
     @ObservedObject var model: VestigoModel
-
+    @Environment(\.openSettingsSheet) private var openSettingsSheet
+    
     var body: some View {
-        BaseScreen(title: "Vestigo", filter: $model.mediaFilter, settings: model.settings) {
+        BaseScreen(
+            title: "Vestigo",
+            filter: $model.mediaFilter,
+            settings: model.settings,
+            headerAccessory: AnyView(
+                Button {
+                    openSettingsSheet()
+                } label: {
+                    Image(systemName: "gearshape.fill")
+                        .font(.system(size: 17, weight: .bold))
+                        .foregroundStyle(.primary)
+                        .frame(width: 42, height: 42)
+                        .liquidGlass(cornerRadius: 21)
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Settings")
+            )
+        ) {
             VStack(spacing: 22) {
                 if let error = model.errorText {
                     StatusBubble(title: "Load error", text: error)
@@ -890,12 +1232,6 @@ private struct HomeView: View {
                 if !model.searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     EmptyView()
                 } else {
-                    if !model.recommendations.isEmpty {
-                        MediaSection(title: "Recommended for you", items: model.recommendations, hideWatchedForUpcoming: false, model: model) {
-                            model.homePath.append(.recommendations)
-                        }
-                    }
-                    
                     MediaSection(title: "Trending now", items: model.trending, hideWatchedForUpcoming: false, model: model) {
                         model.homePath.append(.trending)
                     }
@@ -926,7 +1262,6 @@ private struct FullSectionView: View {
 
     var items: [MediaItem] {
         switch route {
-        case .recommendations: return model.recommendations
         case .trending: return model.trending
         case .popular: return model.popular
         case .newReleases: return model.newReleases
@@ -1084,24 +1419,16 @@ private struct SearchFilterPills: View {
     let onChange: () -> Void
 
     var body: some View {
-        HStack(spacing: 0) {
+        Picker("Search type", selection: $filter) {
             ForEach(SearchFilter.allCases) { item in
-                Button {
-                    filter = item
-                    onChange()
-                } label: {
-                    Text(item.title)
-                        .font(.caption.bold())
-                        .foregroundStyle(.primary)
-                        .frame(maxWidth: .infinity)
-                        .frame(height: 30)
-                        .selectedGlassCapsule(isSelected: filter == item)
-                }
-                .buttonStyle(.plain)
+                Text(item.title).tag(item)
             }
         }
-        .padding(3)
+        .pickerStyle(.segmented)
         .liquidGlass(cornerRadius: 18)
+        .onChange(of: filter) { _, _ in
+            onChange()
+        }
     }
 }
 
@@ -1110,25 +1437,16 @@ private struct GenreSortPicker: View {
     let onChange: () -> Void
 
     var body: some View {
-        HStack(spacing: 0) {
+        Picker("Sort", selection: $sort) {
             ForEach(GenreSort.allCases) { item in
-                Button {
-                    sort = item
-                    onChange()
-                } label: {
-                    Text(item.title)
-                        .font(.caption.bold())
-                        .foregroundStyle(.primary)
-                        .frame(maxWidth: .infinity)
-                        .frame(height: 30)
-                        .selectedGlassCapsule(isSelected: sort == item)
-                }
-                .buttonStyle(.plain)
-                .focusable(false)
+                Text(item.title).tag(item)
             }
         }
-        .padding(3)
+        .pickerStyle(.segmented)
         .liquidGlass(cornerRadius: 18)
+        .onChange(of: sort) { _, _ in
+            onChange()
+        }
     }
 }
 
@@ -1459,6 +1777,165 @@ private struct GenreResultsView: View {
     }
 }
 
+
+// MARK: - For You
+
+private struct ForYouView: View {
+    @ObservedObject var model: VestigoModel
+    @State private var forYouFilter: MediaFilter = .both
+    @State private var forYouPath: [ForYouSection] = []
+
+    private var recentWatchedItem: MediaItem? {
+        model.library.lastWatchedItem
+    }
+
+    private var favouriteItem: MediaItem? {
+        switch forYouFilter {
+        case .movie:
+            return model.library.favouriteMovie
+        case .tv:
+            return model.library.favouriteSeries
+        case .both:
+            return model.library.favouriteMovie ?? model.library.favouriteSeries
+        }
+    }
+
+    private var topGenreTitle: String {
+        let watchedGenreIDs = filteredForYou(model.library.watchedItems).flatMap(\.genreIDs)
+        guard let topGenreID = watchedGenreIDs.frequencySorted().first else { return "your taste" }
+        return GenreDefinition.all.first(where: { $0.tmdbID == topGenreID })?.name ?? "your taste"
+    }
+
+    private var watchlistPicks: [MediaItem] {
+        filteredForYou(model.library.watchlistItems)
+            .sorted(using: .tmdbRating, ratings: model.library.ratings)
+    }
+
+    // trySomethingNew computed property removed
+
+    var body: some View {
+        NavigationStack(path: $forYouPath) {
+            BaseScreen(title: "For You", filter: $forYouFilter, settings: model.settings) {
+            VStack(spacing: 22) {
+                FilterPills(filter: $forYouFilter, options: [.movie, .tv, .both]) {}
+
+                if model.library.watchedItems.count < 3 {
+                    StatusBubble(
+                        title: "Not enough watch history yet",
+                        text: "Mark at least 3 movies or series as watched to improve personalized recommendations. Ratings make this page more useful."
+                    )
+                }
+
+                if let recentWatchedItem, !filteredForYou(model.moreLikeLastWatched).isEmpty {
+                    let sectionTitle = "More like \(recentWatchedItem.title)"
+                    let sectionItems = filteredForYou(model.moreLikeLastWatched)
+
+                    MediaSection(title: sectionTitle, items: sectionItems, hideWatchedForUpcoming: false, model: model) {
+                        forYouPath.append(ForYouSection(title: sectionTitle, items: sectionItems))
+                    }
+                }
+
+                if let favouriteItem, !filteredForYou(model.moreLikeFavourite).isEmpty {
+                    let sectionTitle = "More like your favourite \(favouriteItem.kind.label.lowercased()): \(favouriteItem.title)"
+                    let sectionItems = filteredForYou(model.moreLikeFavourite)
+
+                    MediaSection(title: sectionTitle, items: sectionItems, hideWatchedForUpcoming: false, model: model) {
+                        forYouPath.append(ForYouSection(title: sectionTitle, items: sectionItems))
+                    }
+                }
+
+                if !watchlistPicks.isEmpty {
+                    let sectionTitle = "From your watchlist"
+                    let sectionItems = watchlistPicks
+
+                    MediaSection(title: sectionTitle, items: sectionItems, hideWatchedForUpcoming: false, model: model) {
+                        forYouPath.append(ForYouSection(title: sectionTitle, items: sectionItems))
+                    }
+                }
+
+                if !filteredForYou(model.seriesNext).isEmpty {
+                    let sectionTitle = "Continue with related series"
+                    let sectionItems = filteredForYou(model.seriesNext)
+
+                    MediaSection(title: sectionTitle, items: sectionItems, hideWatchedForUpcoming: false, model: model) {
+                        forYouPath.append(ForYouSection(title: sectionTitle, items: sectionItems))
+                    }
+                }
+
+                if !filteredForYou(model.fromTopGenre).isEmpty {
+                    let sectionTitle = "More from \(topGenreTitle)"
+                    let sectionItems = filteredForYou(model.fromTopGenre)
+
+                    MediaSection(title: sectionTitle, items: sectionItems, hideWatchedForUpcoming: false, model: model) {
+                        forYouPath.append(ForYouSection(title: sectionTitle, items: sectionItems))
+                    }
+                }
+
+                if !filteredForYou(model.trySomethingNewRecommendations).isEmpty {
+                    let sectionTitle = "Try something new"
+                    let sectionItems = filteredForYou(model.trySomethingNewRecommendations)
+
+                    MediaSection(title: sectionTitle, items: sectionItems, hideWatchedForUpcoming: false, model: model) {
+                        forYouPath.append(ForYouSection(title: sectionTitle, items: sectionItems))
+                    }
+                }
+            }
+            .overlay(alignment: .bottom) {
+                ForYouPickButton()
+                    .padding(.bottom, 10)
+            }
+        }
+            .navigationDestination(for: ForYouSection.self) { section in
+                FullMediaListView(title: section.title, items: section.items, model: model)
+            }
+            }
+            .task {
+                await model.loadSmartRecommendations()
+            }
+            .onChange(of: model.forYouResetToken) { _, _ in
+                forYouFilter = .both
+                forYouPath.removeAll()
+            }
+    }
+
+    private func filteredForYou(_ items: [MediaItem]) -> [MediaItem] {
+        let unwatched = items.filter { !model.library.isWatched($0.key) }
+
+        switch forYouFilter {
+        case .movie:
+            return unwatched.filter { $0.kind == .movie }
+        case .tv:
+            return unwatched.filter { $0.kind == .tv }
+        case .both:
+            return unwatched
+        }
+    }
+}
+
+private struct ForYouPickButton: View {
+    var body: some View {
+        Button {
+            // Program later.
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "sparkles")
+                    .font(.system(size: 16, weight: .bold))
+
+                Text("Pick for me")
+                    .font(.subheadline.bold())
+            }
+            .foregroundStyle(.primary)
+            .padding(.horizontal, 18)
+            .frame(height: 48)
+            .liquidGlass(cornerRadius: 24)
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Pick for me")
+    }
+}
+
+
 // MARK: - Watchlist
 
 private struct WatchlistView: View {
@@ -1501,6 +1978,9 @@ private struct WatchlistView: View {
                 }
             }
         }
+        .onChange(of: model.watchlistResetToken) { _, _ in
+            model.sortOption = .tmdbRating
+        }
     }
 }
 
@@ -1509,38 +1989,74 @@ private struct WatchlistView: View {
 private struct CollectionsView: View {
     @ObservedObject var model: VestigoModel
     @State private var newCollectionName = ""
-    @State private var selectedCollection: MediaCollection?
+    @State private var collectionPath: [UUID] = []
 
     var body: some View {
-        BaseScreen(title: "Collections", filter: .constant(.both), settings: model.settings) {
-            VStack(spacing: 16) {
-                HStack(spacing: 10) {
-                    TextField("New collection", text: $newCollectionName)
-                        .textFieldStyle(.plain)
-                        .padding(.horizontal, 14)
-                        .frame(height: 44)
-                        .liquidGlass(cornerRadius: 18)
-                    Button("Create") {
-                        model.createCollection(named: newCollectionName)
-                        newCollectionName = ""
-                    }
-                    .buttonStyle(.plain)
-                    .font(.subheadline.bold())
-                    .foregroundStyle(.primary)
-                    .frame(width: 86, height: 44)
-                    .liquidGlass(cornerRadius: 18)
-                }
+        NavigationStack(path: $collectionPath) {
+            BaseScreen(title: "Collections", filter: .constant(.both), settings: model.settings) {
+                VStack(spacing: 16) {
+                    HStack(spacing: 10) {
+                        TextField("New collection", text: $newCollectionName)
+                            .textFieldStyle(.plain)
+                            .padding(.horizontal, 14)
+                            .frame(height: 44)
+                            .liquidGlass(cornerRadius: 18)
 
-                ForEach(model.library.collections) { collection in
-                    Button { selectedCollection = collection } label: {
-                        CollectionRow(collection: collection, count: collection.itemKeys.count)
+                        Button("Create") {
+                            model.createCollection(named: newCollectionName)
+                            newCollectionName = ""
+                        }
+                        .buttonStyle(.plain)
+                        .font(.subheadline.bold())
+                        .foregroundStyle(.primary)
+                        .frame(width: 86, height: 44)
+                        .liquidGlass(cornerRadius: 18)
                     }
-                    .buttonStyle(.plain)
+
+                    let favourites = [model.library.favouriteMovie, model.library.favouriteSeries].compactMap { $0 }
+
+                    if !favourites.isEmpty {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text("Favourites")
+                                .sectionTitle()
+
+                            MediaGridOrList(items: favourites, hideWatchedForUpcoming: false, model: model)
+                        }
+                    }
+
+                    ForEach(model.library.collections) { collection in
+                        Button {
+                            collectionPath.append(collection.id)
+                        } label: {
+                            CollectionRow(collection: collection, count: collection.itemKeys.count)
+                        }
+                        .buttonStyle(.plain)
+                    }
                 }
             }
+            .navigationDestination(for: UUID.self) { collectionID in
+                CollectionDetailView(collectionID: collectionID, model: model)
+            }
         }
-        .sheet(item: $selectedCollection) { collection in
-            CollectionDetailView(collectionID: collection.id, model: model)
+        .onChange(of: model.collectionsResetToken) { _, _ in
+            collectionPath.removeAll()
+        }
+    }
+}
+
+// CollectionDetailMode enum for CollectionDetailView
+private enum CollectionDetailMode: String, CaseIterable, Identifiable, Hashable {
+    case myList
+    case recommended
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .myList:
+            return "My list"
+        case .recommended:
+            return "Recommended"
         }
     }
 }
@@ -1549,6 +2065,7 @@ private struct CollectionDetailView: View {
     let collectionID: UUID
     @ObservedObject var model: VestigoModel
     @State private var sort: SortOption = .tmdbRating
+    @State private var mode: CollectionDetailMode = .myList
 
     private var collection: MediaCollection? {
         model.library.collections.first { $0.id == collectionID }
@@ -1559,25 +2076,92 @@ private struct CollectionDetailView: View {
         return collection.itemKeys.compactMap { model.library.items[$0] }.sorted(using: sort, ratings: model.library.ratings)
     }
 
+    private var recommendedItems: [MediaItem] {
+        guard let collection else { return [] }
+        let existingKeys = Set(collection.itemKeys)
+
+        return (model.collectionRecommendations[collectionID] ?? [])
+            .filter { item in
+                !item.isUpcoming && !existingKeys.contains(item.key) && !model.library.isWatched(item.key)
+            }
+            .sorted(using: sort, ratings: model.library.ratings)
+    }
+
     var body: some View {
-        NavigationStack {
-            ZStack {
-                AppBackground(settings: model.settings)
-                ScrollView {
-                    VStack(spacing: 14) {
-                        SortPicker(sort: $sort, includeMyRating: true)
-                        MediaGridOrList(items: items, hideWatchedForUpcoming: false, model: model, swipeContext: .collection(collectionID))
-                    }
-                    .padding(16)
-                    .padding(.bottom, 40)
+        BaseScreen(title: collection?.name ?? "Collection", filter: .constant(.both), settings: model.settings) {
+            VStack(spacing: 14) {
+                SortPicker(sort: $sort, includeMyRating: true)
+
+                CollectionDetailModePicker(mode: $mode)
+
+                if mode == .myList {
+                    MediaGridOrList(items: items, hideWatchedForUpcoming: false, model: model, swipeContext: .collection(collectionID))
+                } else if recommendedItems.isEmpty {
+                    StatusBubble(
+                        title: "No collection recommendations",
+                        text: "Recommendations for this collection will appear here when related unwatched movies or series are found."
+                    )
+                } else {
+                    MediaGridOrList(items: recommendedItems, hideWatchedForUpcoming: false, model: model)
                 }
             }
-            .navigationTitle(collection?.name ?? "Collection")
+        }
+        .task(id: collectionID) {
+            await model.loadCollectionRecommendations(for: collectionID)
+        }
+        .onChange(of: mode) { _, newValue in
+            if newValue == .recommended {
+                Task { await model.loadCollectionRecommendations(for: collectionID) }
+            }
+        }
+        .onChange(of: model.library.watched) { _, _ in
+            if mode == .recommended {
+                Task { await model.loadCollectionRecommendations(for: collectionID) }
+            }
         }
     }
 }
 
+private struct CollectionDetailModePicker: View {
+    @Binding var mode: CollectionDetailMode
+
+    var body: some View {
+        Picker("Collection view", selection: $mode) {
+            Text(CollectionDetailMode.myList.title).tag(CollectionDetailMode.myList)
+            Text(CollectionDetailMode.recommended.title).tag(CollectionDetailMode.recommended)
+        }
+        .pickerStyle(.segmented)
+        .liquidGlass(cornerRadius: 18)
+    }
+}
+
 // MARK: - Settings
+
+private struct SettingsSheetSurface: View {
+    @ObservedObject var model: VestigoModel
+
+    var body: some View {
+        SettingsView(model: model)
+            .overlay(alignment: .top) {
+                Capsule()
+                    .fill(.white.opacity(0.50))
+                    .frame(width: 48, height: 5)
+                    .padding(.top, 12)
+                    .allowsHitTesting(false)
+            }
+            .background {
+                RoundedRectangle(cornerRadius: 54, style: .continuous)
+                    .fill(.black.opacity(0.38))
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 54, style: .continuous))
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: 54, style: .continuous)
+                    .strokeBorder(.white.opacity(0.18), lineWidth: 1.2)
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 54, style: .continuous))
+            .ignoresSafeArea(edges: .bottom)
+    }
+}
 
 private struct SettingsView: View {
     @ObservedObject var model: VestigoModel
@@ -1586,7 +2170,7 @@ private struct SettingsView: View {
     @State private var importText = ""
 
     var body: some View {
-        BaseScreen(title: "Settings", filter: .constant(.both), settings: model.settings) {
+        BaseScreen(title: "Settings", filter: .constant(.both), settings: model.settings, contentTopPadding: 18) {
             VStack(alignment: .leading, spacing: 18) {
                 Text("Display")
                     .sectionTitle()
@@ -1742,6 +2326,17 @@ private struct SettingsView: View {
                             .tint(model.settings.accentColor)
 
                         Text("When this is on, marking a saved item as watched removes it from Watchlist. When it is off, watched saved items stay in Watchlist under the Watched section.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .settingBubble()
+                    
+                    VStack(alignment: .leading, spacing: 6) {
+                        Toggle("Warn before replacing favourite", isOn: $model.settings.warnBeforeReplacingFavourite)
+                            .font(.headline.bold())
+                            .tint(model.settings.accentColor)
+
+                        Text("When this is on, replacing your favourite movie or favourite series asks for confirmation first.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -1950,6 +2545,7 @@ private struct DetailView: View {
 
     var body: some View {
         detailSheetSurface
+            .favouriteReplacementOverlay(model: model)
             .presentationBackground(.clear)
             .presentationCornerRadius(54)
             .task { await model.loadDetail(item) }
@@ -1975,7 +2571,7 @@ private struct DetailView: View {
             detailScroll
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .sheetLiquidGlass(cornerRadius: 54)
+        .sheetLiquidGlass(cornerRadius: 48)
         .ignoresSafeArea(edges: .bottom)
     }
 
@@ -1984,6 +2580,7 @@ private struct DetailView: View {
             VStack(alignment: .leading, spacing: 18) {
                 headerSection
                 ratingSection
+                detailButtons
                 overviewSection
                 actionSection
                 castSection
@@ -2002,14 +2599,13 @@ private struct DetailView: View {
 
     private var headerSection: some View {
         HStack(alignment: .top, spacing: 16) {
-            PosterView(item: item, width: 126, height: 188)
+            PosterView(item: item, width: 126, height: 188, isFavourite: model.library.isFavourite(item))
             VStack(alignment: .leading, spacing: 10) {
                 titleText
                 metadataText
                 ageRatingText
                 dateText
                 primaryCrewText
-                detailButtons
             }
         }
     }
@@ -2056,16 +2652,32 @@ private struct DetailView: View {
     }
 
     private var detailButtons: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            DetailActionButton(title: model.library.isInWatchlist(item.key) ? "Saved" : "Save", systemName: model.library.isInWatchlist(item.key) ? "bookmark.fill" : "bookmark") {
+        HStack(spacing: 10) {
+            DetailRowButton(
+                title: model.library.isInWatchlist(item.key) ? "Saved" : "Save",
+                systemName: model.library.isInWatchlist(item.key) ? "bookmark.fill" : "bookmark"
+            ) {
                 model.toggleWatchlist(item)
             }
+
             if !item.isUpcoming {
-                DetailActionButton(title: model.library.isWatched(item.key) ? "Watched" : "Mark watched", systemName: model.library.isWatched(item.key) ? "checkmark.circle.fill" : "checkmark.circle") {
+                DetailRowButton(
+                    title: model.library.isWatched(item.key) ? "Watched" : "Watch",
+                    systemName: model.library.isWatched(item.key) ? "checkmark.circle.fill" : "checkmark.circle"
+                ) {
                     model.toggleWatched(item)
                 }
             }
+
+            DetailRowButton(
+                title: "Favourite",
+                systemName: model.library.isFavourite(item) ? "star.fill" : "star",
+                isEnabled: model.library.isWatched(item.key)
+            ) {
+                model.requestToggleFavourite(item)
+            }
         }
+        .frame(maxWidth: .infinity)
     }
 
     @ViewBuilder private var ratingSection: some View {
@@ -2085,23 +2697,43 @@ private struct DetailView: View {
 
     private var actionSection: some View {
         HStack(spacing: 10) {
-            Button("Cast list") { showCast.toggle() }
-                .buttonStyle(.plain)
-                .font(.subheadline.bold())
-                .foregroundStyle(.primary)
-                .frame(maxWidth: .infinity)
-                .frame(height: 42)
-                .liquidGlass(cornerRadius: 18)
+            DetailRowButton(title: "Cast list", systemName: "person.2.fill") {
+                showCast.toggle()
+            }
 
-            Button("Add to collection") { showCollections = true }
-                .buttonStyle(.plain)
-                .font(.subheadline.bold())
-                .foregroundStyle(.primary)
-                .frame(maxWidth: .infinity)
-                .frame(height: 42)
-                .liquidGlass(cornerRadius: 18)
+            DetailRowButton(title: "Add to collection", systemName: "folder.badge.plus") {
+                showCollections = true
+            }
         }
+        .frame(maxWidth: .infinity)
     }
+private struct DetailRowButton: View {
+    let title: String
+    let systemName: String
+    var isEnabled = true
+    let action: () -> Void
+
+    var body: some View {
+        Button {
+            if isEnabled {
+                action()
+            }
+        } label: {
+            Label(title, systemImage: systemName)
+                .font(.subheadline.bold())
+                .lineLimit(1)
+                .minimumScaleFactor(0.68)
+                .foregroundStyle(isEnabled ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary.opacity(0.55)))
+                .frame(maxWidth: .infinity)
+                .frame(height: 44)
+                .liquidGlass(cornerRadius: 22)
+                .opacity(isEnabled ? 1.0 : 0.42)
+                .contentShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .disabled(!isEnabled)
+    }
+}
 
     @ViewBuilder private var castSection: some View {
         if showCast {
@@ -2153,6 +2785,10 @@ private struct DetailView: View {
         if item.kind == .movie, let runtime = detail?.runtime, runtime > 0 {
             parts.append(formatRuntime(runtime))
         }
+        
+        if let originalLanguage = item.originalLanguage, !originalLanguage.isEmpty {
+            parts.append("Original language: \(originalLanguage.uppercased())")
+        }
 
         parts.append("TMDb \(rating)")
         return parts.joined(separator: " • ")
@@ -2174,6 +2810,7 @@ private struct DetailView: View {
         selectedNestedItem = item
     }
 }
+
 
 private struct CastCarousel: View {
     let people: [PersonSummary]
@@ -2420,7 +3057,7 @@ private struct MediaListRow: View {
         Button {
             openItemFromList()
         } label: {
-            PosterView(item: item, width: 72, height: 104)
+            PosterView(item: item, width: 72, height: 104, isFavourite: model.library.isFavourite(item))
         }
         .buttonStyle(.plain)
     }
@@ -2783,8 +3420,26 @@ private struct AddToCollectionSheet: View {
 private struct BaseScreen<Content: View>: View {
     let title: String
     @Binding var filter: MediaFilter
-    var settings: AppSettings = AppSettings()
+    let settings: AppSettings
+    let headerAccessory: AnyView
+    let contentTopPadding: CGFloat
     @ViewBuilder let content: Content
+
+    init(
+        title: String,
+        filter: Binding<MediaFilter>,
+        settings: AppSettings,
+        headerAccessory: AnyView = AnyView(EmptyView()),
+        contentTopPadding: CGFloat = 0,
+        @ViewBuilder content: () -> Content
+    ) {
+        self.title = title
+        self._filter = filter
+        self.settings = settings
+        self.headerAccessory = headerAccessory
+        self.contentTopPadding = contentTopPadding
+        self.content = content()
+    }
 
     var body: some View {
         ZStack {
@@ -2793,14 +3448,18 @@ private struct BaseScreen<Content: View>: View {
             
             ScrollView(.vertical, showsIndicators: false) {
                 VStack(alignment: .leading, spacing: 18) {
-                    HStack(alignment: .center) {
+                    HStack(alignment: .center, spacing: 12) {
                         Text(title)
-                            .font(.system(size: 34, weight: .black, design: .rounded))
-                        Spacer(minLength: 0)
+                            .font(.largeTitle.bold())
+                            .foregroundStyle(.primary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+
+                        headerAccessory
                     }
                     
                     content
                 }
+                .padding(.top, contentTopPadding)
                 .padding(16)
                 .padding(.bottom, 94)
                 .containerRelativeFrame(.horizontal, alignment: .leading)
@@ -2826,13 +3485,20 @@ private struct MediaSection: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Button(action: openFull) {
-                HStack {
-                    Text(title).sectionTitle()
-                    Spacer()
+            Button {
+                openFull()
+            } label: {
+                HStack(spacing: 8) {
+                    Text(title)
+                        .sectionTitle()
+
+                    Spacer(minLength: 0)
+
                     Image(systemName: "chevron.right")
                         .font(.caption.bold())
+                        .foregroundStyle(.secondary)
                 }
+                .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             
@@ -2932,6 +3598,17 @@ private struct MediaItemContextMenuActions: View {
                 )
             }
         }
+        
+        if model.library.isWatched(item.key) {
+            Button {
+                model.requestToggleFavourite(item)
+            } label: {
+                Label(
+                    model.library.isFavourite(item) ? "Remove favourite" : "Mark favourite",
+                    systemImage: model.library.isFavourite(item) ? "star.slash" : "star"
+                )
+            }
+        }
 
         if case .collection(let id) = swipeContext {
             Button(role: .destructive) {
@@ -2954,7 +3631,7 @@ private struct MediaTile: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Button { openTileItem() } label: {
-                PosterView(item: item, width: 148, height: 214)
+                PosterView(item: item, width: 148, height: 214, isFavourite: model.library.isFavourite(item))
             }
             .buttonStyle(.plain)
 
@@ -3010,7 +3687,8 @@ private struct PosterView: View {
     let item: MediaItem
     let width: CGFloat
     let height: CGFloat
-
+    var isFavourite = false
+    
     var body: some View {
         ZStack {
             RoundedRectangle(cornerRadius: width * 0.18, style: .continuous)
@@ -3026,6 +3704,17 @@ private struct PosterView: View {
                 }
             }
             LinearGradient(colors: [.clear, .black.opacity(0.42)], startPoint: .center, endPoint: .bottom)
+
+            if isFavourite {
+                Image(systemName: "star.fill")
+                    .font(.system(size: max(11, width * 0.095), weight: .black))
+                    .foregroundStyle(.yellow)
+                    .padding(max(5, width * 0.045))
+                    .background(.black.opacity(0.64), in: Circle())
+                    .padding(max(5, width * 0.045))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+                    .zIndex(20)
+            }
         }
         .frame(width: width, height: height)
         .clipShape(RoundedRectangle(cornerRadius: width * 0.18, style: .continuous))
@@ -3394,39 +4083,35 @@ private enum SearchDateFilter: String, CaseIterable, Identifiable {
 
 private struct FilterPills: View {
     @Binding var filter: MediaFilter
-    var options: [MediaFilter] = MediaFilter.allCases
+    let options: [MediaFilter]
     let onChange: () -> Void
 
     var body: some View {
-        HStack(spacing: 0) {
+        Picker("Filter", selection: $filter) {
             ForEach(options) { item in
-                Button {
-                    filter = item
-                    onChange()
-                } label: {
-                    Text(item.title)
-                        .font(.caption.bold())
-                        .foregroundStyle(.primary)
-                        .frame(maxWidth: .infinity)
-                        .frame(height: 30)
-                        .selectedGlassCapsule(isSelected: filter == item)
-                }
-                .buttonStyle(.plain)
+                Text(item.title).tag(item)
             }
         }
-        .padding(3)
+        .pickerStyle(.segmented)
         .liquidGlass(cornerRadius: 18)
+        .onChange(of: filter) { _, _ in
+            onChange()
+        }
     }
 }
 
 private struct SortPicker: View {
     @Binding var sort: SortOption
     let includeMyRating: Bool
-
+    
     var body: some View {
         Picker("Sort", selection: $sort) {
             Text("Released").tag(SortOption.releaseDate)
-            if includeMyRating { Text("My rating").tag(SortOption.myRating) }
+            
+            if includeMyRating {
+                Text("My rating").tag(SortOption.myRating)
+            }
+            
             Text("TMDb").tag(SortOption.tmdbRating)
         }
         .pickerStyle(.segmented)
@@ -4291,10 +4976,12 @@ private struct TMDbService {
 
     func recommendations(for key: MediaKey) async throws -> [MediaItem] {
         try await fetchList(path: "/\(key.kind.tmdbPath)/\(key.id)/recommendations", query: [])
+            .filter { !$0.isUpcoming }
     }
 
     func sameSeriesOrSimilar(for key: MediaKey) async throws -> [MediaItem] {
         try await fetchList(path: "/\(key.kind.tmdbPath)/\(key.id)/similar", query: [])
+            .filter { !$0.isUpcoming }
     }
 
     func detail(for item: MediaItem) async throws -> MediaDetail {
@@ -4521,6 +5208,11 @@ private struct TMDbMediaDTO: Decodable {
     }
 }
 
+private struct TMDbCollectionReference: Codable, Hashable {
+    let id: Int?
+    let name: String?
+}
+
 private struct TMDbDetailResponse: Decodable {
     let runtime: Int?
     let numberOfSeasons: Int?
@@ -4535,6 +5227,7 @@ private struct TMDbDetailResponse: Decodable {
     let recommendations: TMDbListResponse?
     let releaseDates: TMDbReleaseDatesResponse?
     let contentRatings: TMDbContentRatingsResponse?
+    let belongsToCollection: TMDbCollectionReference?
 
     enum CodingKeys: String, CodingKey {
         case runtime
@@ -4550,6 +5243,7 @@ private struct TMDbDetailResponse: Decodable {
         case recommendations
         case releaseDates = "release_dates"
         case contentRatings = "content_ratings"
+        case belongsToCollection = "belongs_to_collection"
     }
 
     init(
@@ -4565,7 +5259,8 @@ private struct TMDbDetailResponse: Decodable {
         similar: TMDbListResponse?,
         recommendations: TMDbListResponse?,
         releaseDates: TMDbReleaseDatesResponse?,
-        contentRatings: TMDbContentRatingsResponse?
+        contentRatings: TMDbContentRatingsResponse?,
+        belongsToCollection: TMDbCollectionReference?
     ) {
         self.runtime = runtime
         self.numberOfSeasons = numberOfSeasons
@@ -4580,6 +5275,7 @@ private struct TMDbDetailResponse: Decodable {
         self.recommendations = recommendations
         self.releaseDates = releaseDates
         self.contentRatings = contentRatings
+        self.belongsToCollection = belongsToCollection
     }
 
     func replacingSeasons(_ hydratedSeasons: [SeasonDTO]) -> TMDbDetailResponse {
@@ -4596,7 +5292,8 @@ private struct TMDbDetailResponse: Decodable {
             similar: similar,
             recommendations: recommendations,
             releaseDates: releaseDates,
-            contentRatings: contentRatings
+            contentRatings: contentRatings,
+            belongsToCollection: belongsToCollection
         )
     }
     
@@ -5303,10 +6000,12 @@ private struct MediaDetail: Hashable {
     let status: String?
     let runtime: Int?
     let ageRating: String?
+    let tmdbCollectionID: Int?
 
     init(response: TMDbDetailResponse, fallback: MediaItem) {
         let crewList: [PersonDTO] = response.credits?.crew ?? []
         let castList: [PersonDTO] = response.credits?.cast ?? []
+        tmdbCollectionID = response.belongsToCollection?.id
         firstAirDate = response.firstAirDate
         lastAirDate = response.lastAirDate
         status = response.status
@@ -5377,11 +6076,14 @@ private struct MediaDetail: Hashable {
 
         let recommendationResults: [TMDbMediaDTO] = response.recommendations?.results ?? []
         let similarResults: [TMDbMediaDTO] = response.similar?.results ?? []
-        let combinedResults: [TMDbMediaDTO] = recommendationResults + similarResults
+        let combinedResults: [TMDbMediaDTO] = similarResults + recommendationResults
         let mappedSimilar: [MediaItem] = combinedResults.map { dto in
             MediaItem(dto)
         }
-        similar = mappedSimilar.uniqued()
+        similar = mappedSimilar
+            .uniqued()
+            .filter { !$0.isUpcoming }
+            .sortedBySimilarity(to: fallback)
     }
     
     var yearRangeText: String {
@@ -5490,6 +6192,9 @@ private struct UserLibrary: Codable {
     var watchlist: Set<MediaKey> = []
     var watched: Set<MediaKey> = []
     var ratings: [MediaKey: Double] = [:]
+    var favouriteMovieKey: MediaKey?
+    var favouriteSeriesKey: MediaKey?
+    var watchedOrder: [MediaKey] = []
     var collections: [MediaCollection] = []
     var watchedEpisodes: Set<EpisodeKey> = []
 
@@ -5527,6 +6232,81 @@ private struct UserLibrary: Codable {
     func isEpisodeWatched(showKey: MediaKey, season: Int, episode: Int) -> Bool {
         watchedEpisodes.contains(EpisodeKey(show: showKey, season: season, episode: episode))
     }
+    
+    var favouriteMovie: MediaItem? {
+        guard let favouriteMovieKey else { return nil }
+        return items[favouriteMovieKey]
+    }
+
+    var favouriteSeries: MediaItem? {
+        guard let favouriteSeriesKey else { return nil }
+        return items[favouriteSeriesKey]
+    }
+
+    var lastWatchedItem: MediaItem? {
+        for key in watchedOrder.reversed() {
+            if watched.contains(key), let item = items[key] {
+                return item
+            }
+        }
+
+        return watchedItems.last
+    }
+
+    func favouriteItem(for kind: MediaKind) -> MediaItem? {
+        switch kind {
+        case .movie:
+            return favouriteMovie
+        case .tv:
+            return favouriteSeries
+        case .person:
+            return nil
+        }
+    }
+
+    func isFavourite(_ item: MediaItem) -> Bool {
+        switch item.kind {
+        case .movie:
+            return favouriteMovieKey == item.key
+        case .tv:
+            return favouriteSeriesKey == item.key
+        case .person:
+            return false
+        }
+    }
+
+    mutating func setFavourite(_ item: MediaItem) {
+        items[item.key] = item
+
+        switch item.kind {
+        case .movie:
+            favouriteMovieKey = item.key
+        case .tv:
+            favouriteSeriesKey = item.key
+        case .person:
+            break
+        }
+    }
+
+    mutating func clearFavourite(for kind: MediaKind) {
+        switch kind {
+        case .movie:
+            favouriteMovieKey = nil
+        case .tv:
+            favouriteSeriesKey = nil
+        case .person:
+            break
+        }
+    }
+
+    mutating func recordWatchOrderChange(for item: MediaItem) {
+        items[item.key] = item
+        watchedOrder.removeAll { $0 == item.key }
+
+        if watched.contains(item.key) {
+            watchedOrder.append(item.key)
+        }
+    }
 }
 
 private struct EpisodeKey: Codable, Hashable { let show: MediaKey; let season: Int; let episode: Int }
@@ -5552,6 +6332,7 @@ private struct AppSettings: Codable, Hashable {
     var defaultHomeFilter: MediaFilter = .both
     var defaultCategorySort: GenreSort = .tmdbRating
     var showUpcomingReleases: Bool = true
+    var warnBeforeReplacingFavourite = true
 }
 
 private extension AppSettings {
@@ -5627,19 +6408,19 @@ private enum AccentChoice: String, Codable, CaseIterable, Identifiable {
     var color: Color { switch self { case .blue: return .blue; case .purple: return .purple; case .green: return .green; case .orange: return .orange } }
 }
 
-private enum AppTab: String, CaseIterable, Identifiable { case home, search, watchlist, collections, settings; var id: String { rawValue } }
+private enum AppTab: String, CaseIterable, Identifiable { case home, search, forYou, watchlist, collections; var id: String { rawValue } }
 private enum TabTransitionDirection { case forward, backward }
 private extension AppTab {
-    var title: String { switch self { case .home: return "Home"; case .search: return "Search"; case .watchlist: return "Watchlist"; case .collections: return "Collections"; case .settings: return "Settings" } }
-    var icon: String { switch self { case .home: return "house"; case .search: return "magnifyingglass"; case .watchlist: return "bookmark"; case .collections: return "rectangle.stack"; case .settings: return "gearshape" } }
+    var title: String { switch self { case .home: return "Home"; case .search: return "Search"; case .forYou: return "For You"; case .watchlist: return "Watchlist"; case .collections: return "Collections" } }
+    var icon: String { switch self { case .home: return "house"; case .search: return "magnifyingglass"; case .forYou: return "sparkles"; case .watchlist: return "bookmark"; case .collections: return "rectangle.stack" } }
 
     var sortIndex: Int {
         switch self {
         case .home: return 0
         case .search: return 1
-        case .watchlist: return 2
-        case .collections: return 3
-        case .settings: return 4
+        case .forYou: return 2
+        case .watchlist: return 3
+        case .collections: return 4
         }
     }
 }
@@ -5700,7 +6481,22 @@ private enum ViewMode: String, Codable { case tile, list }
 private enum SortOption: String, CaseIterable, Identifiable { case releaseDate, myRating, tmdbRating; var id: String { rawValue } }
 private enum GenreSort: String, Codable, CaseIterable, Identifiable { case tmdbRating, releaseDate; var id: String { rawValue }; var title: String { self == .tmdbRating ? "TMDb rating" : "Released" }; var tmdbSort: String { self == .tmdbRating ? "vote_average.desc" : "primary_release_date.desc" } }
 private enum SwipeContext { case none, watchlist, collection(UUID) }
-private enum SectionRoute: String, Hashable { case recommendations, trending, popular, newReleases, upcoming; var title: String { switch self { case .recommendations: return "Recommended for you"; case .trending: return "Trending now"; case .popular: return "Popular"; case .newReleases: return "New releases"; case .upcoming: return "Upcoming releases" } } }
+private enum SectionRoute: String, Hashable {
+    case trending, popular, newReleases, upcoming
+
+    var title: String {
+        switch self {
+        case .trending:
+            return "Trending now"
+        case .popular:
+            return "Popular"
+        case .newReleases:
+            return "New releases"
+        case .upcoming:
+            return "Upcoming releases"
+        }
+    }
+}
 private struct GenreRoute: Hashable { let genre: GenreDefinition }
 
 private struct GenreDefinition: Identifiable, Hashable {
@@ -5823,6 +6619,25 @@ private enum DateParser {
     }
 }
 
+private extension Array where Element: Hashable {
+    func frequencySorted() -> [Element] {
+        var counts: [Element: Int] = [:]
+
+        for element in self {
+            counts[element, default: 0] += 1
+        }
+
+        return counts.sorted { lhs, rhs in
+            if lhs.value != rhs.value {
+                return lhs.value > rhs.value
+            }
+
+            return String(describing: lhs.key) < String(describing: rhs.key)
+        }
+        .map(\.key)
+    }
+}
+
 private extension Array where Element == MediaItem {
     func uniqued() -> [MediaItem] {
         var seen = Set<MediaKey>()
@@ -5839,6 +6654,23 @@ private extension Array where Element == MediaItem {
             let bPrefix = $1.title.lowercased().hasPrefix(q)
             if aPrefix != bPrefix { return aPrefix }
             return $0.voteAverage > $1.voteAverage
+        }
+    }
+    
+    func sortedBySimilarity(to seed: MediaItem) -> [MediaItem] {
+        sorted { lhs, rhs in
+            let lhsScore = lhs.similarityScore(to: seed)
+            let rhsScore = rhs.similarityScore(to: seed)
+
+            if lhsScore != rhsScore {
+                return lhsScore > rhsScore
+            }
+
+            if lhs.voteAverage != rhs.voteAverage {
+                return lhs.voteAverage > rhs.voteAverage
+            }
+
+            return (lhs.releaseDateValue ?? .distantPast) > (rhs.releaseDateValue ?? .distantPast)
         }
     }
 
@@ -5881,6 +6713,17 @@ private extension Array where Element == PersonSummary {
     }
 }
 
+#if canImport(UIKit)
+@MainActor
+private func dismissKeyboardNow() {
+    UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+}
+#else
+@MainActor
+private func dismissKeyboardNow() {}
+#endif
+
+
 // MARK: - Credit Filtering
 
 private enum CreditFilterText {
@@ -5919,6 +6762,38 @@ private enum CreditFilterText {
         "mtv movie awards",
         "critics choice awards"
     ]
+}
+
+private extension MediaItem {
+    func similarityScore(to seed: MediaItem) -> Int {
+        var score = 0
+
+        if kind == seed.kind {
+            score += 12
+        }
+
+        let sharedGenres = Set(genreIDs).intersection(Set(seed.genreIDs)).count
+        score += sharedGenres * 10
+
+        if originalLanguage == seed.originalLanguage {
+            score += 5
+        }
+
+        if let seedYear = seed.releaseDateValue.map({ Calendar.current.component(.year, from: $0) }),
+           let itemYear = releaseDateValue.map({ Calendar.current.component(.year, from: $0) }) {
+            let yearGap = abs(seedYear - itemYear)
+
+            if yearGap <= 2 {
+                score += 6
+            } else if yearGap <= 5 {
+                score += 4
+            } else if yearGap <= 10 {
+                score += 2
+            }
+        }
+
+        return score
+    }
 }
 
 private extension MediaItem {
@@ -6138,7 +7013,27 @@ private extension View {
 #endif
 
 
+// MARK: - For You Section Route Model
+
+private struct ForYouSection: Identifiable, Hashable {
+    let id = UUID()
+    let title: String
+    let items: [MediaItem]
+}
+
 // MARK: - Adaptive Layout
+
+private struct FullMediaListView: View {
+    let title: String
+    let items: [MediaItem]
+    @ObservedObject var model: VestigoModel
+
+    var body: some View {
+        BaseScreen(title: title, filter: .constant(.both), settings: model.settings) {
+            MediaGridOrList(items: items, hideWatchedForUpcoming: false, model: model)
+        }
+    }
+}
 
 
 private struct StreamingProviderBubble: View {
@@ -6257,11 +7152,33 @@ private extension View {
     func settingBubble() -> some View {
         self
             .padding(14)
-            .liquidGlass(cornerRadius: 22)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background {
+                RoundedRectangle(cornerRadius: 24, style: .continuous)
+                    .fill(.black.opacity(0.2))
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: 24, style: .continuous)
+                    .strokeBorder(.white.opacity(0.12), lineWidth: 1)
+            }
+            .contentShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
     }
 }
 
 // MARK: - Standard Preview Macro
 #Preview("") {
     ContentView()
+}
+
+// MARK: - String Normalization Helper
+
+private extension String {
+    var normalizedRecommendationText: String {
+        folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+            .lowercased()
+            .replacingOccurrences(of: "-", with: " ")
+            .replacingOccurrences(of: ":", with: " ")
+            .replacingOccurrences(of: "'", with: "")
+            .replacingOccurrences(of: "’", with: "")
+    }
 }
