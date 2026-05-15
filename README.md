@@ -2,11 +2,11 @@
 
 # Vestigo
 
-Vestigo is an iOS movie and series tracking app built in SwiftUI. It started as GlassWatch and was later renamed to Vestigo. The app is designed to combine movie and TV discovery, search, watchlist management, watched-history tracking, ratings, collections, streaming availability, and personalized recommendations into one clean iOS app.
+Vestigo is an iOS movie and series tracking app built in SwiftUI. The app is designed to combine movie and TV discovery, search, watchlist management, watched-history tracking, ratings, collections, streaming availability, and personalized recommendations into one clean iOS app.
 
 Vestigo uses TMDb for movie, series, person, cast, crew, genre, rating, runtime, release-date, and recommendation metadata. It also uses Movie of the Night’s Streaming Availability API for provider availability, so the app can show where a movie or series is available to stream, rent, or buy when that data is available.
 
-The app is currently in active development. The main app structure is functional: Home, Search, Watchlist, Collections, Settings, detail sheets, people detail sheets, local library storage, watched tracking, ratings, recommendations, and provider lookup are all implemented or partially implemented.
+This app is currently in active development.
 
 ---
 
