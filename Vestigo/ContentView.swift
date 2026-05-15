@@ -381,6 +381,12 @@ private final class VestigoModel: ObservableObject {
         )
     }
     
+    func playSheetDismissHaptic() {
+    #if canImport(UIKit)
+        UIImpactFeedbackGenerator(style: .soft).impactOccurred()
+    #endif
+    }
+    
     func clearSearchFilters() {
         selectedRuntimeFilters.removeAll()
         selectedDateFilters.removeAll()
@@ -2202,17 +2208,6 @@ private struct SettingsView: View {
                     .settingBubble()
                 }
 
-                Text("Interaction")
-                    .sectionTitle()
-                    .padding(.top, 6)
-
-                VStack(alignment: .leading, spacing: 10) {
-                    Toggle("Haptics", isOn: $model.settings.hapticsEnabled)
-                        .font(.headline.bold())
-                        .tint(model.settings.accentColor)
-                        .settingBubble()
-                }
-
                 Text("Content")
                     .sectionTitle()
                     .padding(.top, 6)
@@ -2549,6 +2544,7 @@ private struct DetailView: View {
             .presentationBackground(.clear)
             .presentationCornerRadius(54)
             .task { await model.loadDetail(item) }
+            .onDisappear { model.playSheetDismissHaptic() }
             .sheet(isPresented: $showCollections) {
                 AddToCollectionSheet(item: item, model: model)
             }
@@ -2572,11 +2568,10 @@ private struct DetailView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .sheetLiquidGlass(cornerRadius: 48)
-        .ignoresSafeArea(edges: .bottom)
     }
 
     private var detailScroll: some View {
-        ScrollView {
+        ScrollView(.vertical, showsIndicators: false) {
             VStack(alignment: .leading, spacing: 18) {
                 headerSection
                 ratingSection
@@ -2588,18 +2583,23 @@ private struct DetailView: View {
                 similarSection
                 providersSection
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
             .padding(.horizontal, 18)
-            .padding(.top, 6)
+            .padding(.top, 18)
             .padding(.bottom, 110)
         }
+        .scrollClipDisabled(false)
+        .scrollBounceBehavior(.basedOnSize, axes: .vertical)
         .scrollDismissesKeyboard(.immediately)
         .scrollIndicators(.hidden)
-        .scrollViewTouchTuning()
+        .scrollViewTouchTuning(axis: .vertical)
     }
 
     private var headerSection: some View {
         HStack(alignment: .top, spacing: 16) {
             PosterView(item: item, width: 126, height: 188, isFavourite: model.library.isFavourite(item))
+
             VStack(alignment: .leading, spacing: 10) {
                 titleText
                 metadataText
@@ -2607,13 +2607,18 @@ private struct DetailView: View {
                 dateText
                 primaryCrewText
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .clipped()
     }
 
     private var titleText: some View {
         Text(item.title)
             .font(.title2.bold())
             .foregroundStyle(.primary)
+            .lineLimit(nil)
+            .fixedSize(horizontal: false, vertical: true)
     }
 
     private var metadataText: some View {
@@ -2677,7 +2682,8 @@ private struct DetailView: View {
                 model.requestToggleFavourite(item)
             }
         }
-        .frame(maxWidth: .infinity)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .clipped()
     }
 
     @ViewBuilder private var ratingSection: some View {
@@ -2696,7 +2702,7 @@ private struct DetailView: View {
     }
 
     private var actionSection: some View {
-        HStack(spacing: 10) {
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: 160), spacing: 10)], spacing: 10) {
             DetailRowButton(title: "Cast list", systemName: "person.2.fill") {
                 showCast.toggle()
             }
@@ -2705,8 +2711,9 @@ private struct DetailView: View {
                 showCollections = true
             }
         }
-        .frame(maxWidth: .infinity)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
+    
 private struct DetailRowButton: View {
     let title: String
     let systemName: String
@@ -2925,6 +2932,7 @@ private struct PersonDetailView: View {
             .task {
                 await model.loadPersonCredits(person)
             }
+            .onDisappear { model.playSheetDismissHaptic() }
             .sheet(item: $selectedCreditItem) { item in
                 DetailView(item: item, model: model, allowsPersonSheet: false)
             }
@@ -3200,15 +3208,20 @@ private struct SeasonDropdownView: View {
                     VStack(alignment: .leading, spacing: 4) {
                         Text(season.name)
                             .font(.headline.bold())
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.8)
 
                         Text(season.episodeCountAndRuntimeText)
                             .font(.caption.bold())
                             .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.8)
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
 
                     Spacer()
 
-                    Button(isSeasonWatched ? "Unwatch season" : "Mark season") {
+                    Button(isSeasonWatched ? "Unwatch" : "Mark") {
                         model.markSeason(
                             show: show,
                             season: season.number,
@@ -3217,6 +3230,8 @@ private struct SeasonDropdownView: View {
                         )
                     }
                     .font(.caption.bold())
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
                     .buttonStyle(.bordered)
                     .clipShape(Capsule())
 
@@ -3244,6 +3259,8 @@ private struct SeasonDropdownView: View {
                 .transition(.opacity.combined(with: .move(edge: .top)))
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .clipped()
         .liquidGlass(cornerRadius: 22)
         .appScrollTouchSafe()
     }
@@ -3262,7 +3279,7 @@ private struct SeasonDropdownView: View {
         }
 
         return (1...max(season.episodeCount, 1)).map { number in
-            EpisodeInfo(number: number, title: "Episode \(number)", runtime: nil, stillPath: nil)
+            EpisodeInfo(number: number, title: "Episode \(number)", airDate: nil, runtime: nil, stillPath: nil)
         }
     }
 }
@@ -3286,10 +3303,14 @@ private struct EpisodeRowView: View {
                         .foregroundStyle(.primary)
                         .lineLimit(2)
 
-                    Text(episodeRuntimeText)
-                        .font(.caption.bold())
-                        .foregroundStyle(.secondary)
+                    if !episodeMetadataText.isEmpty {
+                        Text(episodeMetadataText)
+                            .font(.caption.bold())
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
 
                 Spacer(minLength: 8)
 
@@ -3308,11 +3329,18 @@ private struct EpisodeRowView: View {
         model.library.isEpisodeWatched(showKey: show.key, season: seasonNumber, episode: episode.number)
     }
 
-    private var episodeRuntimeText: String {
-        if let runtime = episode.runtime, runtime > 0 {
-            return "\(runtime) min"
+    private var episodeMetadataText: String {
+        var parts: [String] = []
+
+        if let releaseDateText = episode.releaseDateText {
+            parts.append(releaseDateText)
         }
-        return ""
+
+        if let runtime = episode.runtime, runtime > 0 {
+            parts.append("\(runtime) min")
+        }
+
+        return parts.joined(separator: " • ")
     }
 }
 
@@ -3412,6 +3440,7 @@ private struct AddToCollectionSheet: View {
         }
         .presentationBackground(.clear)
         .presentationCornerRadius(36)
+        .onDisappear { model.playSheetDismissHaptic() }
     }
 }
 
@@ -3464,8 +3493,11 @@ private struct BaseScreen<Content: View>: View {
                 .padding(.bottom, 94)
                 .containerRelativeFrame(.horizontal, alignment: .leading)
                 .frame(maxWidth: .infinity, alignment: .topLeading)
+                .contentShape(Rectangle())
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            .scrollClipDisabled(false)
+            .scrollBounceBehavior(.basedOnSize, axes: .vertical)
             .scrollDismissesKeyboard(.immediately)
             .scrollContentBackground(.hidden)
             .scrollIndicators(.hidden)
@@ -5353,19 +5385,22 @@ private struct TMDbContentRating: Decodable {
 private struct SeasonDTO: Decodable {
     let seasonNumber: Int?
     let name: String?
+    let airDate: String?
     let episodeCount: Int?
     let episodes: [EpisodeDTO]?
 
     enum CodingKeys: String, CodingKey {
         case seasonNumber = "season_number"
         case name
+        case airDate = "air_date"
         case episodeCount = "episode_count"
         case episodes
     }
 
-    init(seasonNumber: Int?, name: String?, episodeCount: Int?, episodes: [EpisodeDTO]?) {
+    init(seasonNumber: Int?, name: String?, airDate: String?, episodeCount: Int?, episodes: [EpisodeDTO]?) {
         self.seasonNumber = seasonNumber
         self.name = name
+        self.airDate = airDate
         self.episodeCount = episodeCount
         self.episodes = episodes
     }
@@ -5374,6 +5409,7 @@ private struct SeasonDTO: Decodable {
         SeasonDTO(
             seasonNumber: seasonNumber ?? hydratedSeason.seasonNumber,
             name: name ?? hydratedSeason.name,
+            airDate: airDate ?? hydratedSeason.airDate,
             episodeCount: episodeCount ?? hydratedSeason.episodeCount ?? hydratedSeason.episodes?.count,
             episodes: hydratedSeason.episodes ?? episodes
         )
@@ -5383,12 +5419,14 @@ private struct SeasonDTO: Decodable {
 private struct EpisodeDTO: Decodable {
     let episodeNumber: Int?
     let name: String?
+    let airDate: String?
     let runtime: Int?
     let stillPath: String?
 
     enum CodingKeys: String, CodingKey {
         case episodeNumber = "episode_number"
         case name
+        case airDate = "air_date"
         case runtime
         case stillPath = "still_path"
     }
@@ -6061,17 +6099,19 @@ private struct MediaDetail: Hashable {
         seasons = normalSeasons.map { season in
             let number = season.seasonNumber ?? 1
             let name = season.name ?? "Season \(number)"
+            let airDate = season.airDate
             let episodes: [EpisodeInfo] = (season.episodes ?? []).map { episode in
                 let episodeNumber = episode.episodeNumber ?? 1
                 return EpisodeInfo(
                     number: episodeNumber,
                     title: episode.name ?? "Episode \(episodeNumber)",
+                    airDate: episode.airDate,
                     runtime: episode.runtime,
                     stillPath: episode.stillPath
                 )
             }
             let count = season.episodeCount ?? episodes.count
-            return SeasonInfo(number: number, name: name, episodeCount: count, episodes: episodes)
+            return SeasonInfo(number: number, name: name, airDate: airDate, episodeCount: count, episodes: episodes)
         }
 
         let recommendationResults: [TMDbMediaDTO] = response.recommendations?.results ?? []
@@ -6110,10 +6150,20 @@ private struct MediaDetail: Hashable {
 private struct SeasonInfo: Identifiable, Hashable {
     let number: Int
     let name: String
+    let airDate: String?
     let episodeCount: Int
     let episodes: [EpisodeInfo]
 
     var id: Int { number }
+
+    var releaseYearText: String? {
+        guard let airDate,
+              let date = DateParser.parse(airDate) else {
+            return nil
+        }
+
+        return String(Calendar.current.component(.year, from: date))
+    }
 
     var totalRuntime: Int? {
         let runtimes = episodes.compactMap(\.runtime)
@@ -6122,13 +6172,17 @@ private struct SeasonInfo: Identifiable, Hashable {
     }
 
     var episodeCountAndRuntimeText: String {
-        let episodeText = "\(episodeCount) episode\(episodeCount == 1 ? "" : "s")"
+        var parts: [String] = ["\(episodeCount) episode\(episodeCount == 1 ? "" : "s")"]
 
-        if let totalRuntime, totalRuntime > 0 {
-            return "\(episodeText) • \(Self.formatRuntime(totalRuntime))"
+        if let releaseYearText {
+            parts.append(releaseYearText)
         }
 
-        return episodeText
+        if let totalRuntime, totalRuntime > 0 {
+            parts.append(Self.formatRuntime(totalRuntime))
+        }
+
+        return parts.joined(separator: " • ")
     }
 
     private static func formatRuntime(_ minutes: Int) -> String {
@@ -6150,10 +6204,15 @@ private struct SeasonInfo: Identifiable, Hashable {
 private struct EpisodeInfo: Identifiable, Hashable {
     let number: Int
     let title: String
+    let airDate: String?
     let runtime: Int?
     let stillPath: String?
 
     var id: Int { number }
+
+    var releaseDateText: String? {
+        DateParser.parse(airDate)?.formatted(.dateTime.month(.abbreviated).day().year())
+    }
 
     var stillURL: URL? {
         guard let stillPath else { return nil }
@@ -6960,11 +7019,13 @@ private struct ScrollViewTouchTuningView: UIViewRepresentable {
         view.isUserInteractionEnabled = false
         DispatchQueue.main.async { configureNearestScrollView(from: view) }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { configureNearestScrollView(from: view) }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { configureNearestScrollView(from: view) }
         return view
     }
 
     func updateUIView(_ uiView: UIView, context: Context) {
         DispatchQueue.main.async { configureNearestScrollView(from: uiView) }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { configureNearestScrollView(from: uiView) }
     }
 
     private func configureNearestScrollView(from view: UIView) {
@@ -6988,13 +7049,20 @@ private struct ScrollViewTouchTuningView: UIViewRepresentable {
         scrollView.isDirectionalLockEnabled = true
         scrollView.showsVerticalScrollIndicator = false
         scrollView.showsHorizontalScrollIndicator = false
+        scrollView.alwaysBounceVertical = false
+        scrollView.alwaysBounceHorizontal = false
+
+        let verticalInset = scrollView.adjustedContentInset.top + scrollView.adjustedContentInset.bottom
+        let horizontalInset = scrollView.adjustedContentInset.left + scrollView.adjustedContentInset.right
+        let canScrollVertically = scrollView.contentSize.height + verticalInset > scrollView.bounds.height + 1
+        let canScrollHorizontally = scrollView.contentSize.width + horizontalInset > scrollView.bounds.width + 1
+
+        scrollView.isScrollEnabled = true
 
         if axis == .horizontal {
-            scrollView.alwaysBounceHorizontal = true
-            scrollView.alwaysBounceVertical = false
+            scrollView.bounces = canScrollHorizontally
         } else {
-            scrollView.alwaysBounceVertical = true
-            scrollView.alwaysBounceHorizontal = false
+            scrollView.bounces = canScrollVertically
         }
     }
 }
@@ -7165,10 +7233,6 @@ private extension View {
     }
 }
 
-// MARK: - Standard Preview Macro
-#Preview("") {
-    ContentView()
-}
 
 // MARK: - String Normalization Helper
 
@@ -7181,4 +7245,11 @@ private extension String {
             .replacingOccurrences(of: "'", with: "")
             .replacingOccurrences(of: "’", with: "")
     }
+}
+
+
+// MARK: - Standard Preview Macro
+
+#Preview("") {
+    ContentView()
 }
