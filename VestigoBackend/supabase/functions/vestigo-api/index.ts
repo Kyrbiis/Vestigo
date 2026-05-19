@@ -81,6 +81,211 @@ async function fetchTMDb(path: string, params: Record<string, string> = {}) {
   return await response.json()
 }
 
+// --- Watchmode helper functions ---
+async function fetchWatchmode(path: string, params: Record<string, string> = {}) {
+  const watchmodeKey = Deno.env.get("WATCHMODE_API_KEY")
+
+  if (!watchmodeKey) {
+    throw new Error("Missing WATCHMODE_API_KEY")
+  }
+
+  const url = new URL(`https://api.watchmode.com/v1${path}`)
+  url.searchParams.set("apiKey", watchmodeKey)
+
+  for (const [key, value] of Object.entries(params)) {
+    url.searchParams.set(key, value)
+  }
+
+  const response = await fetch(url)
+
+  if (!response.ok) {
+    const text = await response.text()
+    throw new Error(`Watchmode request failed: ${response.status} ${text}`)
+  }
+
+  return await response.json()
+}
+
+function normalizeWatchmodeSource(source: any) {
+  const type = String(source.type ?? "").toLowerCase()
+  const format = String(source.format ?? "").toUpperCase()
+  const price = source.price
+  const rawWebURL = source.web_url ?? source.webUrl ?? null
+  const rawIOSURL = source.ios_url ?? source.iosUrl ?? null
+  const webURL = typeof rawWebURL === "string" && rawWebURL.startsWith("http") ? rawWebURL : null
+  const iosURL = typeof rawIOSURL === "string" && !rawIOSURL.toLowerCase().includes("deeplinks available for paid plans only") ? rawIOSURL : null
+
+  let typeText = "Watch"
+  if (type === "sub" || type === "subscription") typeText = "Subscription"
+  if (type === "free") typeText = "Free"
+  if (type === "rent") typeText = "Rent"
+  if (type === "buy" || type === "purchase") typeText = "Buy"
+
+  let priceText: string | null = null
+  if (typeText === "Subscription") {
+    priceText = "Included"
+  } else if (typeText === "Free") {
+    priceText = "Free"
+  } else if (typeof price === "number") {
+    priceText = `$${price.toFixed(2)}`
+  }
+
+  return {
+    serviceName: source.name ?? source.source_name ?? source.sourceName ?? "Unknown service",
+    type: typeText,
+    priceText,
+    qualityText: format.length > 0 ? format : null,
+    webURL,
+    iosURL,
+    openURL: iosURL ?? webURL
+  }
+}
+
+function watchmodeSourceRank(source: any) {
+  const type = String(source.type ?? "").toLowerCase()
+  const quality = String(source.qualityText ?? "").toUpperCase()
+  const priceText = String(source.priceText ?? "")
+  const priceNumber = Number(priceText.replace(/[^0-9.]/g, ""))
+
+  let typeRank = 99
+  if (type === "subscription") typeRank = 0
+  if (type === "free") typeRank = 1
+  if (type === "rent") typeRank = 2
+  if (type === "buy") typeRank = 3
+
+  let qualityRank = 99
+  if (quality === "4K") qualityRank = 0
+  if (quality === "HD") qualityRank = 1
+  if (quality === "SD") qualityRank = 2
+
+  return {
+    typeRank,
+    priceRank: Number.isFinite(priceNumber) ? priceNumber : 0,
+    qualityRank
+  }
+}
+
+function dedupeWatchmodeSources(sources: any[]) {
+  const bestByKey = new Map<string, any>()
+
+  for (const source of sources) {
+    const key = `${source.serviceName}-${source.type}`
+    const existing = bestByKey.get(key)
+
+    if (!existing) {
+      bestByKey.set(key, source)
+      continue
+    }
+
+    const currentRank = watchmodeSourceRank(source)
+    const existingRank = watchmodeSourceRank(existing)
+
+    if (currentRank.priceRank < existingRank.priceRank) {
+      bestByKey.set(key, source)
+      continue
+    }
+
+    if (currentRank.priceRank === existingRank.priceRank && currentRank.qualityRank < existingRank.qualityRank) {
+      bestByKey.set(key, source)
+    }
+  }
+
+  return Array.from(bestByKey.values()).sort((a: any, b: any) => {
+    const lhs = watchmodeSourceRank(a)
+    const rhs = watchmodeSourceRank(b)
+
+    if (lhs.typeRank !== rhs.typeRank) return lhs.typeRank - rhs.typeRank
+    if (lhs.priceRank !== rhs.priceRank) return lhs.priceRank - rhs.priceRank
+    if (lhs.qualityRank !== rhs.qualityRank) return lhs.qualityRank - rhs.qualityRank
+    return String(a.serviceName).localeCompare(String(b.serviceName))
+  })
+}
+
+function watchmodeTitleIDFromSearch(data: any, kind: "movie" | "tv") {
+  const titleResults = Array.isArray(data?.title_results)
+    ? data.title_results
+    : Array.isArray(data?.results)
+      ? data.results
+      : []
+
+  const expectedTypes = kind === "movie"
+    ? new Set(["movie"])
+    : new Set(["tv_series", "tv_miniseries", "tv_special", "tv_movie", "tv"])
+
+  const exactKindMatch = titleResults.find((item: any) => {
+    const id = Number(item?.id)
+    const type = String(item?.type ?? item?.result_type ?? "").toLowerCase()
+    return Number.isFinite(id) && id > 0 && expectedTypes.has(type)
+  })
+
+  const fallbackMatch = titleResults.find((item: any) => {
+    const id = Number(item?.id)
+    return Number.isFinite(id) && id > 0
+  })
+
+  const match = exactKindMatch ?? fallbackMatch
+  const id = Number(match?.id)
+
+  return Number.isFinite(id) && id > 0 ? id : null
+}
+
+async function watchmodeTitleIDForTMDbID(tmdbID: number, kind: "movie" | "tv") {
+  const searchAttempts: Array<{ search_field: string, search_value: string }> = []
+
+  try {
+    const externalIDs = await fetchTMDb(`/${kind}/${tmdbID}/external_ids`)
+    const imdbID = String(externalIDs?.imdb_id ?? "").trim()
+
+    if (imdbID.length > 0) {
+      searchAttempts.push({ search_field: "imdb_id", search_value: imdbID })
+    }
+  } catch {
+    // Fall through to TMDb-id based lookup attempts.
+  }
+
+  searchAttempts.push(
+    { search_field: kind === "movie" ? "tmdb_movie_id" : "tmdb_tv_id", search_value: String(tmdbID) },
+    { search_field: "tmdb_id", search_value: String(tmdbID) }
+  )
+
+  for (const attempt of searchAttempts) {
+    try {
+      const search = await fetchWatchmode("/search/", attempt)
+      const watchmodeID = watchmodeTitleIDFromSearch(search, kind)
+
+      if (watchmodeID) {
+        return watchmodeID
+      }
+    } catch {
+      continue
+    }
+  }
+
+  return null
+}
+
+async function watchmodeSourcesForTMDbID(tmdbID: number, kind: "movie" | "tv", country: string) {
+  const watchmodeID = await watchmodeTitleIDForTMDbID(tmdbID, kind)
+
+  if (!watchmodeID) {
+    return []
+  }
+
+  const sources = await fetchWatchmode(`/title/${watchmodeID}/sources/`, {
+    regions: country.toUpperCase()
+  })
+
+  if (!Array.isArray(sources)) {
+    return []
+  }
+
+  return dedupeWatchmodeSources(
+    sources
+      .map(normalizeWatchmodeSource)
+      .filter((source: any) => source.serviceName && (source.webURL || source.iosURL))
+  )
+}
+
 async function fetchWikidataSPARQL(query: string) {
   const url = new URL("https://query.wikidata.org/sparql")
   url.searchParams.set("query", query)
@@ -185,6 +390,76 @@ async function getWikidataFranchiseRecommendations(query: string) {
       new Map(refs.map((ref) => [`${ref.kind}-${ref.id}`, ref])).values()
     )
   }
+}
+
+// Search TMDb movie and TV endpoints for universe/franchise-like references by query text.
+async function searchTMDbUniverseRefs(query: string) {
+  const refs: Array<{ id: number, kind: "movie" | "tv" }> = []
+  const normalizedQuery = normalizeTitle(query)
+  const queryTokens = normalizedQuery.split(" ").filter((token) => token.length > 2)
+
+  function matchesQueryText(item: any, titleKeys: string[]) {
+    const title = titleKeys
+      .map((key) => String(item?.[key] ?? ""))
+      .find((value) => value.trim().length > 0) ?? ""
+    const overview = String(item?.overview ?? "")
+    const normalizedTitle = normalizeTitle(title)
+    const normalizedText = normalizeTitle(`${title} ${overview}`)
+
+    if (normalizedTitle.includes(normalizedQuery)) {
+      return true
+    }
+
+    if (normalizedText.includes(normalizedQuery)) {
+      return true
+    }
+
+    if (queryTokens.length > 1 && queryTokens.every((token) => normalizedText.includes(token))) {
+      return true
+    }
+
+    return false
+  }
+
+  try {
+    const movieSearch = await fetchTMDb("/search/movie", {
+      query,
+      include_adult: "false",
+      page: "1"
+    })
+
+    const movieResults = Array.isArray(movieSearch.results) ? movieSearch.results : []
+
+    for (const item of movieResults.slice(0, 40)) {
+      if (typeof item.id === "number" && matchesQueryText(item, ["title", "original_title"])) {
+        refs.push({ id: item.id, kind: "movie" })
+      }
+    }
+  } catch {
+    // Keep Wikidata results even if TMDb search fails.
+  }
+
+  try {
+    const tvSearch = await fetchTMDb("/search/tv", {
+      query,
+      include_adult: "false",
+      page: "1"
+    })
+
+    const tvResults = Array.isArray(tvSearch.results) ? tvSearch.results : []
+
+    for (const item of tvResults.slice(0, 40)) {
+      if (typeof item.id === "number" && matchesQueryText(item, ["name", "original_name"])) {
+        refs.push({ id: item.id, kind: "tv" })
+      }
+    }
+  } catch {
+    // Keep Wikidata results even if TMDb search fails.
+  }
+
+  return Array.from(
+    new Map(refs.map((ref) => [`${ref.kind}-${ref.id}`, ref])).values()
+  )
 }
 
 async function tmdbCollectionByID(collectionID: number) {
@@ -567,7 +842,8 @@ Deno.serve(async (req) => {
         secrets: {
           TVDB_API_KEY: previewSecret("TVDB_API_KEY"),
           TMDB_API_KEY: previewSecret("TMDB_API_KEY"),
-          MOVIE_OF_THE_NIGHT_KEY: previewSecret("MOVIE_OF_THE_NIGHT_KEY")
+          MOVIE_OF_THE_NIGHT_KEY: previewSecret("MOVIE_OF_THE_NIGHT_KEY"),
+          WATCHMODE_API_KEY: previewSecret("WATCHMODE_API_KEY")
         }
       })
     }
@@ -605,6 +881,38 @@ Deno.serve(async (req) => {
       return Response.json({
         ok: true,
         collection
+      })
+    }
+
+    if (url.pathname.endsWith("/watchmode-sources")) {
+      const tmdbID = Number(url.searchParams.get("tmdbID") ?? url.searchParams.get("id"))
+      const rawKind = String(url.searchParams.get("kind") ?? "movie").toLowerCase()
+      const country = String(url.searchParams.get("country") ?? "US").toUpperCase()
+
+      if (!Number.isFinite(tmdbID) || tmdbID <= 0) {
+        return Response.json(
+          { ok: false, error: "Missing or invalid tmdbID" },
+          { status: 400 }
+        )
+      }
+
+      if (rawKind !== "movie" && rawKind !== "tv") {
+        return Response.json(
+          { ok: false, error: "kind must be movie or tv" },
+          { status: 400 }
+        )
+      }
+
+      const sources = await watchmodeSourcesForTMDbID(tmdbID, rawKind, country)
+
+      return Response.json({
+        ok: true,
+        source: "watchmode",
+        tmdbID,
+        kind: rawKind,
+        country,
+        count: sources.length,
+        sources
       })
     }
 
@@ -743,9 +1051,13 @@ Deno.serve(async (req) => {
               refs: [] as Array<{ id: number, kind: "movie" | "tv" }>
             }
 
+        const tmdbSearchRefs = refsFromEmbeddedRemoteIDs.length === 0 && refsFromTMDbFind.length === 0
+          ? await searchTMDbUniverseRefs(query)
+          : []
+
         const exactRefs = Array.from(
           new Map(
-            [...refsFromEmbeddedRemoteIDs, ...refsFromTMDbFind, ...wikidataResult.refs]
+            [...refsFromEmbeddedRemoteIDs, ...refsFromTMDbFind, ...wikidataResult.refs, ...tmdbSearchRefs]
               .map((ref) => [`${ref.kind}-${ref.id}`, ref])
           ).values()
         )
@@ -774,6 +1086,7 @@ Deno.serve(async (req) => {
           tmdbFindRefCount: refsFromTMDbFind.length,
           wikidataFranchise: wikidataResult.franchise,
           wikidataExactRefCount: wikidataResult.refs.length,
+          tmdbSearchRefCount: tmdbSearchRefs.length,
           exactRefCount: exactRefs.length,
           count: uniqueResults.length,
           results: uniqueResults
