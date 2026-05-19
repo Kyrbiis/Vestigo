@@ -4,3 +4,33 @@ node_modules/
 VestigoBackend/node_modules/
 node_modules/
 VestigoBackend/node_modules/
+
+# Secrets / local env
+.env
+.env.*
+*.env
+*.env.*
+**/.env
+**/.env.*
+**/*.env
+**/*.env.*
+
+# Dependencies
+node_modules/
+**/node_modules/
+
+# Secrets / local env
+.env
+.env.*
+*.env
+*.env.*
+**/.env
+**/.env.*
+**/*.env
+**/*.env.*
+*.local
+*.local.*
+
+# Dependencies
+node_modules/
+**/node_modules/

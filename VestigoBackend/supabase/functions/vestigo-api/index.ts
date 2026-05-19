@@ -140,16 +140,23 @@ async function getWikidataFranchiseRecommendations(query: string) {
   }
 
   const escapedFranchiseURI = franchise.uri.replace(/[<>]/g, "")
-  const sparql = `
-SELECT DISTINCT ?work ?workLabel ?tmdbMovieID ?tmdbTVID WHERE {
-  VALUES ?franchise { <${escapedFranchiseURI}> }
-  ?work wdt:P179 ?franchise.
-  OPTIONAL { ?work wdt:P4947 ?tmdbMovieID. }
-  OPTIONAL { ?work wdt:P4983 ?tmdbTVID. }
-  SERVICE wikibase:label { bd:serviceParam wikibase:language "en". }
-}
-LIMIT 200
-`
+    const sparql = `
+    SELECT DISTINCT ?work ?workLabel ?tmdbMovieID ?tmdbTVID WHERE {
+      VALUES ?franchise { <${escapedFranchiseURI}> }
+      {
+        ?work (wdt:P179|wdt:P361)+ ?franchise.
+      }
+      UNION
+      {
+        ?franchise (wdt:P527)+ ?work.
+      }
+      OPTIONAL { ?work wdt:P4947 ?tmdbMovieID. }
+      OPTIONAL { ?work wdt:P4983 ?tmdbTVID. }
+      FILTER(BOUND(?tmdbMovieID) || BOUND(?tmdbTVID))
+      SERVICE wikibase:label { bd:serviceParam wikibase:language "en". }
+    }
+    LIMIT 300
+    `
 
   const data = await fetchWikidataSPARQL(sparql)
   const bindings = data?.results?.bindings ?? []
@@ -760,7 +767,7 @@ Deno.serve(async (req) => {
 
         return Response.json({
           ok: true,
-          source: wikidataResult.refs.length > 0 ? "wikidata-p179-to-tmdb" : "tvdb-id-to-tmdb-find",
+        source: wikidataResult.refs.length > 0 ? "wikidata-linked-franchise-to-tmdb" : "tvdb-id-to-tmdb-find",
           fallbackID,
           tvdbEntityIDCount: Array.from(new Set(entityIDs)).length,
           embeddedExactRefCount: refsFromEmbeddedRemoteIDs.length,
