@@ -1,4 +1,4 @@
-*This app is vibe-coded in Xcode using ChatGPT
+*This app is mostly vibe-coded in Xcode using ChatGPT
 
 # Vestigo
 
