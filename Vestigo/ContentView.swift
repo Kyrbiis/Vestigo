@@ -3890,17 +3890,6 @@ private struct ForYouView: View {
                         Link("TMDB", destination: URL(string: "https://www.themoviedb.org/")!)
                             .font(.caption.bold())
                             .frame(maxWidth: .infinity, alignment: .center)
-                        
-                        Text("Streaming availability information is provided by Streaming Availability API by Movie of the Night.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .multilineTextAlignment(.center)
-                            .frame(maxWidth: .infinity, alignment: .center)
-                        
-                        Link("Streaming Availability API by Movie of the Night", destination: URL(string: "https://www.movieofthenight.com/about/api")!)
-                            .font(.caption.bold())
-                            .multilineTextAlignment(.center)
-                            .frame(maxWidth: .infinity, alignment: .center)
                     }
                     .frame(maxWidth: .infinity, alignment: .center)
                 }
@@ -5357,25 +5346,49 @@ private struct ForYouView: View {
     
     private struct ProviderRow: View {
         let option: StreamingOption
+        @Environment(\.openURL) private var openURL
+        
+        private var tappableURL: URL? {
+            guard let rawURL = option.openURL?.trimmingCharacters(in: .whitespacesAndNewlines), !rawURL.isEmpty else {
+                return nil
+            }
+            return URL(string: rawURL)
+        }
         
         var body: some View {
-            HStack(spacing: 12) {
-                providerLogo
-                
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(option.cleanedServiceName)
-                        .font(.headline)
+            Button {
+                guard let tappableURL else { return }
+                openURL(tappableURL)
+            } label: {
+                HStack(spacing: 12) {
+                    providerLogo
                     
-                    Text(option.cleanedAvailabilityLine)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(option.cleanedServiceName)
+                            .font(.headline)
+                            .foregroundStyle(.primary)
+                        
+                        Text(option.cleanedAvailabilityLine)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                    }
+                    
+                    Spacer()
+                    
+                    if tappableURL != nil {
+                        Image(systemName: "arrow.up.forward.app")
+                            .font(.caption.bold())
+                            .foregroundStyle(.secondary)
+                    }
                 }
-                
-                Spacer()
+                .padding(12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
             }
-            .padding(12)
+            .buttonStyle(.plain)
             .liquidGlass(cornerRadius: 22)
+            .opacity(tappableURL == nil ? 0.72 : 1.0)
             .appScrollTouchSafe()
         }
         
@@ -7033,12 +7046,12 @@ private struct ForYouView: View {
     private struct TMDbProviderRegion: Decodable { let flatrate: [TMDbProvider]?; let free: [TMDbProvider]?; let rent: [TMDbProvider]?; let buy: [TMDbProvider]? }
     private struct TMDbProvider: Decodable { let providerName: String; enum CodingKeys: String, CodingKey { case providerName = "provider_name" } }
     
-    private struct MOTNShowResponse: Decodable {
+    private struct WatchmodeShowResponse: Decodable {
         let title: String?
         let tmdbId: String?
         let releaseYear: Int?
         let firstAirYear: Int?
-        let streamingOptions: [String: [MOTNOption]]?
+        let streamingOptions: [String: [WatchmodeOption]]?
         
         enum CodingKeys: String, CodingKey {
             case title
@@ -7063,21 +7076,27 @@ private struct ForYouView: View {
                     serviceName: option.displayServiceName,
                     type: option.displayTypeText,
                     priceText: option.displayPriceText,
-                    qualityText: option.displayQualityText
+                    qualityText: option.displayQualityText,
+                    openURL: option.displayOpenURL
                 )
             }
         }
     }
     
-    private struct MOTNOption: Decodable {
-        let service: MOTNService?
-        let addon: MOTNService?
+    private struct WatchmodeOption: Decodable {
+        let service: WatchmodeService?
+        let addon: WatchmodeService?
         let type: String?
         let quality: String?
-        let price: MOTNPrice?
-        let raw: MOTNJSONValue?
+        let price: WatchmodePrice?
+        let raw: WatchmodeJSONValue?
         let link: String?
-        
+        let openURL: String?
+        let webURL: String?
+        let iosURL: String?
+        let androidURL: String?
+        let appURL: String?
+
         enum CodingKeys: String, CodingKey {
             case service
             case addon
@@ -7105,52 +7124,122 @@ private struct ForYouView: View {
             case offer
             case links
             case link
+            // openURL fields for openURL selection
+            case openURL
+            case openUrl
+            case open_url
+            // URL fields for openURL selection
+            case url
+            case webURL
+            case webUrl
+            case web_url
+            case iosURL
+            case iosUrl
+            case ios_url
+            case androidURL
+            case androidUrl
+            case android_url
+            case appURL
+            case appUrl
+            case app_url
+            case deepLink
+            case deeplink
+            case deep_link
         }
-        
+
         init(from decoder: Decoder) throws {
             let keyed = try decoder.container(keyedBy: CodingKeys.self)
-            service = try keyed.decodeIfPresent(MOTNService.self, forKey: .service)
-            addon = try keyed.decodeIfPresent(MOTNService.self, forKey: .addon) ?? keyed.decodeIfPresent(MOTNService.self, forKey: .addOn)
+            service = try keyed.decodeIfPresent(WatchmodeService.self, forKey: .service)
+            addon = try keyed.decodeIfPresent(WatchmodeService.self, forKey: .addon) ?? keyed.decodeIfPresent(WatchmodeService.self, forKey: .addOn)
             type = try keyed.decodeIfPresent(String.self, forKey: .type)
             quality = try keyed.decodeIfPresent(String.self, forKey: .quality)
-            raw = try? MOTNJSONValue(from: decoder)
-            link = try keyed.decodeIfPresent(String.self, forKey: .link) ?? keyed.decodeIfPresent(String.self, forKey: .links)
-            
-            var resolvedPrice: MOTNPrice?
-            
-            if resolvedPrice == nil { resolvedPrice = try keyed.decodeIfPresent(MOTNPrice.self, forKey: .price) }
-            if resolvedPrice == nil { resolvedPrice = try keyed.decodeIfPresent(MOTNPrice.self, forKey: .amount) }
-            if resolvedPrice == nil { resolvedPrice = try keyed.decodeIfPresent(MOTNPrice.self, forKey: .value) }
-            if resolvedPrice == nil { resolvedPrice = try keyed.decodeIfPresent(MOTNPrice.self, forKey: .cost) }
-            if resolvedPrice == nil { resolvedPrice = try keyed.decodeIfPresent(MOTNPrice.self, forKey: .retailPrice) }
-            if resolvedPrice == nil { resolvedPrice = try keyed.decodeIfPresent(MOTNPrice.self, forKey: .rentalPrice) }
-            if resolvedPrice == nil { resolvedPrice = try keyed.decodeIfPresent(MOTNPrice.self, forKey: .purchasePrice) }
-            if resolvedPrice == nil { resolvedPrice = try keyed.decodeIfPresent(MOTNPrice.self, forKey: .rentPrice) }
-            if resolvedPrice == nil { resolvedPrice = try keyed.decodeIfPresent(MOTNPrice.self, forKey: .buyPrice) }
-            if resolvedPrice == nil { resolvedPrice = try keyed.decodeIfPresent(MOTNPrice.self, forKey: .formattedPrice) }
-            if resolvedPrice == nil { resolvedPrice = try keyed.decodeIfPresent(MOTNPrice.self, forKey: .priceFormatted) }
-            if resolvedPrice == nil { resolvedPrice = try keyed.decodeIfPresent(MOTNPrice.self, forKey: .displayPrice) }
-            if resolvedPrice == nil { resolvedPrice = try keyed.decodeIfPresent(MOTNPrice.self, forKey: .priceText) }
-            if resolvedPrice == nil { resolvedPrice = try keyed.decodeIfPresent(MOTNPrice.self, forKey: .prices) }
-            if resolvedPrice == nil { resolvedPrice = try keyed.decodeIfPresent(MOTNPrice.self, forKey: .pricing) }
-            if resolvedPrice == nil { resolvedPrice = try keyed.decodeIfPresent(MOTNPrice.self, forKey: .offer) }
-            if resolvedPrice == nil { resolvedPrice = try keyed.decodeIfPresent(MOTNPrice.self, forKey: .offers) }
-            if resolvedPrice == nil { resolvedPrice = try keyed.decodeIfPresent(MOTNPrice.self, forKey: .link) }
-            if resolvedPrice == nil { resolvedPrice = try keyed.decodeIfPresent(MOTNPrice.self, forKey: .links) }
-            
+            raw = try? WatchmodeJSONValue(from: decoder)
+            let decodedLink = try keyed.decodeIfPresent(String.self, forKey: .link)
+            let decodedLinks = try keyed.decodeIfPresent(String.self, forKey: .links)
+            let decodedURL = try keyed.decodeIfPresent(String.self, forKey: .url)
+            let decodedDeepLink = try keyed.decodeIfPresent(String.self, forKey: .deepLink)
+            let decodedDeeplink = try keyed.decodeIfPresent(String.self, forKey: .deeplink)
+            let decodedDeepLinkSnake = try keyed.decodeIfPresent(String.self, forKey: .deep_link)
+            link = decodedLink ?? decodedLinks ?? decodedURL ?? decodedDeepLink ?? decodedDeeplink ?? decodedDeepLinkSnake
+
+            // openURL decoding (normalized field from backend)
+            let decodedOpenURL = try keyed.decodeIfPresent(String.self, forKey: .openURL)
+            let decodedOpenUrl = try keyed.decodeIfPresent(String.self, forKey: .openUrl)
+            let decodedOpenURLSnake = try keyed.decodeIfPresent(String.self, forKey: .open_url)
+            openURL = decodedOpenURL ?? decodedOpenUrl ?? decodedOpenURLSnake
+
+            let decodedWebURL = try keyed.decodeIfPresent(String.self, forKey: .webURL)
+            let decodedWebUrl = try keyed.decodeIfPresent(String.self, forKey: .webUrl)
+            let decodedWebURLSnake = try keyed.decodeIfPresent(String.self, forKey: .web_url)
+            webURL = decodedWebURL ?? decodedWebUrl ?? decodedWebURLSnake
+
+            let decodedIOSURL = try keyed.decodeIfPresent(String.self, forKey: .iosURL)
+            let decodedIOSUrl = try keyed.decodeIfPresent(String.self, forKey: .iosUrl)
+            let decodedIOSURLSnake = try keyed.decodeIfPresent(String.self, forKey: .ios_url)
+            iosURL = decodedIOSURL ?? decodedIOSUrl ?? decodedIOSURLSnake
+
+            let decodedAndroidURL = try keyed.decodeIfPresent(String.self, forKey: .androidURL)
+            let decodedAndroidUrl = try keyed.decodeIfPresent(String.self, forKey: .androidUrl)
+            let decodedAndroidURLSnake = try keyed.decodeIfPresent(String.self, forKey: .android_url)
+            androidURL = decodedAndroidURL ?? decodedAndroidUrl ?? decodedAndroidURLSnake
+
+            let decodedAppURL = try keyed.decodeIfPresent(String.self, forKey: .appURL)
+            let decodedAppUrl = try keyed.decodeIfPresent(String.self, forKey: .appUrl)
+            let decodedAppURLSnake = try keyed.decodeIfPresent(String.self, forKey: .app_url)
+            appURL = decodedAppURL ?? decodedAppUrl ?? decodedAppURLSnake
+
+            var resolvedPrice: WatchmodePrice?
+
+            if resolvedPrice == nil { resolvedPrice = try keyed.decodeIfPresent(WatchmodePrice.self, forKey: .price) }
+            if resolvedPrice == nil { resolvedPrice = try keyed.decodeIfPresent(WatchmodePrice.self, forKey: .amount) }
+            if resolvedPrice == nil { resolvedPrice = try keyed.decodeIfPresent(WatchmodePrice.self, forKey: .value) }
+            if resolvedPrice == nil { resolvedPrice = try keyed.decodeIfPresent(WatchmodePrice.self, forKey: .cost) }
+            if resolvedPrice == nil { resolvedPrice = try keyed.decodeIfPresent(WatchmodePrice.self, forKey: .retailPrice) }
+            if resolvedPrice == nil { resolvedPrice = try keyed.decodeIfPresent(WatchmodePrice.self, forKey: .rentalPrice) }
+            if resolvedPrice == nil { resolvedPrice = try keyed.decodeIfPresent(WatchmodePrice.self, forKey: .purchasePrice) }
+            if resolvedPrice == nil { resolvedPrice = try keyed.decodeIfPresent(WatchmodePrice.self, forKey: .rentPrice) }
+            if resolvedPrice == nil { resolvedPrice = try keyed.decodeIfPresent(WatchmodePrice.self, forKey: .buyPrice) }
+            if resolvedPrice == nil { resolvedPrice = try keyed.decodeIfPresent(WatchmodePrice.self, forKey: .formattedPrice) }
+            if resolvedPrice == nil { resolvedPrice = try keyed.decodeIfPresent(WatchmodePrice.self, forKey: .priceFormatted) }
+            if resolvedPrice == nil { resolvedPrice = try keyed.decodeIfPresent(WatchmodePrice.self, forKey: .displayPrice) }
+            if resolvedPrice == nil { resolvedPrice = try keyed.decodeIfPresent(WatchmodePrice.self, forKey: .priceText) }
+            if resolvedPrice == nil { resolvedPrice = try keyed.decodeIfPresent(WatchmodePrice.self, forKey: .prices) }
+            if resolvedPrice == nil { resolvedPrice = try keyed.decodeIfPresent(WatchmodePrice.self, forKey: .pricing) }
+            if resolvedPrice == nil { resolvedPrice = try keyed.decodeIfPresent(WatchmodePrice.self, forKey: .offer) }
+            if resolvedPrice == nil { resolvedPrice = try keyed.decodeIfPresent(WatchmodePrice.self, forKey: .offers) }
+            if resolvedPrice == nil { resolvedPrice = try keyed.decodeIfPresent(WatchmodePrice.self, forKey: .link) }
+            if resolvedPrice == nil { resolvedPrice = try keyed.decodeIfPresent(WatchmodePrice.self, forKey: .links) }
+
             if resolvedPrice?.displayText == nil {
                 if let scannedText = raw?.firstPriceText() {
-                    resolvedPrice = MOTNPrice(displayText: scannedText)
+                    resolvedPrice = WatchmodePrice(displayText: scannedText)
                 }
             }
-            
+
             price = resolvedPrice
         }
-        
+
+        var displayOpenURL: String? {
+            let candidates = [openURL, iosURL, appURL, webURL, link, androidURL]
+            return candidates
+                .compactMap { value in
+                    value?.trimmingCharacters(in: .whitespacesAndNewlines)
+                }
+                .first { value in
+                    guard !value.isEmpty else { return false }
+                    let lower = value.lowercased()
+                    guard lower != "ios:" else { return false }
+                    guard lower != "ios://" else { return false }
+                    guard !lower.contains("{ios") else { return false }
+                    guard !lower.contains("placeholder") else { return false }
+                    return URL(string: value) != nil
+                }
+        }
+
         var displayServiceName: String {
             addon?.name ?? service?.name ?? "Unknown"
         }
-        
+
         var displayTypeText: String {
             let normalizedType = (type ?? "unknown").lowercased()
             switch normalizedType {
@@ -7168,16 +7257,16 @@ private struct ForYouView: View {
                 return type ?? "unknown"
             }
         }
-        
+
         var displayPriceText: String {
             if let displayText = price?.displayText, !displayText.isEmpty {
                 return displayText
             }
-            
+
             if let linkPrice = link?.priceTextFromURL(), !linkPrice.isEmpty {
                 return linkPrice
             }
-            
+
             let normalizedType = (type ?? "").lowercased()
             switch normalizedType {
             case "free":
@@ -7188,18 +7277,18 @@ private struct ForYouView: View {
                 return ""
             }
         }
-        
+
         var displayQualityText: String {
             guard let quality, !quality.isEmpty else { return "" }
             return quality.uppercased()
         }
     }
     
-    private struct MOTNService: Decodable {
+    private struct WatchmodeService: Decodable {
         let name: String?
     }
     
-    private struct MOTNPrice: Decodable {
+    private struct WatchmodePrice: Decodable {
         let displayText: String?
         
         init(displayText: String?) {
@@ -7207,16 +7296,16 @@ private struct ForYouView: View {
         }
         
         init(from decoder: Decoder) throws {
-            let raw = try? MOTNJSONValue(from: decoder)
+            let raw = try? WatchmodeJSONValue(from: decoder)
             displayText = raw?.firstPriceText()
         }
     }
     
-    private enum MOTNJSONValue: Decodable {
+    private enum WatchmodeJSONValue: Decodable {
         case string(String)
         case number(Double)
-        case object([String: MOTNJSONValue])
-        case array([MOTNJSONValue])
+        case object([String: WatchmodeJSONValue])
+        case array([WatchmodeJSONValue])
         case bool(Bool)
         case null
         
@@ -7244,18 +7333,18 @@ private struct ForYouView: View {
             }
             
             if let keyed = try? decoder.container(keyedBy: DynamicCodingKey.self) {
-                var object: [String: MOTNJSONValue] = [:]
+                var object: [String: WatchmodeJSONValue] = [:]
                 for key in keyed.allKeys {
-                    object[key.stringValue] = try keyed.decode(MOTNJSONValue.self, forKey: key)
+                    object[key.stringValue] = try keyed.decode(WatchmodeJSONValue.self, forKey: key)
                 }
                 self = .object(object)
                 return
             }
             
             var unkeyed = try decoder.unkeyedContainer()
-            var array: [MOTNJSONValue] = []
+            var array: [WatchmodeJSONValue] = []
             while !unkeyed.isAtEnd {
-                array.append(try unkeyed.decode(MOTNJSONValue.self))
+                array.append(try unkeyed.decode(WatchmodeJSONValue.self))
             }
             self = .array(array)
         }
@@ -7275,7 +7364,7 @@ private struct ForYouView: View {
             }
         }
         
-        private static func firstPriceText(in values: [MOTNJSONValue]) -> String? {
+        private static func firstPriceText(in values: [WatchmodeJSONValue]) -> String? {
             for value in values {
                 if let found = value.firstPriceText() {
                     return found
@@ -7284,7 +7373,7 @@ private struct ForYouView: View {
             return nil
         }
         
-        private static func firstPriceText(in object: [String: MOTNJSONValue]) -> String? {
+        private static func firstPriceText(in object: [String: WatchmodeJSONValue]) -> String? {
             let preferredKeys: [String] = [
                 "formattedPrice",
                 "priceFormatted",
@@ -7333,7 +7422,7 @@ private struct ForYouView: View {
             return nil
         }
         
-        private static func priceText(from value: MOTNJSONValue, keyHint: String?) -> String? {
+        private static func priceText(from value: WatchmodeJSONValue, keyHint: String?) -> String? {
             switch value {
             case .string(let text):
                 return cleanedPriceString(text, keyHint: keyHint)
@@ -8701,18 +8790,12 @@ private struct ForYouView: View {
     
     private struct StreamingProviderBubble: View {
         let option: StreamingOption
-        @Environment(\.openURL) private var openURL
-        
-        private var tappableURL: URL? {
-            guard let urlString = option.openURL else { return nil }
-            return URL(string: urlString)
-        }
-        
+
         var body: some View {
             ZStack {
                 Circle()
                     .fill(.white.opacity(0.10))
-                
+
                 RemoteImageView(
                     url: option.logoURL,
                     fallback: AnyView(
@@ -8727,11 +8810,6 @@ private struct ForYouView: View {
             .frame(width: 46, height: 46)
             .clipShape(Circle())
             .contentShape(Circle())
-            .opacity(tappableURL == nil ? 0.65 : 1.0)
-            .onTapGesture {
-                guard let tappableURL else { return }
-                openURL(tappableURL)
-            }
         }
     }
     
