@@ -2277,42 +2277,11 @@ private struct ForYouView: View {
                                     .frame(width: 26)
 
                                 VStack(alignment: .leading, spacing: 4) {
-                                    Text("Film Series")
+                                    Text("Franchises")
                                         .font(.headline.bold())
                                         .foregroundStyle(.primary)
 
                                     Text("Browse exact TMDb movie collections discovered from your library.")
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                        .lineLimit(2)
-                                }
-
-                                Spacer(minLength: 0)
-
-                                Image(systemName: "chevron.right")
-                                    .font(.caption.bold())
-                                    .foregroundStyle(.secondary)
-                            }
-                            .padding(14)
-                            .liquidGlass(cornerRadius: 22)
-                            .contentShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
-                        }
-                        .buttonStyle(.plain)
-
-                        NavigationLink {
-                            FranchiseCollectionsView(screenMode: .universes, model: model)
-                        } label: {
-                            HStack(spacing: 12) {
-                                Image(systemName: "sparkles")
-                                    .font(.system(size: 18, weight: .bold))
-                                    .frame(width: 26)
-
-                                VStack(alignment: .leading, spacing: 4) {
-                                    Text("Universes")
-                                        .font(.headline.bold())
-                                        .foregroundStyle(.primary)
-
-                                    Text("Browse broader cross-media franchise groups like Marvel, Star Wars, and DC.")
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
                                         .lineLimit(2)
@@ -2602,7 +2571,7 @@ private struct ForYouView: View {
             case .all:
                 return "Franchises"
             case .series:
-                return "Film Series"
+                return "Franchises"
             case .universes:
                 return "Universes"
             }
@@ -2613,7 +2582,7 @@ private struct ForYouView: View {
             case .all:
                 return "No franchises found"
             case .series:
-                return "No series found"
+                return "No franchises found"
             case .universes:
                 return "No universes found"
             }
@@ -2622,11 +2591,11 @@ private struct ForYouView: View {
         var emptyText: String {
             switch self {
             case .all:
-                return "Series and universe collections appear here after matched movies or series exist in your library."
+                return "Franchises appear here after matched movies or series exist in your library."
             case .series:
-                return "Movie series appear here after a movie in your library belongs to a TMDb collection."
+                return "Franchises appear here after a movie in your library belongs to a TMDb collection."
             case .universes:
-                return "Universes appear here after matched movies or series exist in your library."
+                return "Universe groups appear here after matched movies or series exist in your library."
             }
         }
     }
@@ -2669,13 +2638,29 @@ private struct ForYouView: View {
                     lhs.title.localizedCaseInsensitiveCompare(rhs.title) == .orderedAscending
                 }
         }
+        
+        private var visibleFranchisesForErrorState: [FranchiseCollection] {
+            switch screenMode {
+            case .all:
+                return franchises
+            case .series:
+                return seriesFranchises
+            case .universes:
+                return universeFranchises
+            }
+        }
+
+        private var shouldShowFranchiseLoadError: Bool {
+            guard let tvdbLoadError, !tvdbLoadError.isEmpty else { return false }
+            return visibleFranchisesForErrorState.isEmpty
+        }
 
         var body: some View {
             BaseScreen(title: screenMode.title, filter: .constant(.both), settings: model.settings) {
                 VStack(alignment: .leading, spacing: 14) {
-                    if let tvdbLoadError {
+                    if shouldShowFranchiseLoadError, let tvdbLoadError {
                         StatusBubble(
-                            title: "TVDB franchise load failed",
+                            title: "Franchise load failed",
                             text: "Using local fallback matching. \(tvdbLoadError)"
                         )
                     }
@@ -2688,7 +2673,7 @@ private struct ForYouView: View {
                             )
                         } else {
                             if !seriesFranchises.isEmpty {
-                                Text("Film Series")
+                                Text("Franchises")
                                     .sectionTitle()
 
                                 ForEach(seriesFranchises) { franchise in
@@ -2788,6 +2773,14 @@ private struct ForYouView: View {
                     tvdbLoadError = nil
                 }
             } catch {
+                if error is CancellationError {
+                    return
+                }
+
+                if let urlError = error as? URLError, urlError.code == .cancelled {
+                    return
+                }
+
                 await MainActor.run {
                     tvdbLoadError = error.localizedDescription
                 }
@@ -2869,7 +2862,7 @@ private struct ForYouView: View {
                         .font(.headline.bold())
                         .foregroundStyle(.primary)
 
-                    Text(franchise.tmdbCollectionID != nil ? (count == 1 ? "1 series title" : "\(count) series titles") : (franchise.usesTVDBMembership ? (count == 1 ? "1 universe title" : "\(count) universe titles") : (count == 1 ? "1 locally matched universe title" : "\(count) locally matched universe titles")))
+                    Text(franchise.tmdbCollectionID != nil ? (count == 1 ? "1 franchise title" : "\(count) franchise titles") : (franchise.usesTVDBMembership ? (count == 1 ? "1 universe title" : "\(count) universe titles") : (count == 1 ? "1 locally matched universe title" : "\(count) locally matched universe titles")))
                         .font(.caption.bold())
                         .foregroundStyle(.secondary)
 
@@ -3051,7 +3044,7 @@ private struct ForYouView: View {
 
         private var localMembershipText: String {
             if isSeriesCollection {
-                return model.settings.hideUpcomingFromCollectionRecommendations ? "Remaining uses local film series matching and hides upcoming releases." : "Remaining uses local film series matching for unwatched titles."
+                return model.settings.hideUpcomingFromCollectionRecommendations ? "Remaining uses local franchise matching and hides upcoming releases." : "Remaining uses local franchise matching for unwatched titles."
             }
 
             return model.settings.hideUpcomingFromCollectionRecommendations ? "Unwatched uses local universe matching and hides upcoming releases." : "Unwatched uses local universe matching for unwatched titles."
@@ -3059,7 +3052,7 @@ private struct ForYouView: View {
 
         private var tvdbMembershipText: String {
             if isSeriesCollection {
-                return model.settings.hideUpcomingFromCollectionRecommendations ? "Remaining uses exact TMDb film series membership and hides upcoming releases." : "Remaining uses exact TMDb film series membership for unwatched titles."
+                return model.settings.hideUpcomingFromCollectionRecommendations ? "Remaining uses exact TMDb franchise membership and hides upcoming releases." : "Remaining uses exact TMDb franchise membership for unwatched titles."
             }
 
             if hasUniverseRecommendations {
@@ -3144,7 +3137,7 @@ private struct ForYouView: View {
             if isSeriesCollection {
                 switch mode {
                 case .recommended:
-                    return "Film series complete"
+                    return "Franchises complete"
                 case .watched:
                     return "No watched titles"
                 }
@@ -3162,9 +3155,9 @@ private struct ForYouView: View {
             if isSeriesCollection {
                 switch mode {
                 case .recommended:
-                    return "Every available title in this film series has been marked watched."
+                    return "Every available title in this franchise has been marked watched."
                 case .watched:
-                    return "No titles in this film series have been marked watched yet."
+                    return "No titles in this franchise have been marked watched yet."
                 }
             }
 
@@ -3224,72 +3217,7 @@ private struct ForYouView: View {
     
     private enum FranchiseLibrary {
         static var seedFranchises: [FranchiseCollection] {
-            [
-                FranchiseCollection(
-                    id: "star-wars",
-                    title: "Star Wars",
-                    logoSystemName: "sparkles",
-                    aliases: ["star wars", "mandalorian", "andor", "ahsoka", "obi-wan", "book of boba fett", "clone wars", "rebels", "bad batch", "empire strikes back", "return of the jedi", "new hope", "phantom menace", "attack of the clones", "revenge of the sith", "force awakens", "last jedi", "rise of skywalker"],
-                    description: "Skywalker saga, spin-offs, and related series.",
-                    tvdbListQuery: "Star Wars"
-                ),
-                FranchiseCollection(
-                    id: "marvel",
-                    title: "Marvel",
-                    logoSystemName: "bolt.fill",
-                    aliases: ["marvel", "avengers", "spider-man", "spiderman", "iron man", "captain america", "thor", "black panther", "guardians of the galaxy", "doctor strange", "loki", "wandavision", "x-men", "deadpool", "fantastic four"],
-                    description: "Marvel films, series, and major character branches.",
-                    tvdbListQuery: "Marvel Cinematic Universe"
-                ),
-                FranchiseCollection(
-                    id: "dc",
-                    title: "DC",
-                    logoSystemName: "shield.fill",
-                    aliases: ["batman", "superman", "wonder woman", "justice league", "aquaman", "shazam", "joker", "suicide squad", "peacemaker", "flash", "green lantern"],
-                    description: "DC films, series, and major character branches.",
-                    tvdbListQuery: "DC Comics Franchise"
-                ),
-                FranchiseCollection(
-                    id: "lord-of-the-rings",
-                    title: "The Lord of the Rings",
-                    logoSystemName: "crown.fill",
-                    aliases: ["lord of the rings", "hobbit", "rings of power", "middle-earth", "middle earth"],
-                    description: "Middle-earth films and series.",
-                    tvdbListQuery: "The Lord of the Rings Franchise"
-                ),
-                FranchiseCollection(
-                    id: "harry-potter",
-                    title: "Harry Potter",
-                    logoSystemName: "wand.and.stars",
-                    aliases: ["harry potter", "fantastic beasts", "wizarding world"],
-                    description: "Wizarding World films and related entries.",
-                    tvdbListQuery: "Harry Potter Franchise"
-                ),
-                FranchiseCollection(
-                    id: "jurassic",
-                    title: "Jurassic Park",
-                    logoSystemName: "pawprint.fill",
-                    aliases: ["jurassic park", "jurassic world"],
-                    description: "Jurassic Park and Jurassic World titles.",
-                    tvdbListQuery: "Jurassic Park Franchise"
-                ),
-                FranchiseCollection(
-                    id: "mission-impossible",
-                    title: "Mission: Impossible",
-                    logoSystemName: "flame.fill",
-                    aliases: ["mission: impossible", "mission impossible"],
-                    description: "Mission: Impossible films.",
-                    tvdbListQuery: "Mission Impossible Franchise"
-                ),
-                FranchiseCollection(
-                    id: "fast-furious",
-                    title: "Fast & Furious",
-                    logoSystemName: "car.fill",
-                    aliases: ["fast & furious", "fast and furious", "fast five", "fast x", "hobbs & shaw", "tokyo drift"],
-                    description: "Fast & Furious films and spin-offs.",
-                    tvdbListQuery: "Fast and Furious Franchise"
-                )
-            ]
+            []
         }
 
         static func defaultFranchises(matching items: [MediaItem], tvdbLists: [String: TVDBFranchiseList] = [:]) -> [FranchiseCollection] {
@@ -3541,27 +3469,31 @@ private struct ForYouView: View {
     
     private struct SettingsSheetSurface: View {
         @ObservedObject var model: VestigoModel
-        
+
         var body: some View {
-            SettingsView(model: model)
-                .scrollBounceBehavior(.basedOnSize, axes: .vertical)
-                .overlay(alignment: .top) {
-                    Capsule()
-                        .fill(.white.opacity(0.50))
-                        .frame(width: 48, height: 5)
-                        .padding(.top, 12)
-                        .allowsHitTesting(false)
-                }
-                .background {
-                    RoundedRectangle(cornerRadius: 54, style: .continuous)
-                        .fill(.black.opacity(0.38))
-                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 54, style: .continuous))
-                }
-                .overlay {
-                    RoundedRectangle(cornerRadius: 54, style: .continuous)
-                        .strokeBorder(.white.opacity(0.18), lineWidth: 1.2)
-                }
-                .clipShape(RoundedRectangle(cornerRadius: 54, style: .continuous))
+            VStack(spacing: 0) {
+                SettingsView(model: model)
+                    .scrollBounceBehavior(.basedOnSize, axes: .vertical)
+                    .overlay(alignment: .top) {
+                        Capsule()
+                            .fill(.white.opacity(0.50))
+                            .frame(width: 48, height: 5)
+                            .padding(.top, 12)
+                            .allowsHitTesting(false)
+                    }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            .background {
+                RoundedRectangle(cornerRadius: 54, style: .continuous)
+                    .fill(.black.opacity(0.38))
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 54, style: .continuous))
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: 54, style: .continuous)
+                    .strokeBorder(.white.opacity(0.18), lineWidth: 1.2)
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 54, style: .continuous))
+            .ignoresSafeArea(.container, edges: .bottom)
         }
     }
     
@@ -6753,59 +6685,25 @@ private struct ForYouView: View {
             return try JSONDecoder().decode(T.self, from: data)
         }
     }
-    
+
     private struct StreamingAvailabilityService {
-        private let apiKey = "motn-key-v4-IXg1gldMvu2nMpUtvFxCd1BMXWUMlkss"
-        private let base = "https://api.movieofthenight.com/v4"
+        private let base = "https://mtttuyvpjyugudkevchj.supabase.co/functions/v1/vestigo-api"
         
         func providers(for item: MediaItem) async throws -> [StreamingOption] {
-            let tmdbPrefix = item.kind == .movie ? "movie" : "tv"
-            let searchShowType = item.kind == .movie ? "movie" : "series"
-            let tmdbShowID = "\(tmdbPrefix)/\(item.id)"
-            
-            if let directShow = try? await fetchShow(id: tmdbShowID) {
-                let directOptions = directShow.usOptions
-                if !directOptions.isEmpty {
-                    return directOptions
-                }
-            }
-            
-            let titleMatches = try await searchShowsByTitle(title: item.title, showType: searchShowType)
-            let targetYear = item.releaseDateValue.map { Calendar.current.component(.year, from: $0) }
-            
-            let bestMatch = titleMatches.first { show in
-                show.tmdbId == String(item.id)
-            } ?? titleMatches.first { show in
-                guard let targetYear else { return false }
-                return show.matchYear == targetYear && show.normalizedTitle == item.title.normalizedForMatching
-            } ?? titleMatches.first { show in
-                show.normalizedTitle == item.title.normalizedForMatching
-            } ?? titleMatches.first
-            
-            return bestMatch?.usOptions ?? []
-        }
-        
-        private func fetchShow(id: String) async throws -> MOTNShowResponse {
-            var comps = URLComponents(string: base + "/shows/" + id)!
-            comps.queryItems = [URLQueryItem(name: "country", value: "us")]
-            guard let url = comps.url else { throw URLError(.badURL) }
-            return try await fetch(url: url)
-        }
-        
-        private func searchShowsByTitle(title: String, showType: String) async throws -> [MOTNShowResponse] {
-            var comps = URLComponents(string: base + "/shows/search/title")!
+            var comps = URLComponents(string: base + "/watchmode-sources")!
             comps.queryItems = [
-                URLQueryItem(name: "country", value: "us"),
-                URLQueryItem(name: "title", value: title),
-                URLQueryItem(name: "show_type", value: showType)
+                URLQueryItem(name: "tmdbID", value: String(item.id)),
+                URLQueryItem(name: "kind", value: item.kind == .tv ? "tv" : "movie"),
+                URLQueryItem(name: "country", value: "US")
             ]
+            
             guard let url = comps.url else { throw URLError(.badURL) }
-            return try await fetch(url: url)
+            let response: WatchmodeSourcesResponse = try await fetch(url: url)
+            return response.sources
         }
         
         private func fetch<T: Decodable>(url: URL) async throws -> T {
-            var request = URLRequest(url: url)
-            request.setValue(apiKey, forHTTPHeaderField: "X-API-Key")
+            let request = URLRequest(url: url)
             let (data, response) = try await URLSession.shared.data(for: request)
             if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
                 throw URLError(.badServerResponse)
@@ -6813,7 +6711,18 @@ private struct ForYouView: View {
             return try JSONDecoder().decode(T.self, from: data)
         }
     }
+
+    private struct WatchmodeSourcesResponse: Decodable {
+        let ok: Bool
+        let source: String?
+        let tmdbID: Int?
+        let kind: String?
+        let country: String?
+        let count: Int?
+        let sources: [StreamingOption]
+    }
     
+        
     // MARK: - DTOs
     
     
@@ -7866,29 +7775,64 @@ private struct ForYouView: View {
         }
     }
     
-    private struct StreamingOption: Identifiable, Hashable {
-        let id = UUID()
+    private struct StreamingOption: Codable, Hashable, Identifiable {
+        var id: String {
+            "\(serviceName)-\(type)-\(priceText)-\(qualityText)-\(openURL ?? "")"
+        }
+
+        var serviceShort: String {
+            let cleaned = serviceName.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !cleaned.isEmpty else { return "?" }
+
+            let initials = cleaned
+                .split { !$0.isLetter && !$0.isNumber }
+                .compactMap { $0.first }
+                .prefix(2)
+                .map { String($0).uppercased() }
+                .joined()
+
+            if !initials.isEmpty {
+                return initials
+            }
+
+            return String(cleaned.prefix(2)).uppercased()
+        }
+
+        var availabilityText: String {
+            switch type.lowercased() {
+            case "subscription", "sub":
+                return "Subscription"
+            case "free":
+                return "Free"
+            case "rent", "rental":
+                return "Rent"
+            case "buy", "purchase":
+                return "Buy"
+            case "addon", "add-on", "add_on":
+                return "Add-on"
+            default:
+                return type.isEmpty ? "Available" : type.capitalized
+            }
+        }
+
         let serviceName: String
         let type: String
         let priceText: String
         let qualityText: String
-        var serviceShort: String { serviceName.split(separator: " ").prefix(2).compactMap { $0.first }.map(String.init).joined().uppercased() }
-        var availabilityText: String {
-            let normalizedType = type.lowercased()
-            switch normalizedType {
-            case "free":
-                return "Free"
-            case "subscription", "flatrate", "stream":
-                return "Subscription"
-            case "addon", "add-on", "add_on":
-                return "Addon"
-            case "rent", "rental":
-                return "Rent"
-            case "buy", "purchase", "purchase4k", "buy4k":
-                return "Buy"
-            default:
-                return type.isEmpty ? "Available" : type.capitalized
-            }
+        let openURL: String?
+
+        init(
+            serviceName: String,
+            type: String,
+            priceText: String,
+            qualityText: String,
+            openURL: String? = nil
+        ) {
+            self.serviceName = serviceName
+            self.type = type
+            self.priceText = priceText
+            self.qualityText = qualityText
+            self.openURL = openURL
         }
     }
     
@@ -8280,11 +8224,7 @@ private struct ForYouView: View {
     
     private enum DynamicCollections {
         static func inferredSeriesNames(for item: MediaItem) -> [String] {
-            let title = item.title.lowercased()
-            if title.contains("star wars") || ["andor", "ahsoka", "the mandalorian"].contains(where: title.contains) { return ["Star Wars"] }
-            if title.contains("marvel") || title.contains("avengers") || title.contains("spider-man") { return ["Marvel"] }
-            if title.contains("batman") || title.contains("superman") || title.contains("joker") { return ["DC"] }
-            return []
+            []
         }
         
         static func broadCollections(for item: MediaItem) -> [String] {
@@ -8761,6 +8701,12 @@ private struct ForYouView: View {
     
     private struct StreamingProviderBubble: View {
         let option: StreamingOption
+        @Environment(\.openURL) private var openURL
+        
+        private var tappableURL: URL? {
+            guard let urlString = option.openURL else { return nil }
+            return URL(string: urlString)
+        }
         
         var body: some View {
             ZStack {
@@ -8781,6 +8727,11 @@ private struct ForYouView: View {
             .frame(width: 46, height: 46)
             .clipShape(Circle())
             .contentShape(Circle())
+            .opacity(tappableURL == nil ? 0.65 : 1.0)
+            .onTapGesture {
+                guard let tappableURL else { return }
+                openURL(tappableURL)
+            }
         }
     }
     
@@ -8860,32 +8811,32 @@ private struct PersonSearchResultRow: View {
     
     
 // MARK: - Setting Bubble Modifier
-    
-private struct SettingBubbleModifier: ViewModifier {
-    func body(content: Content) -> some View {
-        content
-            .padding(12)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .liquidGlass(cornerRadius: 24)
+
+    private struct SettingBubbleModifier: ViewModifier {
+        func body(content: Content) -> some View {
+            content
+                .padding(12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .liquidGlass(cornerRadius: 24)
+        }
     }
-}
-    
-private extension View {
-    func settingBubble() -> some View {
-        self
-            .padding(14)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background {
-                RoundedRectangle(cornerRadius: 24, style: .continuous)
-                    .fill(.black.opacity(0.2))
-            }
-            .overlay {
-                RoundedRectangle(cornerRadius: 24, style: .continuous)
-                    .strokeBorder(.white.opacity(0.12), lineWidth: 1)
-            }
-            .contentShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+
+    private extension View {
+        func settingBubble() -> some View {
+            self
+                .padding(14)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background {
+                    RoundedRectangle(cornerRadius: 24, style: .continuous)
+                        .fill(.black.opacity(0.2))
+                }
+                .overlay {
+                    RoundedRectangle(cornerRadius: 24, style: .continuous)
+                        .strokeBorder(.white.opacity(0.12), lineWidth: 1)
+                }
+                .contentShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+        }
     }
-}
     
     
 // MARK: - String Normalization Helper
