@@ -3628,6 +3628,7 @@ private struct ForYouView: View {
     // MARK: - Settings
     
     private struct SettingsSheetSurface: View {
+        @State private var upcomingVisibilityExpanded = false
         @ObservedObject var model: VestigoModel
 
         var body: some View {
