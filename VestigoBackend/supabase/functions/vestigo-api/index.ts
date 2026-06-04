@@ -81,6 +81,87 @@ async function fetchTMDb(path: string, params: Record<string, string> = {}) {
   return await response.json()
 }
 
+const fallbackOMDbAPIKey = "346c15b4"
+
+async function fetchOMDb(params: Record<string, string>) {
+  const omdbKey = Deno.env.get("OMDB_API_KEY") ?? fallbackOMDbAPIKey
+  const url = new URL("https://www.omdbapi.com/")
+  url.searchParams.set("apikey", omdbKey)
+
+  for (const [key, value] of Object.entries(params)) {
+    if (value.trim().length > 0) {
+      url.searchParams.set(key, value)
+    }
+  }
+
+  const response = await fetch(url)
+
+  if (!response.ok) {
+    const text = await response.text()
+    throw new Error(`OMDb request failed: ${response.status} ${text}`)
+  }
+
+  const data = await response.json()
+  if (data?.Response === "False") return null
+  return data
+}
+
+function parseOMDbNumber(value: unknown) {
+  if (typeof value !== "string" || value === "N/A") return null
+  const parsed = Number(value.replace(/,/g, ""))
+  return Number.isFinite(parsed) ? parsed : null
+}
+
+function parseRottenTomatoes(value: unknown) {
+  if (typeof value !== "string" || value === "N/A") return null
+  const parsed = Number(value.replace("%", ""))
+  return Number.isFinite(parsed) ? parsed : null
+}
+
+function normalizeOMDbRatings(data: any) {
+  if (!data) return null
+
+  const rottenTomatoesText = Array.isArray(data.Ratings)
+    ? data.Ratings.find((rating: any) => rating?.Source === "Rotten Tomatoes")?.Value ?? null
+    : null
+
+  return {
+    imdbID: typeof data.imdbID === "string" && data.imdbID !== "N/A" ? data.imdbID : null,
+    imdbRating: parseOMDbNumber(data.imdbRating),
+    imdbVotes: typeof data.imdbVotes === "string" && data.imdbVotes !== "N/A" ? data.imdbVotes : null,
+    rottenTomatoesRating: parseRottenTomatoes(rottenTomatoesText),
+    rottenTomatoesText
+  }
+}
+
+async function omdbRatingsForTMDbID(tmdbID: number, kind: "movie" | "tv", title: string | null) {
+  let imdbID: string | null = null
+
+  try {
+    const externalIDs = await fetchTMDb(`/${kind}/${tmdbID}/external_ids`)
+    const rawIMDbID = String(externalIDs?.imdb_id ?? "").trim()
+    imdbID = rawIMDbID.length > 0 ? rawIMDbID : null
+  } catch {
+    imdbID = null
+  }
+
+  if (imdbID) {
+    const data = await fetchOMDb({ i: imdbID, plot: "short" })
+    return normalizeOMDbRatings(data)
+  }
+
+  if (title && title.trim().length > 0) {
+    const data = await fetchOMDb({
+      t: title,
+      type: kind === "movie" ? "movie" : "series",
+      plot: "short"
+    })
+    return normalizeOMDbRatings(data)
+  }
+
+  return null
+}
+
 // --- Watchmode helper functions ---
 async function fetchWatchmode(path: string, params: Record<string, string> = {}) {
   const watchmodeKey = Deno.env.get("WATCHMODE_API_KEY")
@@ -843,7 +924,8 @@ Deno.serve(async (req) => {
           TVDB_API_KEY: previewSecret("TVDB_API_KEY"),
           TMDB_API_KEY: previewSecret("TMDB_API_KEY"),
           MOVIE_OF_THE_NIGHT_KEY: previewSecret("MOVIE_OF_THE_NIGHT_KEY"),
-          WATCHMODE_API_KEY: previewSecret("WATCHMODE_API_KEY")
+          WATCHMODE_API_KEY: previewSecret("WATCHMODE_API_KEY"),
+          OMDB_API_KEY: previewSecret("OMDB_API_KEY")
         }
       })
     }
@@ -913,6 +995,36 @@ Deno.serve(async (req) => {
         country,
         count: sources.length,
         sources
+      })
+    }
+
+    if (url.pathname.endsWith("/ratings")) {
+      const tmdbID = Number(url.searchParams.get("tmdbID") ?? url.searchParams.get("id"))
+      const rawKind = String(url.searchParams.get("kind") ?? "movie").toLowerCase()
+      const title = url.searchParams.get("title")
+
+      if (!Number.isFinite(tmdbID) || tmdbID <= 0) {
+        return Response.json(
+          { ok: false, error: "Missing or invalid tmdbID" },
+          { status: 400 }
+        )
+      }
+
+      if (rawKind !== "movie" && rawKind !== "tv") {
+        return Response.json(
+          { ok: false, error: "kind must be movie or tv" },
+          { status: 400 }
+        )
+      }
+
+      const ratings = await omdbRatingsForTMDbID(tmdbID, rawKind, title)
+
+      return Response.json({
+        ok: true,
+        source: "omdb",
+        tmdbID,
+        kind: rawKind,
+        ratings
       })
     }
 
