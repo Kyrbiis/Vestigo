@@ -294,6 +294,7 @@ private final class VestigoModel: ObservableObject {
     @Published var pendingRatingPromptItem: MediaItem?
     @Published var pendingRatingPromptValue: Double = 0
     @Published var pendingRatingPromptMakeFavourite = false
+    @Published var pendingRatingPromptRestoreWatchlist = false
     
     @Published var library = UserLibrary()
     @Published var settings = AppSettings()
@@ -486,6 +487,10 @@ private final class VestigoModel: ObservableObject {
             errorText = error.localizedDescription
         }
         isLoading = false
+    }
+
+    func refreshHome() async {
+        await loadHome()
     }
     
     func loadSmartRecommendations() async {
@@ -712,12 +717,7 @@ private final class VestigoModel: ObservableObject {
     }
 
     func pickForMeRecommendations(for answers: PickForMeAnswers) async -> [MediaItem] {
-        let selectedGenreIDs = Set(
-            answers.genres
-                .filter { !$0.isAnyOption }
-                .flatMap(\.genreIDs)
-        )
-        let effectiveFilter = answers.mediaFilter ?? .both
+        let effectiveFilter = answers.effectiveMediaFilter
         var candidates = (
             recommendations +
             moreLikeLastWatched +
@@ -735,8 +735,8 @@ private final class VestigoModel: ObservableObject {
         do {
             let discovered = try await tmdb.discoverPickForMe(
                 filter: effectiveFilter,
-                genreIDs: selectedGenreIDs,
-                runtime: answers.runtime,
+                genreIDs: [],
+                runtime: nil,
                 minimumRating: 0,
                 includeAdult: !settings.hideAdultResults
             )
@@ -753,51 +753,21 @@ private final class VestigoModel: ObservableObject {
                 guard !settings.hideUpcomingFromRecommended || !item.isUpcoming else { return false }
                 guard effectiveFilter == .both || item.kind.rawValue == effectiveFilter.rawValue else { return false }
 
-                if let tmdbRating = answers.tmdbRating, ratingSortValue(for: item) < tmdbRating.minimumTMDbRating {
-                    return false
-                }
-
-                if let minimumYear = answers.releaseAge?.minimumYear,
-                   let releaseYear = item.releaseDateValue.map({ Calendar.current.component(.year, from: $0) }),
-                   releaseYear < minimumYear {
-                    return false
-                }
-
-                if let runtime = answers.runtime {
-                    let minutes = detailsCache[item.key]?.runtime ?? item.runtime
-                    if let minutes, !runtime.contains(minutes) {
-                        return false
-                    }
-                }
-
-                if let language = answers.language, language == .englishOnly, item.originalLanguage != nil, item.originalLanguage != "en" {
-                    return false
-                }
-
-                if !answers.ageRatings.isEmpty,
+                if !answers.contentRatings.isEmpty,
                    let detailRating = detailsCache[item.key]?.ageRating,
                    !detailRating.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                   !PickForMeAgeRating.allowedBySelection(answers.ageRatings, rating: detailRating) {
+                   !PickForMeContentRating.selectionAllows(answers.contentRatings, rating: detailRating) {
                     return false
                 }
 
-                if let goreLevel = answers.goreLevel, goreLevel == .low, pickForMeGoreScore(for: item, goreLevel: goreLevel) < 0 {
-                    return false
-                }
-
-                if !selectedGenreIDs.isEmpty && selectedGenreIDs.isDisjoint(with: Set(item.genreIDs)) {
+                if answers.dealBreakers.contains(where: { pickForMeDealBreakerMatches(item: item, dealBreaker: $0) }) {
                     return false
                 }
 
                 return true
             }
 
-        let flexibleExtraMatches = filtered.filter { item in
-            guard let extra = answers.extra else { return true }
-            return extra == .none || pickForMeExtraScore(for: item, extra: extra) > 0
-        }
-        let scoredPool = flexibleExtraMatches.isEmpty ? filtered : flexibleExtraMatches
-        let prepared = preparedResults(scoredPool, hideWatched: true)
+        let prepared = preparedResults(filtered, hideWatched: true)
         let visible = prepared.filter { item in
             !settings.hideShortFilmsFromRecommended || !shouldHideAsShortFilm(item, enabled: true)
         }
@@ -823,158 +793,343 @@ private final class VestigoModel: ObservableObject {
     }
 
     private func pickForMeScore(_ item: MediaItem, answers: PickForMeAnswers) -> Double {
-        var score = max(ratingSortValue(for: item), 0)
+        var score = max(ratingSortValue(for: item), 0) * 0.75
         let genreIDs = Set(item.genreIDs)
+        let text = pickForMeSearchableText(for: item)
 
-        for genre in answers.genres where !genre.isAnyOption {
-            if !genre.genreIDs.isDisjoint(with: genreIDs) {
-                score += 2.8
-            }
+        let primaryArchetypeScores = answers.archetypes.map { archetype in
+            pickForMeArchetypeScore(item: item, archetype: archetype)
         }
 
-        if let mood = answers.mood {
-            score += pickForMeMoodScore(for: item, mood: mood)
+        for (archetype, archetypeScore) in zip(answers.archetypes, primaryArchetypeScores) {
+            score += archetypeScore * (archetype == .surprise ? 0.65 : 1.0)
         }
 
-        if let occasion = answers.occasion {
-            score += pickForMeOccasionScore(for: item, occasion: occasion)
+        for secondaryArchetype in answers.secondaryArchetypes where secondaryArchetype != .surprise {
+            score += pickForMeArchetypeScore(item: item, archetype: secondaryArchetype) * 0.42
         }
 
-        if let pace = answers.pace {
-            score += pickForMePaceScore(for: item, pace: pace)
+        score += pickForMeArchetypeCombinationBonus(primaryScores: primaryArchetypeScores)
+
+        for genrePreference in answers.genrePreferences where !genrePreference.isAnyOption {
+            score += pickForMeGenrePreferenceScore(genres: genreIDs, text: text, genrePreference: genrePreference)
         }
 
-        if let intensity = answers.intensity {
-            score += pickForMeIntensityScore(for: item, intensity: intensity)
+        if let seriousness = answers.seriousness {
+            score += pickForMeSeriousnessScore(genres: genreIDs, text: text, seriousness: seriousness)
         }
 
-        if let language = answers.language, language == .englishOnly, item.originalLanguage == "en" || item.originalLanguage == nil {
-            score += 0.9
+        if let realism = answers.realism {
+            score += pickForMeRealismScore(genres: genreIDs, text: text, realism: realism)
         }
 
-        if !answers.ageRatings.isEmpty,
+        if let actionLevel = answers.actionLevel {
+            score += pickForMeActionScore(genres: genreIDs, actionLevel: actionLevel)
+        }
+
+        if let engagement = answers.engagement {
+            score += pickForMeEngagementScore(genres: genreIDs, text: text, engagement: engagement)
+        }
+
+        if let recommendationType = answers.recommendationType {
+            score += pickForMeRecommendationTypeScore(for: item, recommendationType: recommendationType)
+        }
+
+        if item.kind == .movie, let runtime = answers.runtime {
+            let minutes = detailsCache[item.key]?.runtime ?? item.runtime
+            score += pickForMeRuntimeScore(minutes: minutes, runtime: runtime)
+        }
+
+        if let minimumRating = answers.minimumRating {
+            score += pickForMeMinimumRatingScore(for: item, minimumRating: minimumRating)
+        }
+
+        if !answers.contentRatings.isEmpty,
            let detailRating = detailsCache[item.key]?.ageRating {
-            score += PickForMeAgeRating.preferenceScore(selection: answers.ageRatings, rating: detailRating)
+            score += PickForMeContentRating.preferenceScore(selection: answers.contentRatings, rating: detailRating)
         }
 
         if let goreLevel = answers.goreLevel {
-            score += pickForMeGoreScore(for: item, goreLevel: goreLevel)
-        }
-
-        if let extra = answers.extra {
-            score += pickForMeExtraScore(for: item, extra: extra)
+            score += pickForMeGoreScore(genres: genreIDs, text: text, goreLevel: goreLevel)
         }
 
         if library.isInWatchlist(item.key) {
-            score += 3.0
+            score += 5.0
         }
 
         if recommendations.contains(where: { $0.key == item.key }) ||
             moreLikeLastWatched.contains(where: { $0.key == item.key }) ||
             moreLikeFavourite.contains(where: { $0.key == item.key }) {
-            score += 2.0
+            score += 2.5
         }
+
+        score += pickForMePersonalizationScore(for: item)
 
         return score
     }
 
-    private func pickForMePaceScore(for item: MediaItem, pace: PickForMePace) -> Double {
+    private func pickForMeArchetypeScore(item: MediaItem, archetype: PickForMeArchetype) -> Double {
         let genres = Set(item.genreIDs)
-        switch pace {
-        case .easy:
-            return genres.intersection([35, 10749, 10751, 16]).isEmpty ? 0 : 1.8
+        let text = pickForMeSearchableText(for: item)
+
+        switch archetype {
+        case .feelGood:
+            return pickForMeKeywordScore(text, ["optimistic", "heartwarming", "friendship", "family", "personal growth", "inspiring", "uplifting", "feel-good", "new beginning"]) * 1.8 +
+                (genres.intersection([35, 10751, 18, 12]).isEmpty ? 0 : 4.2) -
+                (genres.intersection([27, 10752]).isEmpty ? 0 : 1.8)
+        case .comedy:
+            return pickForMeKeywordScore(text, ["satire", "buddy comedy", "workplace comedy", "funny", "comedian", "laugh"]) * 1.7 +
+                (genres.contains(35) ? 5.0 : 0)
+        case .mystery:
+            return pickForMeKeywordScore(text, ["detective", "investigation", "conspiracy", "murder mystery", "whodunnit", "clue", "secret"]) * 2.0 +
+                (genres.intersection([9648, 53, 80]).isEmpty ? 0 : 4.6)
+        case .thriller:
+            return pickForMeKeywordScore(text, ["danger", "survival", "suspense", "pursuit", "fugitive", "threat", "uncertainty", "crime"]) * 1.8 +
+                (genres.intersection([53, 80, 28]).isEmpty ? 0 : 4.5)
+        case .smartProblems:
+            var score = pickForMeKeywordScore(text, ["investigation", "journalist", "scientist", "engineer", "rescue mission", "courtroom", "legal", "historical event", "based on true", "expert", "team"]) * 2.0
+            score += genres.intersection([18, 53, 36]).isEmpty ? 0 : 4.0
+            if genres.contains(14) || genres.contains(27) { score -= 2.5 }
+            if genres.contains(35) && !genres.contains(18) { score -= 1.2 }
+            return score
+        case .mission:
+            return pickForMeKeywordScore(text, ["mission", "operation", "rescue", "espionage", "military objective", "survival objective", "special operations", "spy", "objective"]) * 2.0 +
+                (genres.intersection([53, 28, 10752, 80, 36]).isEmpty ? 0 : 4.2)
+        case .heist:
+            return pickForMeKeywordScore(text, ["heist", "robbery", "con artist", "con man", "con woman", "theft", "casino", "caper", "scheme", "steal"]) * 2.4 +
+                (genres.intersection([80, 53, 35, 28]).isEmpty ? 0 : 4.0)
+        case .adventure:
+            return pickForMeKeywordScore(text, ["treasure", "expedition", "exploration", "archaeology", "quest", "journey", "travel"]) * 2.0 +
+                (genres.intersection([12, 28, 10759]).isEmpty ? 0 : 4.4)
+        case .characterRelationships:
+            return pickForMeKeywordScore(text, ["family", "friendship", "relationship", "relationships", "coming of age", "personal growth", "love"]) * 1.7 +
+                (genres.intersection([18, 35, 10749]).isEmpty ? 0 : 4.0)
+        case .historical:
+            return pickForMeKeywordScore(text, ["biography", "historical", "true story", "real events", "political history", "based on true", "war"]) * 1.9 +
+                (genres.intersection([36, 10752, 18]).isEmpty ? 0 : 4.4)
+        case .epicSpectacle:
+            return pickForMeKeywordScore(text, ["epic", "space", "disaster", "war", "planet", "future", "battle", "large-scale", "world"]) * 1.9 +
+                (genres.intersection([878, 28, 12, 10752]).isEmpty ? 0 : 4.8)
+        case .mindBending:
+            return pickForMeKeywordScore(text, ["memory", "nonlinear", "alternate reality", "twist", "puzzle", "mind-bending", "reality", "dream"]) * 2.1 +
+                (genres.intersection([9648, 878, 53]).isEmpty ? 0 : 4.0)
+        case .horror:
+            return pickForMeKeywordScore(text, ["supernatural", "monster", "possession", "slasher", "psychological horror", "terror", "dread", "haunted"]) * 2.0 +
+                (genres.contains(27) ? 5.0 : 0)
+        case .thoughtfulSciFi:
+            return pickForMeKeywordScore(text, ["artificial intelligence", "ethics", "future society", "technology", "consciousness", "philosophical", "experiment"]) * 2.1 +
+                (genres.intersection([878, 18]).isEmpty ? 0 : 4.1) -
+                (genres.intersection([28, 10752]).isEmpty ? 0 : 1.0)
+        case .surprise:
+            return ratingSortValue(for: item) + (library.isInWatchlist(item.key) ? 2.0 : 0)
+        }
+    }
+
+    private func pickForMeArchetypeCombinationBonus(primaryScores: [Double]) -> Double {
+        let strongMatches = primaryScores.filter { $0 >= 3.5 }.count
+        guard strongMatches >= 2 else { return 0 }
+        return Double(strongMatches - 1) * 2.4
+    }
+
+    private func pickForMeSeriousnessScore(genres: Set<Int>, text: String, seriousness: PickForMeSeriousness) -> Double {
+        switch seriousness {
+        case .lightFun:
+            return (genres.intersection([35, 12, 10751, 16]).isEmpty ? 0 : 3.0) - (genres.intersection([27, 10752]).isEmpty ? 0 : 2.5) - (text.containsAny(["grief", "tragedy", "terminal"]) ? 1.8 : 0)
+        case .mostlyFun:
+            return (genres.intersection([35, 12, 28]).isEmpty ? 0 : 2.2) - (genres.contains(27) ? 1.4 : 0)
         case .balanced:
-            return 0.8
-        case .fast:
-            return genres.intersection([28, 12, 53, 27]).isEmpty ? 0 : 2.0
+            return 1.0
+        case .serious:
+            return genres.intersection([18, 53, 36, 10752]).isEmpty ? 0.4 : 2.6
+        case .intense:
+            return genres.intersection([53, 27, 28, 80, 10752]).isEmpty ? -0.5 : 3.4
+        case .noPreference:
+            return 0
         }
     }
 
-    private func pickForMeIntensityScore(for item: MediaItem, intensity: PickForMeIntensity) -> Double {
-        let genres = Set(item.genreIDs)
-        switch intensity {
-        case .light:
-            return genres.intersection([35, 16, 10751, 10749]).isEmpty ? 0 : 2.0
-        case .medium:
-            return genres.intersection([18, 80, 9648, 12]).isEmpty ? 0.6 : 1.6
-        case .heavy:
-            return genres.intersection([27, 53, 80, 10752]).isEmpty ? 0 : 2.2
+    private func pickForMeGenrePreferenceScore(genres: Set<Int>, text: String, genrePreference: PickForMeGenrePreference) -> Double {
+        switch genrePreference {
+        case .space:
+            return genres.contains(878) || text.containsAny(["space", "planet", "astronaut", "galaxy"]) ? 1.4 : 0
+        case .fantasy:
+            return genres.contains(14) || text.containsAny(["magic", "fantasy", "kingdom"]) ? 1.2 : 0
+        case .sciFi:
+            return genres.contains(878) || genres.contains(10765) ? 1.25 : 0
+        case .history:
+            return genres.contains(36) || text.containsAny(["historical", "history", "true story"]) ? 1.15 : 0
+        case .crime:
+            return genres.contains(80) || text.containsAny(["crime", "detective", "police"]) ? 1.15 : 0
+        case .war:
+            return genres.contains(10752) || genres.contains(10768) || text.contains("war") ? 1.15 : 0
+        case .romance:
+            return genres.contains(10749) ? 1.0 : 0
+        case .animation:
+            return genres.contains(16) ? 1.0 : 0
+        case .family:
+            return genres.contains(10751) || genres.contains(10762) ? 1.0 : 0
+        case .horror:
+            return genres.contains(27) ? 1.1 : 0
+        case .noPreference:
+            return 0
         }
     }
 
-    private func pickForMeGoreScore(for item: MediaItem, goreLevel: PickForMeGoreLevel) -> Double {
-        let searchableText = "\(item.title) \(item.overview)".lowercased()
-        let genres = Set(item.genreIDs)
-        let likelyGory = genres.contains(27) || searchableText.containsAny(["gore", "bloody", "blood", "slasher", "violent", "brutal"])
+    private func pickForMeRealismScore(genres: Set<Int>, text: String, realism: PickForMeRealism) -> Double {
+        let speculative = !genres.intersection([878, 14, 10765]).isEmpty || text.containsAny(["superhero", "magic", "alien", "monster"])
+        switch realism {
+        case .realWorld:
+            return speculative ? -6.0 : (genres.intersection([18, 36, 53, 10752]).isEmpty ? 1.2 : 3.0)
+        case .mostlyRealistic:
+            return speculative ? -2.2 : 2.0
+        case .someSpeculative:
+            return speculative ? 1.8 : 0.8
+        case .anything:
+            return 0
+        }
+    }
 
+    private func pickForMeActionScore(genres: Set<Int>, actionLevel: PickForMeActionLevel) -> Double {
+        let hasAction = !genres.intersection([28, 12, 53, 10752, 10759]).isEmpty
+        switch actionLevel {
+        case .none:
+            return hasAction ? -3.5 : 2.0
+        case .little:
+            return hasAction ? 0.8 : 1.4
+        case .moderate:
+            return hasAction ? 2.6 : -0.4
+        case .lots:
+            return hasAction ? 4.0 : -1.5
+        case .noPreference:
+            return 0
+        }
+    }
+
+    private func pickForMeEngagementScore(genres: Set<Int>, text: String, engagement: PickForMeEngagement) -> Double {
+        switch engagement {
+        case .easy:
+            return (genres.intersection([35, 12, 28, 10751]).isEmpty ? 0.4 : 2.4) - (text.containsAny(["conspiracy", "nonlinear", "mind-bending", "puzzle"]) ? 2.0 : 0)
+        case .moderate:
+            return genres.intersection([18, 53, 12, 80]).isEmpty ? 0.8 : 2.0
+        case .focused:
+            return (genres.intersection([9648, 53, 878, 80]).isEmpty ? 0 : 3.0) + (text.containsAny(["investigation", "conspiracy", "mystery", "puzzle", "secret"]) ? 2.0 : 0) - (genres.contains(35) && !genres.contains(18) ? 1.5 : 0)
+        case .noPreference:
+            return 0
+        }
+    }
+
+    private func pickForMeGoreScore(genres: Set<Int>, text: String, goreLevel: PickForMeGoreLevel) -> Double {
+        let likelyGory = genres.contains(27) || text.containsAny(["gore", "bloody", "blood", "slasher", "violent", "brutal"])
         switch goreLevel {
         case .low:
-            return likelyGory ? -5.0 : 1.5
+            return likelyGory ? -3.2 : 1.1
         case .some:
-            return likelyGory ? 0.6 : 0.8
+            return likelyGory ? 0.3 : 0.6
         case .high:
-            return likelyGory ? 2.2 : 0
-        }
-    }
-
-    private func pickForMeMoodScore(for item: MediaItem, mood: PickForMeMood) -> Double {
-        let genres = Set(item.genreIDs)
-        switch mood {
-        case .happy:
-            return genres.intersection([35, 12, 16, 10751]).isEmpty ? 0 : 2.4
-        case .neutral:
-            return genres.intersection([18, 80, 9648, 878, 14]).isEmpty ? 0.8 : 1.8
-        case .sad:
-            return genres.intersection([18, 10749, 10402, 10751]).isEmpty ? 0 : 2.2
-        }
-    }
-
-    private func pickForMeOccasionScore(for item: MediaItem, occasion: PickForMeOccasion) -> Double {
-        let genres = Set(item.genreIDs)
-        switch occasion {
-        case .alone:
-            return 0.8
-        case .date:
-            return genres.intersection([35, 10749, 18]).isEmpty ? 0 : 2.0
-        case .friends:
-            return genres.intersection([28, 12, 35, 27, 53]).isEmpty ? 0 : 2.0
-        case .family:
-            return genres.intersection([16, 10751, 12, 35]).isEmpty ? -1.5 : 2.8
-        }
-    }
-
-    private func pickForMeExtraScore(for item: MediaItem, extra: PickForMeExtraCategory) -> Double {
-        guard extra != .none else { return 0 }
-
-        let searchableText = "\(item.title) \(item.overview)".lowercased()
-        let genres = Set(item.genreIDs)
-
-        switch extra {
-        case .none:
+            return likelyGory ? 1.4 : 0
+        case .noPreference:
             return 0
-        case .trueStory:
-            return searchableText.containsAny(["true story", "based on true", "real-life", "biography"]) ? 3.0 : 0
-        case .lifeChanging:
-            return genres.contains(18) || searchableText.containsAny(["life", "journey", "inspire", "meaning"]) ? 2.2 : 0
-        case .newYork:
-            return searchableText.containsAny(["new york", "manhattan", "brooklyn"]) ? 3.0 : 0
-        case .spiesAndCops:
-            return genres.intersection([28, 80, 53]).isEmpty && !searchableText.containsAny(["spy", "cop", "police", "agent"]) ? 0 : 3.0
-        case .space:
-            return genres.contains(878) || searchableText.containsAny(["space", "planet", "astronaut", "galaxy"]) ? 3.0 : 0
-        case .wedding:
-            return searchableText.contains("wedding") ? 3.0 : 0
-        case .heist:
-            return searchableText.containsAny(["heist", "robbery", "thief", "thieves"]) ? 3.0 : 0
-        case .book:
-            return searchableText.containsAny(["novel", "book", "based on"]) ? 2.6 : 0
-        case .racing:
-            return searchableText.containsAny(["race", "racing", "driver", "car"]) ? 3.0 : 0
-        case .sequels:
-            return searchableText.containsAny(["sequel", "prequel", "franchise"]) || item.title.contains(":") ? 2.0 : 0
-        case .topRated:
-            return ratingSortValue(for: item) >= 7.5 ? 3.0 : 0
         }
+    }
+
+    private func pickForMeRecommendationTypeScore(for item: MediaItem, recommendationType: PickForMeRecommendationType) -> Double {
+        let rating = ratingSortValue(for: item)
+        let isFromMainstreamLists = popular.contains(where: { $0.key == item.key }) || trending.contains(where: { $0.key == item.key }) || newReleases.contains(where: { $0.key == item.key })
+
+        switch recommendationType {
+        case .crowdPleaser:
+            return isFromMainstreamLists ? 2.8 : 0.8
+        case .acclaimed:
+            return rating >= 8 ? 3.6 : rating >= 7 ? 2.0 : -0.6
+        case .hiddenGem:
+            return !isFromMainstreamLists && rating >= 6.5 ? 3.0 : -0.4
+        case .noPreference:
+            return 0
+        }
+    }
+
+    private func pickForMeRuntimeScore(minutes: Int?, runtime: PickForMeRuntime) -> Double {
+        guard let minutes else { return 0 }
+        if runtime.contains(minutes) {
+            return 2.2
+        }
+
+        if let maximum = runtime.maximumMinutes, minutes <= maximum + 15 {
+            return 0.5
+        }
+
+        return -1.8
+    }
+
+    private func pickForMeMinimumRatingScore(for item: MediaItem, minimumRating: PickForMeMinimumRating) -> Double {
+        guard let minimum = minimumRating.minimumRating else { return 0 }
+        let rating = ratingSortValue(for: item)
+        if rating >= minimum {
+            return 2.4 + min(rating - minimum, 1.5)
+        }
+
+        if rating >= minimum - 0.5 {
+            return 0.4
+        }
+
+        return -2.0
+    }
+
+    private func pickForMePersonalizationScore(for item: MediaItem) -> Double {
+        let itemGenres = Set(item.genreIDs)
+        guard !itemGenres.isEmpty else { return 0 }
+
+        let highlyRatedItems = library.ratings.compactMap { key, rating in
+            rating >= 4 ? library.items[key] : nil
+        }
+
+        let favouriteScore = pickForMeGenreOverlapScore(itemGenres: itemGenres, sourceItems: library.favouriteItems, weight: 0.85, cap: 3.4)
+        let highlyRatedScore = pickForMeGenreOverlapScore(itemGenres: itemGenres, sourceItems: highlyRatedItems, weight: 0.7, cap: 3.0)
+        let watchedScore = pickForMeGenreOverlapScore(itemGenres: itemGenres, sourceItems: library.watchedItems, weight: 0.22, cap: 2.0)
+        return favouriteScore + highlyRatedScore + watchedScore
+    }
+
+    private func pickForMeGenreOverlapScore(itemGenres: Set<Int>, sourceItems: [MediaItem], weight: Double, cap: Double) -> Double {
+        let overlapCount = sourceItems.uniqued().reduce(0) { partialResult, other in
+            partialResult + (itemGenres.isDisjoint(with: Set(other.genreIDs)) ? 0 : 1)
+        }
+
+        return min(Double(overlapCount) * weight, cap)
+    }
+
+    private func pickForMeDealBreakerMatches(item: MediaItem, dealBreaker: PickForMeDealBreaker) -> Bool {
+        guard dealBreaker != .none else { return false }
+
+        let genres = Set(item.genreIDs)
+        let text = pickForMeSearchableText(for: item)
+
+        switch dealBreaker {
+        case .horror:
+            return genres.contains(27) || text.containsAny(["horror", "slasher", "haunted", "demon"])
+        case .romanceHeavy:
+            return genres.contains(10749) && genres.intersection([28, 12, 878, 9648, 53]).isEmpty
+        case .animation:
+            return genres.contains(16)
+        case .superhero:
+            return text.containsAny(["superhero", "super hero", "marvel", "dc comics", "batman", "superman", "spider-man", "spider man", "avengers", "x-men", "comic book"])
+        case .verySad:
+            return text.containsAny(["grief", "tragedy", "terminal", "mourning", "devastating", "death of"])
+        case .foreignLanguage:
+            return item.originalLanguage != nil && item.originalLanguage != "en"
+        case .longRuntime:
+            let minutes = detailsCache[item.key]?.runtime ?? item.runtime
+            return (minutes ?? 0) >= 150
+        case .none:
+            return false
+        }
+    }
+
+    private func pickForMeKeywordScore(_ text: String, _ keywords: [String]) -> Double {
+        Double(keywords.filter { text.contains($0) }.count)
+    }
+
+    private func pickForMeSearchableText(for item: MediaItem) -> String {
+        "\(item.title) \(item.overview)".lowercased()
     }
     
     func updateSearch() {
@@ -1453,12 +1608,14 @@ private final class VestigoModel: ObservableObject {
             collectionRecommendations.removeAll()
         }
         
+        let shouldRestoreWatchlistIfPromptCancelled = !wasWatched && isNowWatched && settings.removeItemsFromWatchlist && library.isInWatchlist(item.key)
+
         if !wasWatched, isNowWatched, settings.removeItemsFromWatchlist {
             library.watchlist.remove(item.key)
         }
         
         if library.isWatched(item.key) {
-            requestRatingPromptIfNeeded(for: item)
+            requestRatingPromptIfNeeded(for: item, restoreWatchlistOnCancel: shouldRestoreWatchlistIfPromptCancelled)
         }
         
         if isNowWatched {
@@ -1476,7 +1633,7 @@ private final class VestigoModel: ObservableObject {
         }
     }
     
-    func requestRatingPromptIfNeeded(for item: MediaItem) {
+    func requestRatingPromptIfNeeded(for item: MediaItem, restoreWatchlistOnCancel: Bool = false) {
         guard settings.promptToRateAfterMarkingWatched else { return }
         guard library.isWatched(item.key) else { return }
         guard item.kind == .movie || item.kind == .tv else { return }
@@ -1484,6 +1641,7 @@ private final class VestigoModel: ObservableObject {
         pendingRatingPromptItem = item
         pendingRatingPromptValue = library.ratings[item.key] ?? 0
         pendingRatingPromptMakeFavourite = library.isFavourite(item)
+        pendingRatingPromptRestoreWatchlist = restoreWatchlistOnCancel
     }
 
     func confirmPendingRatingPrompt() {
@@ -1494,6 +1652,7 @@ private final class VestigoModel: ObservableObject {
         pendingRatingPromptItem = nil
         pendingRatingPromptValue = 0
         pendingRatingPromptMakeFavourite = false
+        pendingRatingPromptRestoreWatchlist = false
 
         if shouldMakeFavourite, !library.isFavourite(item) {
             requestToggleFavourite(item)
@@ -1501,9 +1660,35 @@ private final class VestigoModel: ObservableObject {
     }
 
     func dismissPendingRatingPrompt() {
+        if let item = pendingRatingPromptItem {
+            withdrawPendingRatingPromptWatchedStatus(for: item)
+        }
+
         pendingRatingPromptItem = nil
         pendingRatingPromptValue = 0
         pendingRatingPromptMakeFavourite = false
+        pendingRatingPromptRestoreWatchlist = false
+    }
+
+    private func withdrawPendingRatingPromptWatchedStatus(for item: MediaItem) {
+        guard library.isWatched(item.key) else { return }
+
+        library.toggleWatched(item)
+        library.ratings.removeValue(forKey: item.key)
+        library.favouriteKeys.remove(item.key)
+
+        if pendingRatingPromptRestoreWatchlist {
+            library.watchlist.insert(item.key)
+            library.items[item.key] = item
+        }
+
+        for index in library.collections.indices {
+            library.collections[index].itemKeys.remove(item.key)
+        }
+
+        collectionRecommendations.removeAll()
+        saveLocalSoon()
+        Task { await loadSmartRecommendations() }
     }
     
     private func removeFromForYouRecommendations(_ item: MediaItem) {
@@ -1944,7 +2129,7 @@ private struct HomeView: View {
                 .accessibilityLabel("Settings")
             ),
             onRefresh: {
-                await model.loadHome()
+                await model.refreshHome()
             }
         ) {
             VStack(spacing: 22) {
@@ -1998,7 +2183,7 @@ private struct FullSectionView: View {
 
     var body: some View {
         BaseScreen(title: route.title, filter: $model.mediaFilter, settings: model.settings, onRefresh: {
-            await model.loadHome()
+            await model.refreshHome()
         }) {
             MediaGridOrList(items: items, hideWatchedForUpcoming: route == .upcoming, model: model)
         }
@@ -2736,7 +2921,7 @@ private struct PickForMeView: View {
     init(model: VestigoModel, startingFilter: MediaFilter) {
         self.model = model
         self.startingFilter = startingFilter
-        self._answers = State(initialValue: PickForMeAnswers(mediaFilter: startingFilter == .both ? nil : startingFilter))
+        self._answers = State(initialValue: PickForMeAnswers(mediaFormat: PickForMeMediaFormat(startingFilter)))
     }
 
     var body: some View {
@@ -2744,23 +2929,38 @@ private struct PickForMeView: View {
             AppBackground(settings: model.settings)
                 .ignoresSafeArea()
 
-            ScrollView(.vertical, showsIndicators: false) {
-                VStack(alignment: .leading, spacing: 24) {
-                    header
+            ScrollViewReader { proxy in
+                ScrollView(.vertical, showsIndicators: false) {
+                    Color.clear
+                        .frame(height: 0)
+                        .id("pickForMeTop")
 
-                    if results.isEmpty {
-                        questionContent
-                    } else {
-                        resultContent
+                    VStack(alignment: .leading, spacing: 24) {
+                        header
+
+                        if results.isEmpty {
+                            questionContent
+                        } else {
+                            resultContent
+                        }
                     }
+                    .padding(16)
+                    .padding(.bottom, 28)
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
                 }
-                .padding(16)
-                .padding(.bottom, 28)
-                .frame(maxWidth: .infinity, alignment: .topLeading)
+                .scrollContentBackground(.hidden)
+                .scrollIndicators(.hidden)
+                .scrollBounceBehavior(.basedOnSize, axes: .vertical)
+                .onChange(of: step) { _, _ in
+                    scrollToTop(with: proxy)
+                }
+                .onChange(of: resultIndex) { _, _ in
+                    scrollToTop(with: proxy)
+                }
+                .onChange(of: results.isEmpty) { _, _ in
+                    scrollToTop(with: proxy)
+                }
             }
-            .scrollContentBackground(.hidden)
-            .scrollIndicators(.hidden)
-            .scrollBounceBehavior(.basedOnSize, axes: .vertical)
         }
         .navigationBarBackButtonHidden(true)
         .toolbar {
@@ -2772,8 +2972,20 @@ private struct PickForMeView: View {
                 }
             }
         }
-        .onChange(of: answers.ageRatings) { _, newValue in
-            if !PickForMeAgeRating.selectionAllowsPG13OrHigher(newValue) {
+        .onChange(of: answers.mediaFormat) { _, _ in
+            if answers.isSeriesOnly {
+                answers.runtime = nil
+            }
+
+            if step >= steps.count {
+                step = max(steps.count - 1, 0)
+            }
+        }
+        .onChange(of: answers.archetypes) { _, newValue in
+            answers.secondaryArchetypes.subtract(newValue)
+        }
+        .onChange(of: answers.contentRatings) { _, _ in
+            if !answers.shouldAskGoreQuestion {
                 answers.goreLevel = nil
             }
 
@@ -2789,7 +3001,7 @@ private struct PickForMeView: View {
                 .font(.largeTitle.bold())
 
             if results.isEmpty {
-                Text("Answer what matters. Skip anything you do not care about.")
+                Text("Answer each question. Use no preference when you do not care.")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
             } else {
@@ -2818,7 +3030,7 @@ private struct PickForMeView: View {
             answerOptions
 
             if let errorText {
-                StatusBubble(title: "No match yet", text: errorText)
+                StatusBubble(title: "Choose an answer", text: errorText)
             }
 
             HStack(spacing: 10) {
@@ -2883,31 +3095,33 @@ private struct PickForMeView: View {
     @ViewBuilder private var answerOptions: some View {
         switch currentStep {
         case .format:
-            formatChoiceList(selection: $answers.mediaFilter)
-        case .language:
-            singleChoiceList(PickForMeLanguage.allCases, selection: $answers.language)
-        case .mood:
-            singleChoiceList(PickForMeMood.allCases, selection: $answers.mood)
-        case .occasion:
-            singleChoiceList(PickForMeOccasion.allCases, selection: $answers.occasion)
-        case .genre:
-            multiChoiceList(PickForMeGenre.selectableCases, selection: $answers.genres)
+            mediaFormatChoiceList(selection: $answers.mediaFormat)
+        case .archetype:
+            primaryArchetypeChoiceList(selection: $answers.archetypes)
+        case .secondaryArchetypes:
+            multiChoiceList(secondaryArchetypeOptions, selection: $answers.secondaryArchetypes)
+        case .genrePreferences:
+            multiChoiceList(PickForMeGenrePreference.allCases, selection: $answers.genrePreferences)
+        case .seriousness:
+            singleChoiceList(PickForMeSeriousness.allCases, selection: $answers.seriousness)
+        case .realism:
+            singleChoiceList(PickForMeRealism.allCases, selection: $answers.realism)
+        case .action:
+            singleChoiceList(PickForMeActionLevel.allCases, selection: $answers.actionLevel)
+        case .engagement:
+            singleChoiceList(PickForMeEngagement.allCases, selection: $answers.engagement)
+        case .recommendationType:
+            singleChoiceList(PickForMeRecommendationType.allCases, selection: $answers.recommendationType)
         case .runtime:
             singleChoiceList(PickForMeRuntime.allCases, selection: $answers.runtime)
-        case .pace:
-            singleChoiceList(PickForMePace.allCases, selection: $answers.pace)
-        case .intensity:
-            singleChoiceList(PickForMeIntensity.allCases, selection: $answers.intensity)
-        case .releaseAge:
-            singleChoiceList(PickForMeReleaseAge.allCases, selection: $answers.releaseAge)
         case .ageRating:
-            multiChoiceList(PickForMeAgeRating.visibleCases(for: answers.mediaFilter), selection: $answers.ageRatings)
+            multiChoiceList(PickForMeContentRating.allCases, selection: $answers.contentRatings)
         case .gore:
             singleChoiceList(PickForMeGoreLevel.allCases, selection: $answers.goreLevel)
-        case .tmdbRating:
-            singleChoiceList(PickForMeTMDbRatingPreference.allCases, selection: $answers.tmdbRating)
-        case .extra:
-            singleChoiceList(PickForMeExtraCategory.selectableCases, selection: $answers.extra)
+        case .minimumRating:
+            singleChoiceList(PickForMeMinimumRating.allCases, selection: $answers.minimumRating)
+        case .dealBreakers:
+            multiChoiceList(PickForMeDealBreaker.allCases, selection: $answers.dealBreakers)
         }
     }
 
@@ -3025,6 +3239,20 @@ private struct PickForMeView: View {
         steps[min(step, max(steps.count - 1, 0))]
     }
 
+    private var secondaryArchetypeOptions: [PickForMeArchetype] {
+        PickForMeArchetype.allCases.filter { option in
+            !answers.archetypes.contains(option)
+        }
+    }
+
+    private func scrollToTop(with proxy: ScrollViewProxy) {
+        DispatchQueue.main.async {
+            withAnimation(.easeInOut(duration: 0.2)) {
+                proxy.scrollTo("pickForMeTop", anchor: .top)
+            }
+        }
+    }
+
     private func formatChoiceList(selection: Binding<MediaFilter?>) -> some View {
         VStack(spacing: 10) {
             HStack(spacing: 10) {
@@ -3060,6 +3288,29 @@ private struct PickForMeView: View {
         }
     }
 
+    private func mediaFormatChoiceList(selection: Binding<PickForMeMediaFormat?>) -> some View {
+        VStack(spacing: 10) {
+            ForEach(PickForMeMediaFormat.allCases) { option in
+                PickForMeOptionButton(title: option.title, subtitle: option.subtitle, isSelected: selection.wrappedValue == option) {
+                    selection.wrappedValue = option
+                    errorText = nil
+                }
+            }
+        }
+    }
+
+    private func primaryArchetypeChoiceList(selection: Binding<Set<PickForMeArchetype>>) -> some View {
+        VStack(spacing: 10) {
+            ForEach(PickForMeArchetype.allCases) { option in
+                PickForMeOptionButton(title: option.title, subtitle: option.subtitle, isSelected: selection.wrappedValue.contains(option)) {
+                    selection.wrappedValue = [option]
+                    answers.secondaryArchetypes.remove(option)
+                    errorText = nil
+                }
+            }
+        }
+    }
+
     private func multiChoiceList<Option: PickForMeOption>(_ options: [Option], selection: Binding<Set<Option>>) -> some View {
         VStack(spacing: 10) {
             ForEach(options) { option in
@@ -3081,8 +3332,36 @@ private struct PickForMeView: View {
         }
     }
 
+    private func cappedMultiChoiceList<Option: PickForMeOption>(_ options: [Option], selection: Binding<Set<Option>>, maximumSelectionCount: Int) -> some View {
+        VStack(spacing: 10) {
+            ForEach(options) { option in
+                PickForMeOptionButton(title: option.title, subtitle: option.subtitle, isSelected: selection.wrappedValue.contains(option)) {
+                    if option.isAnyOption {
+                        selection.wrappedValue = [option]
+                    } else {
+                        selection.wrappedValue = selection.wrappedValue.filter { !$0.isAnyOption }
+                        if selection.wrappedValue.contains(option) {
+                            selection.wrappedValue.remove(option)
+                        } else if selection.wrappedValue.count < maximumSelectionCount {
+                            selection.wrappedValue.insert(option)
+                        } else {
+                            errorText = "Choose up to \(maximumSelectionCount) options."
+                            return
+                        }
+                    }
+
+                    errorText = nil
+                }
+            }
+        }
+    }
+
     private func advance() {
         guard !isLoading else { return }
+        guard currentStepIsAnswered else {
+            errorText = "Please choose an answer before continuing."
+            return
+        }
 
         if step < steps.count - 1 {
             step += 1
@@ -3094,43 +3373,41 @@ private struct PickForMeView: View {
     private func clearCurrentAnswer() {
         switch currentStep {
         case .format:
-            answers.mediaFilter = nil
-        case .language:
-            answers.language = nil
-        case .mood:
-            answers.mood = nil
-        case .occasion:
-            answers.occasion = nil
-        case .genre:
-            answers.genres = []
+            answers.mediaFormat = nil
+        case .archetype:
+            answers.archetypes = []
+            answers.secondaryArchetypes = []
+        case .secondaryArchetypes:
+            answers.secondaryArchetypes = []
+        case .genrePreferences:
+            answers.genrePreferences = []
+        case .seriousness:
+            answers.seriousness = nil
+        case .realism:
+            answers.realism = nil
+        case .action:
+            answers.actionLevel = nil
+        case .engagement:
+            answers.engagement = nil
+        case .recommendationType:
+            answers.recommendationType = nil
         case .runtime:
             answers.runtime = nil
-        case .pace:
-            answers.pace = nil
-        case .intensity:
-            answers.intensity = nil
-        case .releaseAge:
-            answers.releaseAge = nil
         case .ageRating:
-            answers.ageRatings = []
+            answers.contentRatings = []
+            answers.goreLevel = nil
         case .gore:
             answers.goreLevel = nil
-        case .tmdbRating:
-            answers.tmdbRating = nil
-        case .extra:
-            answers.extra = nil
+        case .minimumRating:
+            answers.minimumRating = nil
+        case .dealBreakers:
+            answers.dealBreakers = []
         }
 
         errorText = nil
     }
 
     private func pruneAgeRatingsForCurrentFormat() {
-        let visibleRatings = Set(PickForMeAgeRating.visibleCases(for: answers.mediaFilter))
-        answers.ageRatings = answers.ageRatings.intersection(visibleRatings)
-
-        if !PickForMeAgeRating.selectionAllowsPG13OrHigher(answers.ageRatings) {
-            answers.goreLevel = nil
-        }
     }
 
     private func goBack() {
@@ -3148,9 +3425,9 @@ private struct PickForMeView: View {
     private func loadResults() async {
         isLoading = true
         errorText = nil
-        let shouldUseFallback = answers.answeredQuestionCount < 3
+        let shouldUseFallback = answers.meaningfulQuestionCount < 3
         fallbackText = shouldUseFallback ? "Here are some popular movies and shows instead." : nil
-        let queryAnswers = shouldUseFallback ? PickForMeAnswers(mediaFilter: nil) : answers
+        let queryAnswers = shouldUseFallback ? PickForMeAnswers(mediaFormat: answers.mediaFormat) : answers
         let picked = await model.pickForMeRecommendations(for: queryAnswers)
         isLoading = false
 
@@ -3195,6 +3472,39 @@ private struct PickForMeView: View {
         fallbackText = nil
         step = 0
         errorText = nil
+    }
+
+    private var currentStepIsAnswered: Bool {
+        switch currentStep {
+        case .format:
+            return answers.mediaFormat != nil
+        case .archetype:
+            return !answers.archetypes.isEmpty
+        case .secondaryArchetypes:
+            return !answers.secondaryArchetypes.isEmpty
+        case .genrePreferences:
+            return !answers.genrePreferences.isEmpty
+        case .seriousness:
+            return answers.seriousness != nil
+        case .realism:
+            return answers.realism != nil
+        case .action:
+            return answers.actionLevel != nil
+        case .engagement:
+            return answers.engagement != nil
+        case .recommendationType:
+            return answers.recommendationType != nil
+        case .runtime:
+            return answers.runtime != nil
+        case .ageRating:
+            return !answers.contentRatings.isEmpty
+        case .gore:
+            return answers.goreLevel != nil
+        case .minimumRating:
+            return answers.minimumRating != nil
+        case .dealBreakers:
+            return !answers.dealBreakers.isEmpty
+        }
     }
 }
 
@@ -3347,6 +3657,15 @@ private struct PickForMeOptionButton: View {
 
             return result
         }
+
+        private static func collectionRowIdentity(for collection: MediaCollection, iconItem: MediaItem?) -> String {
+            let itemSignature = collection.itemKeys
+                .map(\.stableID)
+                .sorted()
+                .joined(separator: "|")
+            let iconSignature = iconItem?.key.stableID ?? "folder"
+            return "\(collection.id.uuidString)-\(iconSignature)-\(itemSignature)"
+        }
         
         var body: some View {
             NavigationStack(path: $collectionPath) {
@@ -3435,15 +3754,17 @@ private struct PickForMeOptionButton: View {
                         }
                         .buttonStyle(.plain)
 
-                        ForEach(model.library.collections) { collection in
+                        ForEach(model.library.collections.filter { !$0.itemKeys.isEmpty }) { collection in
+                            let iconItem = collectionIconItemsByID[collection.id]
                             Button {
                                 collectionPath.append(collection.id)
                             } label: {
                                 CollectionRow(
                                     collection: collection,
                                     count: collection.itemKeys.count,
-                                    iconItem: collectionIconItemsByID[collection.id]
+                                    iconItem: iconItem
                                 )
+                                .id(Self.collectionRowIdentity(for: collection, iconItem: iconItem))
                             }
                             .buttonStyle(.plain)
                         }
@@ -6354,9 +6675,14 @@ private struct PickForMeOptionButton: View {
             }
         }
 
-        private var baseScroll: some View {
-            ScrollView(.vertical, showsIndicators: false) {
+        @ViewBuilder private var baseScroll: some View {
+            let scroll = ScrollView(.vertical, showsIndicators: false) {
                 VStack(alignment: .leading, spacing: 18) {
+                    if onRefresh != nil {
+                        Color.clear
+                            .frame(height: 1)
+                    }
+
                     HStack(alignment: .center, spacing: 12) {
                         Text(title)
                             .font(.largeTitle.bold())
@@ -6381,7 +6707,12 @@ private struct PickForMeOptionButton: View {
             .scrollDismissesKeyboard(.immediately)
             .scrollContentBackground(.hidden)
             .scrollIndicators(.hidden)
-            .scrollViewTouchTuning(axis: .vertical)
+
+            if onRefresh == nil {
+                scroll.scrollViewTouchTuning(axis: .vertical)
+            } else {
+                scroll
+            }
         }
     }
     
@@ -6427,7 +6758,6 @@ private struct PickForMeOptionButton: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .scrollClipDisabled()
                     .scrollIndicators(.hidden)
-                    .scrollViewTouchTuning(axis: .horizontal)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -7384,6 +7714,7 @@ private struct PickForMeOptionButton: View {
 
                 if let iconItem {
                     PosterView(item: iconItem, width: 48, height: 48, isFavourite: false)
+                        .id(iconItem.key.stableID)
                         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                 } else {
                     Image(systemName: collection.isDynamic ? "square.grid.2x2" : "folder")
@@ -10307,6 +10638,7 @@ private struct PickForMeOptionButton: View {
 #if canImport(UIKit)
     private struct ScrollViewTouchTuningView: UIViewRepresentable {
         let axis: Axis.Set
+        let alwaysBounce: Bool
         
         func makeUIView(context: Context) -> UIView {
             let view = UIView(frame: .zero)
@@ -10343,8 +10675,8 @@ private struct PickForMeOptionButton: View {
             scrollView.isDirectionalLockEnabled = true
             scrollView.showsVerticalScrollIndicator = false
             scrollView.showsHorizontalScrollIndicator = false
-            scrollView.alwaysBounceVertical = false
-            scrollView.alwaysBounceHorizontal = false
+            scrollView.alwaysBounceVertical = axis == .vertical && alwaysBounce
+            scrollView.alwaysBounceHorizontal = axis == .horizontal && alwaysBounce
             
             let verticalInset = scrollView.adjustedContentInset.top + scrollView.adjustedContentInset.bottom
             let horizontalInset = scrollView.adjustedContentInset.left + scrollView.adjustedContentInset.right
@@ -10354,21 +10686,21 @@ private struct PickForMeOptionButton: View {
             scrollView.isScrollEnabled = true
             
             if axis == .horizontal {
-                scrollView.bounces = canScrollHorizontally
+                scrollView.bounces = alwaysBounce || canScrollHorizontally
             } else {
-                scrollView.bounces = canScrollVertically
+                scrollView.bounces = alwaysBounce || canScrollVertically
             }
         }
     }
     
     private extension View {
-        func scrollViewTouchTuning(axis: Axis.Set = .vertical) -> some View {
-            background(ScrollViewTouchTuningView(axis: axis))
+        func scrollViewTouchTuning(axis: Axis.Set = .vertical, alwaysBounce: Bool = false) -> some View {
+            background(ScrollViewTouchTuningView(axis: axis, alwaysBounce: alwaysBounce))
         }
     }
 #else
     private extension View {
-        func scrollViewTouchTuning(axis: Axis.Set = .vertical) -> some View {
+        func scrollViewTouchTuning(axis: Axis.Set = .vertical, alwaysBounce: Bool = false) -> some View {
             self
         }
     }
@@ -10401,470 +10733,474 @@ private struct PickForMeOptionButton: View {
 
     extension MediaFilter: PickForMeOption {}
 
-    private enum PickForMeLanguage: String, CaseIterable, PickForMeOption {
-        case any
-        case englishOnly
-
-        var id: String { rawValue }
-        var title: String {
-            switch self {
-            case .any: return "Any language"
-            case .englishOnly: return "English only"
-            }
-        }
-    }
-
     private struct PickForMeAnswers: Hashable {
-        var mediaFilter: MediaFilter?
-        var language: PickForMeLanguage?
-        var mood: PickForMeMood?
-        var occasion: PickForMeOccasion?
-        var genres: Set<PickForMeGenre> = []
+        var mediaFormat: PickForMeMediaFormat?
+        var archetypes: Set<PickForMeArchetype> = []
+        var secondaryArchetypes: Set<PickForMeArchetype> = []
+        var genrePreferences: Set<PickForMeGenrePreference> = []
+        var seriousness: PickForMeSeriousness?
+        var realism: PickForMeRealism?
+        var actionLevel: PickForMeActionLevel?
+        var engagement: PickForMeEngagement?
+        var recommendationType: PickForMeRecommendationType?
         var runtime: PickForMeRuntime?
-        var pace: PickForMePace?
-        var intensity: PickForMeIntensity?
-        var releaseAge: PickForMeReleaseAge?
-        var ageRatings: Set<PickForMeAgeRating> = []
+        var contentRatings: Set<PickForMeContentRating> = []
         var goreLevel: PickForMeGoreLevel?
-        var tmdbRating: PickForMeTMDbRatingPreference?
-        var extra: PickForMeExtraCategory?
+        var minimumRating: PickForMeMinimumRating?
+        var dealBreakers: Set<PickForMeDealBreaker> = []
 
         var answeredQuestionCount: Int {
             var count = 0
-            if mediaFilter != nil { count += 1 }
-            if language != nil { count += 1 }
-            if mood != nil { count += 1 }
-            if occasion != nil { count += 1 }
-            if !genres.isEmpty { count += 1 }
+            if mediaFormat != nil { count += 1 }
+            if !archetypes.isEmpty { count += 1 }
+            if !secondaryArchetypes.isEmpty { count += 1 }
+            if !genrePreferences.isEmpty { count += 1 }
+            if seriousness != nil { count += 1 }
+            if realism != nil { count += 1 }
+            if actionLevel != nil { count += 1 }
+            if engagement != nil { count += 1 }
+            if recommendationType != nil { count += 1 }
             if runtime != nil { count += 1 }
-            if pace != nil { count += 1 }
-            if intensity != nil { count += 1 }
-            if releaseAge != nil { count += 1 }
-            if !ageRatings.isEmpty { count += 1 }
+            if !contentRatings.isEmpty { count += 1 }
             if goreLevel != nil { count += 1 }
-            if tmdbRating != nil { count += 1 }
-            if extra != nil { count += 1 }
+            if minimumRating != nil { count += 1 }
+            if !dealBreakers.isEmpty { count += 1 }
             return count
+        }
+
+        var meaningfulQuestionCount: Int {
+            var count = 0
+            if mediaFormat != nil { count += 1 }
+            if !archetypes.isEmpty && !archetypes.contains(.surprise) { count += 1 }
+            if !secondaryArchetypes.isEmpty && !secondaryArchetypes.contains(.surprise) { count += 1 }
+            if !genrePreferences.isEmpty && !genrePreferences.contains(.noPreference) { count += 1 }
+            if let seriousness, seriousness != .noPreference { count += 1 }
+            if let realism, realism != .anything { count += 1 }
+            if let actionLevel, actionLevel != .noPreference { count += 1 }
+            if let engagement, engagement != .noPreference { count += 1 }
+            if let recommendationType, recommendationType != .noPreference { count += 1 }
+            if !isSeriesOnly, let runtime, runtime != .any { count += 1 }
+            if !contentRatings.isEmpty && !contentRatings.contains(.any) { count += 1 }
+            if let goreLevel, goreLevel != .noPreference { count += 1 }
+            if let minimumRating, minimumRating != .any { count += 1 }
+            if !dealBreakers.isEmpty && !dealBreakers.contains(.none) { count += 1 }
+            return count
+        }
+
+        var effectiveMediaFilter: MediaFilter {
+            mediaFormat?.mediaFilter ?? .both
+        }
+
+        var isSeriesOnly: Bool {
+            mediaFormat == .series
+        }
+
+        var shouldAskGoreQuestion: Bool {
+            PickForMeContentRating.selectionAllowsGoreQuestion(contentRatings)
         }
     }
 
     private enum PickForMeStep: CaseIterable {
-        case format, language, mood, occasion, genre, runtime, pace, intensity, releaseAge, ageRating, gore, tmdbRating, extra
+        case format, archetype, secondaryArchetypes, genrePreferences, seriousness, realism, action, engagement, recommendationType, runtime, ageRating, gore, minimumRating, dealBreakers
 
         static func steps(for answers: PickForMeAnswers) -> [PickForMeStep] {
             var steps: [PickForMeStep] = [
                 .format,
-                .language,
-                .mood,
-                .occasion,
-                .genre,
-                .runtime,
-                .pace,
-                .intensity,
-                .releaseAge,
-                .ageRating
+                .archetype
             ]
 
-            if PickForMeAgeRating.selectionAllowsPG13OrHigher(answers.ageRatings) {
+            if !answers.archetypes.contains(.surprise) {
+                steps.append(.secondaryArchetypes)
+            }
+
+            steps.append(contentsOf: [
+                .genrePreferences,
+                .seriousness,
+                .realism,
+                .action,
+                .engagement,
+                .recommendationType
+            ])
+
+            if !answers.isSeriesOnly {
+                steps.append(.runtime)
+            }
+
+            steps.append(contentsOf: [
+                .ageRating
+            ])
+
+            if answers.shouldAskGoreQuestion {
                 steps.append(.gore)
             }
 
-            steps.append(contentsOf: [.tmdbRating, .extra])
+            steps.append(contentsOf: [
+                .minimumRating,
+                .dealBreakers
+            ])
+
             return steps
         }
 
         var title: String {
             switch self {
             case .format: return "What do you want to watch?"
-            case .language: return "Should results be English only?"
-            case .mood: return "How are you today?"
-            case .occasion: return "What comes closest to your situation?"
-            case .genre: return "Please choose any genre you're interested in."
+            case .archetype: return "What are you in the mood for?"
+            case .secondaryArchetypes: return "Anything else sound good?"
+            case .genrePreferences: return "Any genre flavors you want?"
+            case .seriousness: return "How serious should it be?"
+            case .realism: return "How realistic should it be?"
+            case .action: return "How much action do you want?"
+            case .engagement: return "How mentally engaging should it be?"
+            case .recommendationType: return "What type of recommendation do you want?"
             case .runtime: return "How much time do you have?"
-            case .pace: return "What pace sounds right?"
-            case .intensity: return "How intense should it feel?"
-            case .releaseAge: return "How old would you like it to be?"
-            case .ageRating: return "Which age ratings are okay?"
+            case .ageRating: return "What content rating are you comfortable with?"
             case .gore: return "How much gore is okay?"
-            case .tmdbRating: return "Should the rating score matter?"
-            case .extra: return "Please select any other category you're interested in."
+            case .minimumRating: return "How highly rated should it be?"
+            case .dealBreakers: return "Any deal breakers?"
             }
         }
 
         var subtitle: String? {
             switch self {
-            case .genre: return "Multiple answers are possible."
-            case .ageRating: return "Selecting R or TV-MA also allows lower ratings in the same group. Unknown ratings are kept in the results."
-            case .gore: return "This appears because your age-rating choices include PG-13, TV-14, R, TV-MA, or higher."
-            case .tmdbRating: return "TMDb powers this discovery filter. Result previews can show IMDb from Settings when OMDb has it."
-            case .extra: return "If there are no matches, this question is treated as flexible."
+            case .format: return "Choose one."
+            case .archetype: return "Choose one. This carries the most weight in the recommendation."
+            case .secondaryArchetypes: return "Choose any number. These help, but carry less weight than the main answer."
+            case .genrePreferences: return "These are light boosts, not strict filters."
+            case .engagement: return "Easy viewing means relaxed. Fully focused means something more demanding."
+            case .runtime: return "Runtime is a preference, not a hard cutoff unless you choose it as a deal breaker."
+            case .ageRating: return "Choose any number. R and higher also allow lower ratings."
+            case .gore: return "This appears when you allow Any Rating, R, or NC-17."
+            case .minimumRating: return "Uses IMDb when available, with TMDb as the fallback."
+            case .dealBreakers: return "Multiple answers are possible. Leave this blank if none apply."
             default: return nil
             }
         }
     }
 
-    private enum PickForMeMood: String, CaseIterable, PickForMeOption {
-        case happy, neutral, sad
+    private enum PickForMeMediaFormat: String, CaseIterable, PickForMeOption {
+        case movies, series, both
+
+        init(_ filter: MediaFilter) {
+            switch filter {
+            case .movie:
+                self = .movies
+            case .tv:
+                self = .series
+            case .both:
+                self = .both
+            }
+        }
+
         var id: String { rawValue }
         var title: String {
             switch self {
-            case .happy: return "Happy"
-            case .neutral: return "Neutral"
-            case .sad: return "Sad"
+            case .movies: return "Movies"
+            case .series: return "Series"
+            case .both: return "Both"
+            }
+        }
+        var isAnyOption: Bool { self == .both }
+        var mediaFilter: MediaFilter {
+            switch self {
+            case .movies: return .movie
+            case .series: return .tv
+            case .both: return .both
             }
         }
     }
 
-    private enum PickForMeOccasion: String, CaseIterable, PickForMeOption {
-        case alone, date, friends, family
+    private enum PickForMeArchetype: String, CaseIterable, PickForMeOption {
+        case feelGood, comedy, mystery, thriller, smartProblems, mission, heist, adventure, characterRelationships, historical, epicSpectacle, mindBending, horror, thoughtfulSciFi, surprise
         var id: String { rawValue }
         var title: String {
             switch self {
-            case .alone: return "Just me"
-            case .date: return "Movie Date"
-            case .friends: return "Movie Night"
-            case .family: return "Family"
+            case .feelGood: return "Feel-Good"
+            case .comedy: return "Comedy"
+            case .mystery: return "Mystery"
+            case .thriller: return "Thriller"
+            case .smartProblems: return "Smart people solving problems"
+            case .mission: return "Mission"
+            case .heist: return "Heist"
+            case .adventure: return "Adventure"
+            case .characterRelationships: return "Character and Relationships"
+            case .historical: return "Historical / Real Events"
+            case .epicSpectacle: return "Epic / Spectacle"
+            case .mindBending: return "Mind-Bending"
+            case .horror: return "Horror"
+            case .thoughtfulSciFi: return "Thought-Provoking Sci-Fi"
+            case .surprise: return "Surprise me"
             }
         }
         var subtitle: String? {
             switch self {
-            case .alone: return "Watching by myself."
-            case .date: return "Watching with a date or partner."
-            case .friends: return "Watching with friends."
-            case .family: return "With family or relatives."
+            case .feelGood: return "Uplifting, optimistic, and heartwarming."
+            case .comedy: return "Built primarily to make you laugh."
+            case .mystery: return "Driven by uncovering hidden information."
+            case .thriller: return "Tension, danger, suspense, or pursuit."
+            case .smartProblems: return "Experts, teams, investigations, planning, or persistence."
+            case .mission: return "A specific objective, operation, rescue, or survival mission."
+            case .heist: return "A robbery, con, caper, theft, or elaborate scheme."
+            case .adventure: return "Exploration, discovery, and excitement."
+            case .characterRelationships: return "Relationships, family dynamics, and personal growth."
+            case .historical: return "Real people, true events, or historical periods."
+            case .epicSpectacle: return "Scale, visuals, action, and world-building."
+            case .mindBending: return "Twists, puzzles, unusual structure, or reality-questioning stories."
+            case .horror: return "Fear, dread, terror, or psychological discomfort."
+            case .thoughtfulSciFi: return "Idea-driven science fiction, ethics, technology, or consciousness."
+            case .surprise: return "Let the app lean on your history and strong ratings."
             }
         }
+        var isAnyOption: Bool { self == .surprise }
     }
 
-    private enum PickForMeGenre: String, CaseIterable, PickForMeOption {
-        case action, comedy, drama, adventure, thriller, crime, romance, sciFi, fantasy, family, mystery, animation, war, western, horror, any
-        static let selectableCases: [PickForMeGenre] = [
-            .action,
-            .comedy,
-            .drama,
-            .adventure,
-            .thriller,
-            .crime,
-            .romance,
-            .sciFi,
-            .fantasy,
-            .family,
-            .mystery,
-            .animation,
-            .war,
-            .western,
-            .horror
-        ]
-
+    private enum PickForMeSeriousness: String, CaseIterable, PickForMeOption {
+        case lightFun, mostlyFun, balanced, serious, intense, noPreference
         var id: String { rawValue }
         var title: String {
             switch self {
-            case .action: return "Action"
-            case .comedy: return "Comedy"
-            case .drama: return "Drama"
-            case .adventure: return "Adventure"
-            case .thriller: return "Thriller"
-            case .crime: return "Crime"
-            case .romance: return "Romance"
-            case .sciFi: return "Sci-Fi"
-            case .fantasy: return "Fantasy"
-            case .family: return "Family"
-            case .mystery: return "Mystery"
-            case .animation: return "Animation"
-            case .war: return "War"
-            case .western: return "Western"
-            case .horror: return "Horror"
-            case .any: return "All genres"
+            case .lightFun: return "Light and fun"
+            case .mostlyFun: return "Mostly fun"
+            case .balanced: return "Balanced"
+            case .serious: return "Serious"
+            case .intense: return "Intense"
+            case .noPreference: return "No preference"
             }
         }
-        var isAnyOption: Bool { self == .any }
-        var genreIDs: Set<Int> {
+        var isAnyOption: Bool { self == .noPreference }
+    }
+
+    private enum PickForMeGenrePreference: String, CaseIterable, PickForMeOption {
+        case space, fantasy, sciFi, history, crime, war, romance, animation, family, horror, noPreference
+        var id: String { rawValue }
+        var title: String {
             switch self {
-            case .action: return [28, 10759]
-            case .comedy: return [35]
-            case .drama: return [18]
-            case .adventure: return [12, 10759]
-            case .thriller: return [53]
-            case .crime: return [80]
-            case .romance: return [10749]
-            case .sciFi: return [878, 10765]
-            case .fantasy: return [14, 10765]
-            case .family: return [10751, 10762]
-            case .mystery: return [9648]
-            case .animation: return [16]
-            case .war: return [10752, 10768]
-            case .western: return [37]
-            case .horror: return [27]
-            case .any: return []
+            case .space: return "Space"
+            case .fantasy: return "Fantasy"
+            case .sciFi: return "Sci-Fi"
+            case .history: return "History"
+            case .crime: return "Crime"
+            case .war: return "War"
+            case .romance: return "Romance"
+            case .animation: return "Animation"
+            case .family: return "Family"
+            case .horror: return "Horror"
+            case .noPreference: return "No preference"
             }
         }
+        var isAnyOption: Bool { self == .noPreference }
+    }
+
+    private enum PickForMeRealism: String, CaseIterable, PickForMeOption {
+        case realWorld, mostlyRealistic, someSpeculative, anything
+        var id: String { rawValue }
+        var title: String {
+            switch self {
+            case .realWorld: return "Real-world only"
+            case .mostlyRealistic: return "Mostly realistic"
+            case .someSpeculative: return "Some sci-fi or fantasy"
+            case .anything: return "Anything goes"
+            }
+        }
+        var isAnyOption: Bool { self == .anything }
+    }
+
+    private enum PickForMeActionLevel: String, CaseIterable, PickForMeOption {
+        case none, little, moderate, lots, noPreference
+        var id: String { rawValue }
+        var title: String {
+            switch self {
+            case .none: return "None"
+            case .little: return "A little"
+            case .moderate: return "Moderate"
+            case .lots: return "Lots"
+            case .noPreference: return "No preference"
+            }
+        }
+        var isAnyOption: Bool { self == .noPreference }
+    }
+
+    private enum PickForMeEngagement: String, CaseIterable, PickForMeOption {
+        case easy, moderate, focused, noPreference
+        var id: String { rawValue }
+        var title: String {
+            switch self {
+            case .easy: return "Easy viewing"
+            case .moderate: return "Moderately engaging"
+            case .focused: return "Fully focused"
+            case .noPreference: return "No preference"
+            }
+        }
+        var isAnyOption: Bool { self == .noPreference }
+    }
+
+    private enum PickForMeGoreLevel: String, CaseIterable, PickForMeOption {
+        case low, some, high, noPreference
+        var id: String { rawValue }
+        var title: String {
+            switch self {
+            case .low: return "Keep gore low"
+            case .some: return "Some gore is okay"
+            case .high: return "Any amount of gore is fine"
+            case .noPreference: return "No preference"
+            }
+        }
+        var isAnyOption: Bool { self == .noPreference }
+    }
+
+    private enum PickForMeRecommendationType: String, CaseIterable, PickForMeOption {
+        case crowdPleaser, acclaimed, hiddenGem, noPreference
+        var id: String { rawValue }
+        var title: String {
+            switch self {
+            case .crowdPleaser: return "Popular crowd-pleaser"
+            case .acclaimed: return "Critically acclaimed"
+            case .hiddenGem: return "Hidden gem"
+            case .noPreference: return "No preference"
+            }
+        }
+        var isAnyOption: Bool { self == .noPreference }
     }
 
     private enum PickForMeRuntime: String, CaseIterable, PickForMeOption {
-        case underNinety, ninetyToTwoHours, twoToTwoAndHalf, overTwoAndHalf
+        case underNinety, underTwoHours, underTwoAndHalfHours, any
         var id: String { rawValue }
         var title: String {
             switch self {
-            case .underNinety: return "Under 90 min"
-            case .ninetyToTwoHours: return "90-120 min"
-            case .twoToTwoAndHalf: return "2-2.5 hours"
-            case .overTwoAndHalf: return "Over 2.5 hours"
+            case .underNinety: return "Under 90 minutes"
+            case .underTwoHours: return "Under 2 hours"
+            case .underTwoAndHalfHours: return "Under 2.5 hours"
+            case .any: return "Any length"
             }
         }
-        var minimumMinutes: Int? {
-            switch self {
-            case .underNinety: return nil
-            case .ninetyToTwoHours: return 90
-            case .twoToTwoAndHalf: return 120
-            case .overTwoAndHalf: return 150
-            }
-        }
+        var isAnyOption: Bool { self == .any }
+        var minimumMinutes: Int? { nil }
         var maximumMinutes: Int? {
             switch self {
             case .underNinety: return 89
-            case .ninetyToTwoHours: return 119
-            case .twoToTwoAndHalf: return 149
-            case .overTwoAndHalf: return nil
+            case .underTwoHours: return 119
+            case .underTwoAndHalfHours: return 149
+            case .any: return nil
             }
         }
         func contains(_ minutes: Int) -> Bool {
-            if let minimumMinutes, minutes < minimumMinutes { return false }
-            if let maximumMinutes, minutes > maximumMinutes { return false }
-            return true
+            guard let maximumMinutes else { return true }
+            return minutes <= maximumMinutes
         }
     }
 
-    private enum PickForMePace: String, CaseIterable, PickForMeOption {
-        case easy, balanced, fast
+    private enum PickForMeContentRating: String, CaseIterable, PickForMeOption {
+        case g, pg, pg13, r, nc17, any
         var id: String { rawValue }
         var title: String {
             switch self {
-            case .easy: return "Easygoing"
-            case .balanced: return "Balanced"
-            case .fast: return "Fast"
+            case .g: return "G / U"
+            case .pg: return "PG"
+            case .pg13: return "PG-13 / 12A"
+            case .r: return "R / 15"
+            case .nc17: return "NC-17 / 18"
+            case .any: return "Any rating"
             }
         }
-    }
-
-    private enum PickForMeIntensity: String, CaseIterable, PickForMeOption {
-        case light, medium, heavy
-        var id: String { rawValue }
-        var title: String {
+        var isAnyOption: Bool { self == .any }
+        private var maturityRank: Int {
             switch self {
-            case .light: return "Light"
-            case .medium: return "Medium"
-            case .heavy: return "Heavy"
-            }
-        }
-    }
-
-    private enum PickForMeReleaseAge: String, CaseIterable, PickForMeOption {
-        case any, fiveYears, tenYears, twentyFiveYears
-        var id: String { rawValue }
-        var title: String {
-            switch self {
-            case .any: return "Doesn't matter"
-            case .fiveYears: return "Last 5 years"
-            case .tenYears: return "Last 10 years"
-            case .twentyFiveYears: return "Last 25 years"
-            }
-        }
-        var minimumYear: Int? {
-            let year = Calendar.current.component(.year, from: Date())
-            switch self {
-            case .any: return nil
-            case .fiveYears: return year - 5
-            case .tenYears: return year - 10
-            case .twentyFiveYears: return year - 25
-            }
-        }
-    }
-
-    private enum PickForMeAgeRating: String, CaseIterable, PickForMeOption {
-        case g, pg, pg13, r, nc17, tvY, tvY7, tvG, tvPG, tv14, tvMA
-        static let movieCases: [PickForMeAgeRating] = [.g, .pg, .pg13, .r, .nc17]
-        static let tvCases: [PickForMeAgeRating] = [.tvY, .tvY7, .tvG, .tvPG, .tv14, .tvMA]
-
-        static func visibleCases(for filter: MediaFilter?) -> [PickForMeAgeRating] {
-            switch filter {
-            case .movie:
-                return movieCases
-            case .tv:
-                return tvCases
-            case .both, nil:
-                return movieCases + tvCases
+            case .g: return 0
+            case .pg: return 1
+            case .pg13: return 2
+            case .r: return 3
+            case .nc17: return 4
+            case .any: return Int.max
             }
         }
 
-        static func selectionAllowsPG13OrHigher(_ selection: Set<PickForMeAgeRating>) -> Bool {
-            selection.contains { rating in
-                rating.maturityRank >= PickForMeAgeRating.pg13.maturityRank
+        static func selectionAllows(_ selection: Set<PickForMeContentRating>, rating rawRating: String) -> Bool {
+            guard !selection.contains(.any),
+                  let actualRank = rank(for: rawRating),
+                  let maximumAllowedRank = selection.map(\.maturityRank).max()
+            else {
+                return true
             }
+
+            return actualRank <= maximumAllowedRank
         }
 
-        static func allowedBySelection(_ selection: Set<PickForMeAgeRating>, rating rawRating: String) -> Bool {
-            guard let actual = PickForMeAgeRating(rawRating: rawRating) else { return true }
-
-            return selection.contains { selected in
-                selected.family == actual.family && actual.maturityRank <= selected.maturityRank
-            }
+        static func selectionAllowsGoreQuestion(_ selection: Set<PickForMeContentRating>) -> Bool {
+            selection.contains(.any) || selection.contains(.r) || selection.contains(.nc17)
         }
 
-        static func preferenceScore(selection: Set<PickForMeAgeRating>, rating rawRating: String) -> Double {
-            guard let actual = PickForMeAgeRating(rawRating: rawRating) else { return 0 }
+        static func preferenceScore(selection: Set<PickForMeContentRating>, rating rawRating: String) -> Double {
+            guard !selection.contains(.any),
+                  let actualRank = rank(for: rawRating),
+                  let closestDistance = selection
+                    .map(\.maturityRank)
+                    .filter({ actualRank <= $0 })
+                    .map({ $0 - actualRank })
+                    .min()
+            else {
+                return 0
+            }
 
-            let distances = selection
-                .filter { $0.family == actual.family && actual.maturityRank <= $0.maturityRank }
-                .map { abs($0.maturityRank - actual.maturityRank) }
-
-            guard let distance = distances.min() else { return 0 }
-
-            switch distance {
+            switch closestDistance {
             case 0: return 1.5
             case 1: return 0.9
             case 2: return 0.4
             default: return 0.15
             }
         }
-
-        var id: String { rawValue }
-        var title: String {
-            switch self {
-            case .g: return "G"
-            case .pg: return "PG"
-            case .pg13: return "PG-13"
-            case .r: return "R"
-            case .nc17: return "NC-17"
-            case .tvY: return "TV-Y"
-            case .tvY7: return "TV-Y7"
-            case .tvG: return "TV-G"
-            case .tvPG: return "TV-PG"
-            case .tv14: return "TV-14"
-            case .tvMA: return "TV-MA"
-            }
-        }
-
-        init?(rawRating: String) {
+        private static func rank(for rawRating: String) -> Int? {
             let normalized = rawRating.uppercased().replacingOccurrences(of: "_", with: "-")
             switch normalized {
-            case "G": self = .g
-            case "PG": self = .pg
-            case "PG-13": self = .pg13
-            case "R": self = .r
-            case "NC-17": self = .nc17
-            case "TV-Y": self = .tvY
-            case "TV-Y7": self = .tvY7
-            case "TV-G": self = .tvG
-            case "TV-PG": self = .tvPG
-            case "TV-14": self = .tv14
-            case "TV-MA": self = .tvMA
+            case "G", "U", "TV-Y", "TV-G": return 0
+            case "PG", "TV-Y7", "TV-PG": return 1
+            case "PG-13", "12", "12A", "TV-14": return 2
+            case "R", "15", "TV-MA": return 3
+            case "NC-17", "18": return 4
             default: return nil
             }
         }
-
-        private enum RatingFamily {
-            case movie
-            case tv
-        }
-
-        private var family: RatingFamily {
-            switch self {
-            case .g, .pg, .pg13, .r, .nc17:
-                return .movie
-            case .tvY, .tvY7, .tvG, .tvPG, .tv14, .tvMA:
-                return .tv
-            }
-        }
-
-        private var maturityRank: Int {
-            switch self {
-            case .g, .tvY, .tvG:
-                return 0
-            case .pg, .tvY7, .tvPG:
-                return 1
-            case .pg13, .tv14:
-                return 2
-            case .r, .tvMA:
-                return 3
-            case .nc17:
-                return 4
-            }
-        }
-
-        func allows(_ rating: String) -> Bool {
-            Self.allowedBySelection([self], rating: rating)
-        }
     }
 
-    private enum PickForMeGoreLevel: String, CaseIterable, PickForMeOption {
-        case low
-        case some
-        case high
-
+    private enum PickForMeMinimumRating: String, CaseIterable, PickForMeOption {
+        case eight, sevenHalf, seven, sixHalf, any
         var id: String { rawValue }
         var title: String {
             switch self {
-            case .low: return "Keep gore low"
-            case .some: return "Some gore is okay"
-            case .high: return "Gore is fine"
+            case .eight: return "8.0+"
+            case .sevenHalf: return "7.5+"
+            case .seven: return "7.0+"
+            case .sixHalf: return "6.5+"
+            case .any: return "Any rating"
             }
         }
-    }
-
-    private enum PickForMeTMDbRatingPreference: String, CaseIterable, PickForMeOption {
-        case any, six, seven, eight
-        var id: String { rawValue }
-        var title: String {
+        var isAnyOption: Bool { self == .any }
+        var minimumRating: Double? {
             switch self {
-            case .any: return "Any rating score"
-            case .six: return "Rating 6+"
-            case .seven: return "Rating 7+"
-            case .eight: return "Rating 8+"
-            }
-        }
-        var minimumTMDbRating: Double {
-            switch self {
-            case .any: return 0
-            case .six: return 6.0
-            case .seven: return 7.0
             case .eight: return 8.0
+            case .sevenHalf: return 7.5
+            case .seven: return 7.0
+            case .sixHalf: return 6.5
+            case .any: return nil
             }
         }
     }
 
-    private enum PickForMeExtraCategory: String, CaseIterable, PickForMeOption {
-        case none, trueStory, lifeChanging, newYork, spiesAndCops, space, wedding, heist, book, racing, sequels, topRated
-        static let selectableCases: [PickForMeExtraCategory] = [
-            .trueStory,
-            .lifeChanging,
-            .newYork,
-            .spiesAndCops,
-            .space,
-            .wedding,
-            .heist,
-            .book,
-            .racing,
-            .sequels,
-            .topRated
-        ]
-
+    private enum PickForMeDealBreaker: String, CaseIterable, PickForMeOption {
+        case horror, romanceHeavy, animation, superhero, verySad, foreignLanguage, longRuntime, none
         var id: String { rawValue }
         var title: String {
             switch self {
-            case .none: return "No preference"
-            case .trueStory: return "True story"
-            case .lifeChanging: return "Life-changing"
-            case .newYork: return "New York City"
-            case .spiesAndCops: return "Spies and cops"
-            case .space: return "Space"
-            case .wedding: return "Wedding"
-            case .heist: return "Heist"
-            case .book: return "Based on a book"
-            case .racing: return "Racing"
-            case .sequels: return "Prequels or sequels"
-            case .topRated: return "Top rated"
+            case .horror: return "Horror"
+            case .romanceHeavy: return "Romance-heavy"
+            case .animation: return "Animation"
+            case .superhero: return "Superhero"
+            case .verySad: return "Very sad"
+            case .foreignLanguage: return "Foreign language"
+            case .longRuntime: return "Long runtime (150+ minutes)"
+            case .none: return "None"
             }
         }
+        var isAnyOption: Bool { self == .none }
     }
     
     // MARK: - Adaptive Layout
