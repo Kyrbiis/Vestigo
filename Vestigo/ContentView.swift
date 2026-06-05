@@ -10,6 +10,42 @@ import Foundation
 import Combine
 import UniformTypeIdentifiers
 
+private let pickForMeHistoricalTrueEventSignals = [
+    "true story",
+    "based on true",
+    "based on actual",
+    "real events",
+    "real-life",
+    "biography",
+    "biopic",
+    "documentary",
+    "political history",
+    "historical event",
+    "world war",
+    "civil war",
+    "president",
+    "prime minister",
+    "queen",
+    "king",
+    "activist",
+    "journalist"
+]
+
+private let pickForMeHistoricalGenreIDs: Set<Int> = [36, 99, 10752]
+
+@MainActor
+private final class RemoteImageMemoryCache {
+    static let shared = RemoteImageMemoryCache()
+    private var images: [URL: PlatformImage] = [:]
+
+    func image(for url: URL) -> PlatformImage? {
+        images[url]
+    }
+
+    func setImage(_ image: PlatformImage, for url: URL) {
+        images[url] = image
+    }
+}
 
 // MARK: - App Entry
 
@@ -219,6 +255,36 @@ extension MediaItem {
         kind.displayLabel(runtime: runtime)
     }
 
+    var shouldShowInDiscovery: Bool {
+        let normalizedTitle = title
+            .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+            .lowercased()
+            .replacingOccurrences(of: "[^a-z0-9]+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedOverview = overview
+            .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+            .lowercased()
+            .replacingOccurrences(of: "[^a-z0-9]+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let normalizedReleaseDate = (releaseDate ?? "")
+            .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+            .lowercased()
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard !normalizedTitle.isEmpty else { return false }
+        guard voteAverage > 0 else { return false }
+        guard let releaseDate, let releaseYear = Int(releaseDate.prefix(4)), releaseYear > 1870 else { return false }
+        if normalizedReleaseDate == "tba" || normalizedReleaseDate == "date tba" { return false }
+        if normalizedReleaseDate.contains("tba") { return false }
+        if normalizedTitle.hasPrefix("untitled") { return false }
+        if normalizedTitle == "tba" || normalizedTitle == "plot tba" { return false }
+        if normalizedOverview == "plot tba" || normalizedOverview == "tba" { return false }
+        if normalizedOverview == "plot unknown" || normalizedOverview == "no plot available" { return false }
+        if normalizedTitle.contains(" tba") { return false }
+        return true
+    }
+
     var releaseYearNumber: Int? {
         if let releaseDate, releaseDate.count >= 4 {
             return Int(releaseDate.prefix(4))
@@ -283,12 +349,22 @@ private struct WatchedImportEntry {
 
     private static let mediaIdentifierTokens = ["m", "s"]
 
-    static func report(for text: String) -> WatchedImportReport {
-        let rawEntries = splitEntries(text)
+    enum ImportFormat {
+        case automatic
+        case commaSeparated
+    }
+
+    static func report(for text: String, format: ImportFormat = .automatic) -> WatchedImportReport {
+        let rawEntries = splitEntries(text, format: format)
         var entries: [WatchedImportEntry] = []
         var malformed: [String] = []
 
         for rawText in rawEntries {
+            if format == .commaSeparated && rawText.contains("\n") {
+                malformed.append(rawText)
+                continue
+            }
+
             guard let entry = parseEntry(rawText) else {
                 malformed.append(rawText)
                 continue
@@ -304,12 +380,14 @@ private struct WatchedImportEntry {
         report(for: text).entries
     }
 
-    private static func splitEntries(_ text: String) -> [String] {
+    private static func splitEntries(_ text: String, format: ImportFormat) -> [String] {
         let normalizedText = text
             .replacingOccurrences(of: "\r\n", with: "\n")
             .replacingOccurrences(of: "\r", with: "\n")
 
-        let separator: Character = normalizedText.contains("\n") ? "\n" : ","
+        let separator: Character = format == .commaSeparated
+            ? ","
+            : (normalizedText.contains("\n") ? "\n" : ",")
 
         return normalizedText
             .split(separator: separator, omittingEmptySubsequences: true)
@@ -506,6 +584,9 @@ private final class VestigoModel: ObservableObject {
     private var externalRatingEmptyRefreshes: Set<MediaKey> = []
     private var searchTask: Task<Void, Never>?
     private var saveTask: Task<Void, Never>?
+    private var searchRequestID = UUID()
+    private var mediaSearchCache: [String: [MediaItem]] = [:]
+    private var peopleSearchCache: [String: [PersonSummary]] = [:]
 
     func refreshImages() {
         imageRefreshToken &+= 1
@@ -631,7 +712,7 @@ private final class VestigoModel: ObservableObject {
     func preparedResults(_ items: [MediaItem], hideWatched: Bool = false) -> [MediaItem] {
         filteredForWatchedPreference(
             filteredForAnimePreference(
-                prioritisedForLanguage(items)
+                prioritisedForLanguage(items.filter(\.shouldShowInDiscovery))
             ),
             hideWatched: hideWatched
         )
@@ -653,6 +734,7 @@ private final class VestigoModel: ObservableObject {
     func loadHome() async {
         isLoading = true
         errorText = nil
+        defer { isLoading = false }
         do {
             async let tr = tmdb.trending(filter: mediaFilter)
             async let pop = tmdb.popular(filter: mediaFilter)
@@ -669,18 +751,21 @@ private final class VestigoModel: ObservableObject {
             let preparedNewReleases = preparedResults(try await now, hideWatched: settings.hideWatchedFromHome)
             let preparedUpcoming = preparedResults(realUpcoming, hideWatched: settings.hideWatchedFromHome)
 
-            trending = await filteredShortFilmsIfNeeded(preparedTrending, enabled: settings.hideShortFilmsFromHome)
-            popular = await filteredShortFilmsIfNeeded(preparedPopular, enabled: settings.hideShortFilmsFromHome)
-            newReleases = await filteredShortFilmsIfNeeded(preparedNewReleases, enabled: settings.hideShortFilmsFromHome)
-            upcoming = await filteredShortFilmsIfNeeded(preparedUpcoming, enabled: settings.hideShortFilmsFromHome)
+            let loadedTrending = await filteredShortFilmsIfNeeded(preparedTrending, enabled: settings.hideShortFilmsFromHome)
+            let loadedPopular = await filteredShortFilmsIfNeeded(preparedPopular, enabled: settings.hideShortFilmsFromHome)
+            let loadedNewReleases = await filteredShortFilmsIfNeeded(preparedNewReleases, enabled: settings.hideShortFilmsFromHome)
+            let loadedUpcoming = await filteredShortFilmsIfNeeded(preparedUpcoming, enabled: settings.hideShortFilmsFromHome)
+
+            if !loadedTrending.isEmpty { trending = loadedTrending }
+            if !loadedPopular.isEmpty { popular = loadedPopular }
+            if !loadedNewReleases.isEmpty { newReleases = loadedNewReleases }
+            if !loadedUpcoming.isEmpty { upcoming = loadedUpcoming }
             await loadSmartRecommendations()
         } catch {
-            if LoadErrorFilter.shouldIgnore(error) {
-                return
+            if !LoadErrorFilter.shouldIgnore(error) {
+                errorText = error.localizedDescription
             }
-            errorText = error.localizedDescription
         }
-        isLoading = false
     }
 
     func refreshHome() async {
@@ -867,7 +952,7 @@ private final class VestigoModel: ObservableObject {
         let watchedGenreIDs = watchedHistory.flatMap(\.genreIDs)
         if let topGenreID = watchedGenreIDs.frequencySorted().first {
             let preparedTopGenre = visibleRecommendations
-                .filter { !$0.isUpcoming && $0.genreIDs.contains(topGenreID) }
+                .filter { $0.shouldShowInDiscovery && !$0.isUpcoming && $0.genreIDs.contains(topGenreID) }
                 .filter { settings.prioritiseEnglish ? (($0.originalLanguage ?? "en") == "en") : true }
 
             fromTopGenre = await filteredShortFilmsIfNeeded(
@@ -955,6 +1040,10 @@ private final class VestigoModel: ObservableObject {
                     return false
                 }
 
+                if !pickForMeHistoricalAllows(item, answers: answers) {
+                    return false
+                }
+
                 if !answers.contentRatings.isEmpty,
                    let detailRating = detailsCache[item.key]?.ageRating,
                    !detailRating.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
@@ -989,7 +1078,7 @@ private final class VestigoModel: ObservableObject {
                     return lhsRating > rhsRating
                 }
 
-                return (lhs.releaseDateValue ?? .distantPast) > (rhs.releaseDateValue ?? .distantPast)
+                return lhs.title.localizedCaseInsensitiveCompare(rhs.title) == .orderedAscending
             }
 
         return balancedPickForMeResults(sorted, filter: effectiveFilter, limit: 120)
@@ -1038,6 +1127,18 @@ private final class VestigoModel: ObservableObject {
         }
 
         return true
+    }
+
+    private func pickForMeHistoricalAllows(_ item: MediaItem, answers: PickForMeAnswers) -> Bool {
+        let wantsHistorical = answers.archetypes.contains(.historical) ||
+            answers.secondaryArchetypes.contains(.historical) ||
+            answers.genrePreferences.contains(.history)
+
+        guard wantsHistorical else { return true }
+
+        let genres = Set(item.genreIDs)
+        let text = pickForMeSearchableText(for: item)
+        return pickForMeHistoricalEventScore(genres: genres, text: text) > 0
     }
 
     private func pickForMeScore(_ item: MediaItem, answers: PickForMeAnswers) -> Double {
@@ -1152,8 +1253,7 @@ private final class VestigoModel: ObservableObject {
             return pickForMeKeywordScore(text, ["family", "friendship", "relationship", "relationships", "coming of age", "personal growth", "love"]) * 1.7 +
                 (genres.intersection([18, 35, 10749]).isEmpty ? 0 : 4.0)
         case .historical:
-            return pickForMeKeywordScore(text, ["biography", "historical", "true story", "real events", "political history", "based on true", "war"]) * 1.9 +
-                (genres.intersection([36, 10752, 18]).isEmpty ? 0 : 4.4)
+            return pickForMeHistoricalEventScore(genres: genres, text: text)
         case .epicSpectacle:
             return pickForMeKeywordScore(text, ["epic", "space", "disaster", "war", "planet", "future", "battle", "large-scale", "world"]) * 1.9 +
                 (genres.intersection([878, 28, 12, 10752]).isEmpty ? 0 : 4.8)
@@ -1204,7 +1304,7 @@ private final class VestigoModel: ObservableObject {
         case .sciFi:
             return genres.contains(878) || genres.contains(10765) ? 1.25 : 0
         case .history:
-            return genres.contains(36) || text.containsAny(["historical", "history", "true story"]) ? 1.15 : 0
+            return pickForMeHistoricalEventScore(genres: genres, text: text) > 0 ? 1.6 : -0.5
         case .crime:
             return genres.contains(80) || text.containsAny(["crime", "detective", "police"]) ? 1.15 : 0
         case .war:
@@ -1299,7 +1399,7 @@ private final class VestigoModel: ObservableObject {
 
         switch recommendationType {
         case .crowdPleaser:
-            return isFromMainstreamLists ? 2.8 : 0.8
+            return isFromMainstreamLists ? 1.4 : 0.2
         case .acclaimed:
             return rating >= 8 ? 3.6 : rating >= 7 ? 2.0 : -0.6
         case .hiddenGem:
@@ -1376,6 +1476,27 @@ private final class VestigoModel: ObservableObject {
         Double(keywords.filter { text.contains($0) }.count)
     }
 
+    private func pickForMeHistoricalEventScore(genres: Set<Int>, text: String) -> Double {
+        let signalCount = pickForMeKeywordScore(text, pickForMeHistoricalTrueEventSignals)
+        let hasHistoricalGenre = !genres.intersection(pickForMeHistoricalGenreIDs).isEmpty
+
+        if signalCount > 0 {
+            let keywordScore = signalCount * 3.2
+            let genreBonus = hasHistoricalGenre ? 2.6 : 0
+            return keywordScore + genreBonus
+        }
+
+        if genres.contains(99) {
+            return 3.0
+        }
+
+        if genres.contains(36) || genres.contains(10752) {
+            return -1.2
+        }
+
+        return 0
+    }
+
     private func pickForMeSearchableText(for item: MediaItem) -> String {
         "\(item.title) \(item.overview)".lowercased()
     }
@@ -1383,83 +1504,43 @@ private final class VestigoModel: ObservableObject {
     func updateSearch() {
         searchTask?.cancel()
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let requestID = UUID()
+        searchRequestID = requestID
+
         guard !query.isEmpty else {
             searchResults = []
             searchPeopleResults = []
             return
         }
+
+        let cacheKey = normalizedSearchCacheKey(query, filter: searchFilter)
+        if searchFilter == .people, let cachedPeople = peopleSearchCache[cacheKey] {
+            searchPeopleResults = cachedPeople
+            searchResults = []
+        } else if searchFilter != .people, let cachedResults = mediaSearchCache[cacheKey] {
+            searchResults = cachedResults
+            searchPeopleResults = []
+        }
         
         searchTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 250_000_000)
+            try? await Task.sleep(nanoseconds: 320_000_000)
             guard let self, !Task.isCancelled else { return }
+            guard await MainActor.run(body: { self.searchRequestID == requestID }) else { return }
+
             do {
                 if self.searchFilter == .people {
                     let people = try await tmdb.searchPeople(query: query, includeAdult: !self.settings.hideAdultResults)
                     await MainActor.run {
+                        guard self.searchRequestID == requestID else { return }
+                        self.peopleSearchCache[cacheKey] = people
                         self.searchPeopleResults = people
                         self.searchResults = []
                     }
                 } else if let filter = self.searchFilter.mediaFilter {
-                    let searchQueries = self.fuzzySearchQueries(from: query)
-                    var collectedResults: [MediaItem] = []
-
-                    for searchQuery in searchQueries {
-                        collectedResults.append(contentsOf: try await tmdb.search(query: searchQuery, filter: filter, includeAdult: !self.settings.hideAdultResults))
-                        collectedResults.append(contentsOf: try await tmdb.contextualSearch(query: searchQuery, filter: filter, includeAdult: !self.settings.hideAdultResults))
-                    }
-
-                    let baseResults = preparedResults(
-                        collectedResults
-                            .uniqued()
-                            .sorted { lhs, rhs in
-                                let lhsScore = self.fuzzySearchRelevanceScore(item: lhs, query: query)
-                                let rhsScore = self.fuzzySearchRelevanceScore(item: rhs, query: query)
-
-                                if lhsScore != rhsScore {
-                                    return lhsScore > rhsScore
-                                }
-
-                                return (lhs.releaseDateValue ?? .distantPast) > (rhs.releaseDateValue ?? .distantPast)
-                            },
-                        hideWatched: self.settings.hideWatchedFromSearch
-                    )
-                    
-                    let enrichedResults: [MediaItem]
-                    if !self.selectedRuntimeFilters.isEmpty {
-                        enrichedResults = await self.enrichSearchResultsWithRuntimeIfNeeded(baseResults)
-                    } else {
-                        enrichedResults = baseResults
-                    }
-                    
-                    let visibleResults = await self.filteredShortFilmsIfNeeded(
-                        enrichedResults,
-                        enabled: self.settings.hideShortFilmsFromSearch
-                    )
-                    await self.loadExternalRatings(for: visibleResults, limit: 120)
-
-                    let ratingFilteredResults = visibleResults.filter { item in
-                        guard let minimumTMDbRatingFilter = self.minimumTMDbRatingFilter else { return true }
-                        return self.ratingSortValue(for: item) >= minimumTMDbRatingFilter.minimumRating
-                    }
-
-                    let rankedVisibleResults = ratingFilteredResults.sorted { lhs, rhs in
-                        let lhsScore = self.fuzzySearchRelevanceScore(item: lhs, query: query)
-                        let rhsScore = self.fuzzySearchRelevanceScore(item: rhs, query: query)
-
-                        if lhsScore != rhsScore {
-                            return lhsScore > rhsScore
-                        }
-
-                        let lhsRating = self.ratingSortValue(for: lhs)
-                        let rhsRating = self.ratingSortValue(for: rhs)
-                        if lhsRating != rhsRating {
-                            return lhsRating > rhsRating
-                        }
-
-                        return (lhs.releaseDateValue ?? .distantPast) > (rhs.releaseDateValue ?? .distantPast)
-                    }
-
+                    let rankedVisibleResults = try await self.searchMediaResults(query: query, filter: filter)
                     await MainActor.run {
+                        guard self.searchRequestID == requestID else { return }
+                        self.mediaSearchCache[cacheKey] = rankedVisibleResults
                         self.searchResults = rankedVisibleResults
                         self.searchPeopleResults = []
                     }
@@ -1475,6 +1556,9 @@ private final class VestigoModel: ObservableObject {
 
     func refreshSearch() async {
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let requestID = UUID()
+        searchRequestID = requestID
+
         guard !query.isEmpty else {
             searchResults = []
             searchPeopleResults = []
@@ -1484,11 +1568,17 @@ private final class VestigoModel: ObservableObject {
         searchTask?.cancel()
 
         do {
+            let cacheKey = normalizedSearchCacheKey(query, filter: searchFilter)
             if searchFilter == .people {
-                searchPeopleResults = try await tmdb.searchPeople(query: query, includeAdult: !settings.hideAdultResults)
+                let people = try await tmdb.searchPeople(query: query, includeAdult: !settings.hideAdultResults)
+                guard searchRequestID == requestID else { return }
+                peopleSearchCache[cacheKey] = people
+                searchPeopleResults = people
                 searchResults = []
             } else if let filter = searchFilter.mediaFilter {
                 let results = try await searchMediaResults(query: query, filter: filter)
+                guard searchRequestID == requestID else { return }
+                mediaSearchCache[cacheKey] = results
                 searchResults = results
                 searchPeopleResults = []
             }
@@ -1606,16 +1696,37 @@ private final class VestigoModel: ObservableObject {
         let overview = normalizedSearchText(item.overview)
         var score = 0
 
+        let continuationScore = searchTitleContinuationScore(title: title, query: normalizedQuery)
         if title == normalizedQuery {
-            score += 10_000
-        } else if title.hasPrefix(normalizedQuery + " ") {
-            score += 4_000
+            score += 17_000
+            if let year = item.releaseYearNumber {
+                if year >= 1995 {
+                    score += 1_800
+                } else if year < 1990 {
+                    score -= 1_500
+                }
+            }
+        } else if continuationScore > 0 {
+            score += continuationScore
         } else if title.contains(" " + normalizedQuery + " ") || title.hasSuffix(" " + normalizedQuery) {
-            score += 1_500
+            score += 3_000
         }
 
         if title.contains(normalizedQuery) {
-            score += 900
+            score += 1_400
+        }
+
+        if settings.prioritiseEnglish {
+            if item.originalLanguage == nil || item.originalLanguage == "en" {
+                score += title == normalizedQuery ? 600 : 1_800
+            } else if title != normalizedQuery {
+                score -= 2_500
+            }
+        }
+
+        score += Int(item.voteAverage * 120)
+        if let year = item.releaseYearNumber, year >= 1990 {
+            score += min((year - 1990) * 6, 300)
         }
 
         for token in queryTokens {
@@ -1643,12 +1754,39 @@ private final class VestigoModel: ObservableObject {
         return score
     }
 
+    private func searchTitleContinuationScore(title: String, query: String) -> Int {
+        guard title.hasPrefix(query + " ") else { return 0 }
+        let suffix = title.dropFirst(query.count).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !suffix.isEmpty else { return 0 }
+        let firstToken = suffix.split(separator: " ").first.map(String.init) ?? ""
+        let sequelTokens: Set<String> = ["2", "3", "4", "5", "6", "7", "8", "9", "ii", "iii", "iv", "v", "vi", "vii", "viii", "ix"]
+
+        if sequelTokens.contains(firstToken) {
+            return 18_000
+        }
+
+        if suffix.hasPrefix("part ") || suffix.hasPrefix("chapter ") || suffix.hasPrefix("vol ") || suffix.hasPrefix("volume ") {
+            return 16_500
+        }
+
+        if suffix.contains("animated") || suffix.contains("adventures") || suffix.contains("series") || suffix.contains("legacy") {
+            return 12_500
+        }
+
+        return 8_000
+    }
+
     private func normalizedSearchText(_ text: String) -> String {
         text
             .lowercased()
             .replacingOccurrences(of: "[^a-z0-9 ]", with: " ", options: .regularExpression)
             .split(separator: " ")
             .joined(separator: " ")
+    }
+
+    private func normalizedSearchCacheKey(_ query: String, filter: SearchFilter) -> String {
+        let minimumRatingKey = minimumTMDbRatingFilter.map { String($0.rawValue) } ?? "none"
+        return "\(filter.rawValue)|\(normalizedSearchText(query))|\(settings.prioritiseEnglish)|\(settings.hideAdultResults)|\(settings.hideWatchedFromSearch)|\(minimumRatingKey)|\(selectedRuntimeFilters.map(\.rawValue).sorted().joined(separator: ","))|\(settings.hideShortFilmsFromSearch)"
     }
 
     private func levenshteinDistance(_ a: String, _ b: String) -> Int {
@@ -1709,8 +1847,11 @@ private final class VestigoModel: ObservableObject {
         return enriched
     }
     
-    func loadGenre(_ genre: GenreDefinition, filter: MediaFilter = .both, sort: GenreSort = .tmdbRating) async {
+    func loadGenre(_ genre: GenreDefinition, filter: MediaFilter = .both, sort: GenreSort = .tmdbRating, forceRefresh: Bool = false) async {
         let cacheKey = genreCacheKey(genreID: genre.tmdbID, filter: filter, sort: sort)
+        if !forceRefresh, genreResults[cacheKey]?.isEmpty == false {
+            return
+        }
 
         do {
             let items = try await tmdb.discover(
@@ -1720,8 +1861,22 @@ private final class VestigoModel: ObservableObject {
             )
 
             let preparedItems = preparedResults(items, hideWatched: settings.hideWatchedFromSearch)
+            let firstBatch = Array(preparedItems.prefix(14))
+            if !firstBatch.isEmpty {
+                await MainActor.run {
+                    genreResults[cacheKey] = firstBatch
+                }
+            }
+
             let visibleItems = await filteredShortFilmsIfNeeded(preparedItems, enabled: settings.hideShortFilmsFromSearch)
-            await loadExternalRatings(for: visibleItems, limit: 120)
+            let initialVisibleItems = Array(visibleItems.prefix(24))
+            if !initialVisibleItems.isEmpty {
+                await MainActor.run {
+                    genreResults[cacheKey] = initialVisibleItems
+                }
+            }
+
+            await loadExternalRatings(for: initialVisibleItems, limit: 24)
             let sortedItems = sort == .tmdbRating
                 ? visibleItems.sorted { lhs, rhs in
                     let lhsRating = ratingSortValue(for: lhs)
@@ -1751,6 +1906,12 @@ private final class VestigoModel: ObservableObject {
     func loadDetail(_ item: MediaItem) async {
         if detailsCache[item.key] == nil {
             do { detailsCache[item.key] = try await tmdb.detail(for: item) } catch { }
+        }
+        if let detail = detailsCache[item.key], let collectionID = detail.tmdbCollectionID {
+            do {
+                let collectionItems = try await backend.tmdbCollectionRecommendations(collectionID: collectionID)
+                detailsCache[item.key] = detail.addingSimilarCandidates(collectionItems, source: item)
+            } catch { }
         }
         await loadExternalRatings(item, priority: true)
         if providerCache[item.key] == nil {
@@ -2093,8 +2254,8 @@ private final class VestigoModel: ObservableObject {
         saveLocalSoon()
     }
 
-    func importWatchedText(_ text: String) async -> [String] {
-        let entries = WatchedImportEntry.parse(text)
+    func importWatchedText(_ text: String, format: WatchedImportEntry.ImportFormat = .automatic) async -> [String] {
+        let entries = WatchedImportEntry.report(for: text, format: format).entries
         var notFound: [String] = []
 
         for entry in entries {
@@ -2588,6 +2749,7 @@ private struct SearchView: View {
             searchHistory = Array(searchHistory.prefix(maxSearchHistoryCount))
         }
     }
+
 }
 
 private struct SearchHistoryList: View {
@@ -3023,7 +3185,7 @@ private struct GenreResultsView: View {
 
     var body: some View {
         BaseScreen(title: route.genre.name, filter: $genreFilter, settings: model.settings, onRefresh: {
-            await model.loadGenre(route.genre, filter: genreFilter, sort: genreSort)
+            await model.loadGenre(route.genre, filter: genreFilter, sort: genreSort, forceRefresh: true)
         }) {
             VStack(spacing: 14) {
                 FilterPills(filter: $genreFilter, options: [.movie, .tv, .both]) {
@@ -3935,45 +4097,56 @@ private struct PickForMeOptionButton: View {
         @State private var newCollectionName = ""
         @State private var collectionPath: [UUID] = []
         
-        private var collectionIconItemsByID: [UUID: MediaItem] {
-            Self.collectionIconItemsByID(for: model.library.collections, library: model.library)
+        private var visibleCollections: [(collection: MediaCollection, items: [MediaItem])] {
+            model.library.collections.compactMap { collection in
+                let items = visibleItems(in: collection)
+                return items.isEmpty ? nil : (collection, items)
+            }
         }
 
-        private static func collectionIconItemsByID(for collections: [MediaCollection], library: UserLibrary) -> [UUID: MediaItem] {
+        private var collectionIconItemsByID: [UUID: MediaItem] {
+            Self.collectionIconItemsByID(for: visibleCollections, library: model.library)
+        }
+
+        private func visibleItems(in collection: MediaCollection) -> [MediaItem] {
+            collection.itemKeys
+                .compactMap { model.library.items[$0] }
+                .filter { $0.shouldShowInDiscovery }
+        }
+
+        private static func collectionIconItemsByID(for collections: [(collection: MediaCollection, items: [MediaItem])], library: UserLibrary) -> [UUID: MediaItem] {
             let sortedCollections = collections.sorted { lhs, rhs in
-                if lhs.itemKeys.count != rhs.itemKeys.count {
-                    return lhs.itemKeys.count < rhs.itemKeys.count
+                if lhs.items.count != rhs.items.count {
+                    return lhs.items.count < rhs.items.count
                 }
-                return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
+                return lhs.collection.name.localizedCaseInsensitiveCompare(rhs.collection.name) == .orderedAscending
             }
 
             var result: [UUID: MediaItem] = [:]
             var usedKeys = Set<MediaKey>()
 
-            func sortedCandidates(for collection: MediaCollection) -> [MediaItem] {
-                collection.itemKeys
-                    .compactMap { library.items[$0] }
-                    .sorted { lhs, rhs in
-                        lhs.title.localizedCaseInsensitiveCompare(rhs.title) == .orderedAscending
-                    }
+            func sortedCandidates(for entry: (collection: MediaCollection, items: [MediaItem])) -> [MediaItem] {
+                entry.items.sorted { lhs, rhs in
+                    lhs.title.localizedCaseInsensitiveCompare(rhs.title) == .orderedAscending
+                }
             }
 
-            for collection in sortedCollections where collection.itemKeys.count == 1 {
-                guard let item = sortedCandidates(for: collection).first else { continue }
-                result[collection.id] = item
+            for entry in sortedCollections where entry.items.count == 1 {
+                guard let item = sortedCandidates(for: entry).first else { continue }
+                result[entry.collection.id] = item
                 usedKeys.insert(item.key)
             }
 
-            for collection in sortedCollections where collection.itemKeys.count > 1 {
-                let candidates = sortedCandidates(for: collection)
+            for entry in sortedCollections where entry.items.count > 1 {
+                let candidates = sortedCandidates(for: entry)
                 guard !candidates.isEmpty else { continue }
 
                 let unusedCandidates = candidates.filter { !usedKeys.contains($0.key) }
                 let usableCandidates = unusedCandidates.isEmpty ? candidates : unusedCandidates
-                let iconIndex = collection.name.unicodeScalars.map { Int($0.value) }.reduce(0, +) % usableCandidates.count
+                let iconIndex = entry.collection.name.unicodeScalars.map { Int($0.value) }.reduce(0, +) % usableCandidates.count
                 let item = usableCandidates[iconIndex]
 
-                result[collection.id] = item
+                result[entry.collection.id] = item
                 usedKeys.insert(item.key)
             }
 
@@ -4076,14 +4249,15 @@ private struct PickForMeOptionButton: View {
                         }
                         .buttonStyle(.plain)
 
-                        ForEach(model.library.collections.filter { !$0.itemKeys.isEmpty }) { collection in
+                        ForEach(visibleCollections, id: \.collection.id) { entry in
+                            let collection = entry.collection
                             let iconItem = collectionIconItemsByID[collection.id]
                             Button {
                                 collectionPath.append(collection.id)
                             } label: {
                                 CollectionRow(
                                     collection: collection,
-                                    count: collection.itemKeys.count,
+                                    count: entry.items.count,
                                     iconItem: iconItem
                                 )
                                 .id(Self.collectionRowIdentity(for: collection, iconItem: iconItem))
@@ -4173,7 +4347,7 @@ private struct PickForMeOptionButton: View {
     }
 
     private enum VestigoBackendConfiguration {
-        static let baseURL = URL(string: "https://mtttuyvpjyugudkevchj.supabase.co/functions/v1/vestigo-api")!
+        nonisolated static let baseURL = URL(string: "https://mtttuyvpjyugudkevchj.supabase.co/functions/v1/vestigo-api")!
     }
 
     private struct ExternalRatings: Codable, Hashable {
@@ -4320,7 +4494,7 @@ private struct PickForMeOptionButton: View {
         let genreIDs: [Int]
         let originalLanguage: String?
 
-        var mediaItem: MediaItem {
+        nonisolated var mediaItem: MediaItem {
             MediaItem(
                 id: id,
                 kind: kind == "tv" ? .tv : .movie,
@@ -4471,33 +4645,33 @@ private struct PickForMeOptionButton: View {
         }
     }
 
-    private struct BackendFranchiseMembershipResponse: Decodable {
+    private struct BackendFranchiseMembershipResponse: nonisolated Decodable {
         let ok: Bool
         let franchise: TVDBFranchiseList?
     }
     
-    private struct BackendFranchiseRecommendationsResponse: Decodable {
+    private struct BackendFranchiseRecommendationsResponse: nonisolated Decodable {
         let ok: Bool
         let results: [BackendMediaItemDTO]
     }
 
-    private struct BackendTMDbCollectionResponse: Decodable {
+    private struct BackendTMDbCollectionResponse: nonisolated Decodable {
         let ok: Bool
         let collection: BackendTMDbCollectionDTO?
     }
 
-    private struct BackendRatingsResponse: Decodable {
+    private struct BackendRatingsResponse: nonisolated Decodable {
         let ok: Bool
         let ratings: ExternalRatings?
     }
 
-    private struct BackendTMDbCollectionDTO: Decodable, Identifiable {
+    private struct BackendTMDbCollectionDTO: nonisolated Decodable, Identifiable {
         let id: Int
         let name: String
         let overview: String?
         let items: [BackendMediaItemDTO]
 
-        var mediaItems: [MediaItem] {
+        nonisolated var mediaItems: [MediaItem] {
             items.map(\.mediaItem)
         }
     }
@@ -4565,15 +4739,22 @@ private struct PickForMeOptionButton: View {
         @State private var tvdbLoadError: String?
         private let backendClient = VestigoBackendClient()
 
+        private var activeFranchiseSourceItems: [MediaItem] {
+            (model.library.watchedItems + model.library.watchlistItems)
+                .uniqued()
+                .filter(\.shouldShowInDiscovery)
+        }
+
         private var franchises: [FranchiseCollection] {
             let discoveredIDs = Set(tmdbCollectionFranchises.map(\.id))
             let seeded = FranchiseLibrary.defaultFranchises(
-                matching: Array(model.library.items.values),
+                matching: activeFranchiseSourceItems,
                 tvdbLists: tvdbFranchises
             )
             .filter { !discoveredIDs.contains($0.id) }
 
             return (tmdbCollectionFranchises + seeded)
+                .filter { visibleItemCount(for: $0) > 0 }
                 .sorted { lhs, rhs in
                     lhs.title.localizedCaseInsensitiveCompare(rhs.title) == .orderedAscending
                 }
@@ -4581,6 +4762,7 @@ private struct PickForMeOptionButton: View {
 
         private var seriesFranchises: [FranchiseCollection] {
             tmdbCollectionFranchises
+                .filter { visibleItemCount(for: $0) > 0 }
                 .sorted { lhs, rhs in
                     lhs.title.localizedCaseInsensitiveCompare(rhs.title) == .orderedAscending
                 }
@@ -4593,6 +4775,10 @@ private struct PickForMeOptionButton: View {
                 .sorted { lhs, rhs in
                     lhs.title.localizedCaseInsensitiveCompare(rhs.title) == .orderedAscending
                 }
+        }
+        
+        private func visibleItemCount(for franchise: FranchiseCollection) -> Int {
+            FranchiseLibrary.items(in: franchise, from: activeFranchiseSourceItems).count
         }
         
         private var visibleFranchisesForErrorState: [FranchiseCollection] {
@@ -4640,7 +4826,7 @@ private struct PickForMeOptionButton: View {
                                     } label: {
                                         FranchiseCollectionRow(
                                             franchise: franchise,
-                                            count: FranchiseLibrary.items(in: franchise, from: Array(model.library.items.values)).count
+                                            count: visibleItemCount(for: franchise)
                                         )
                                     }
                                     .buttonStyle(.plain)
@@ -4658,7 +4844,7 @@ private struct PickForMeOptionButton: View {
                                     } label: {
                                         FranchiseCollectionRow(
                                             franchise: franchise,
-                                            count: FranchiseLibrary.items(in: franchise, from: Array(model.library.items.values)).count
+                                            count: visibleItemCount(for: franchise)
                                         )
                                     }
                                     .buttonStyle(.plain)
@@ -4679,7 +4865,7 @@ private struct PickForMeOptionButton: View {
                                 } label: {
                                     FranchiseCollectionRow(
                                         franchise: franchise,
-                                        count: FranchiseLibrary.items(in: franchise, from: Array(model.library.items.values)).count
+                                        count: visibleItemCount(for: franchise)
                                     )
                                 }
                                 .buttonStyle(.plain)
@@ -4699,7 +4885,7 @@ private struct PickForMeOptionButton: View {
                                 } label: {
                                     FranchiseCollectionRow(
                                         franchise: franchise,
-                                        count: FranchiseLibrary.items(in: franchise, from: Array(model.library.items.values)).count
+                                        count: visibleItemCount(for: franchise)
                                     )
                                 }
                                 .buttonStyle(.plain)
@@ -4746,9 +4932,9 @@ private struct PickForMeOptionButton: View {
         }
         
         private func loadDiscoveredTMDbCollections() async {
-            let movieItems = (Array(model.library.items.values) + model.library.watchedItems + model.library.watchlistItems)
+            let movieItems = (model.library.watchedItems + model.library.watchlistItems)
                 .uniqued()
-                .filter { $0.kind == .movie }
+                .filter { $0.kind == .movie && $0.shouldShowInDiscovery }
             var collectionsByID: [Int: BackendTMDbCollectionDTO] = [:]
 
             for item in movieItems {
@@ -4761,8 +4947,9 @@ private struct PickForMeOptionButton: View {
                 }
             }
 
-            let discovered = collectionsByID.values.map { collection in
-                let items = collection.mediaItems
+            let discovered = collectionsByID.values.compactMap { collection -> FranchiseCollection? in
+                let items = collection.mediaItems.filter(\.shouldShowInDiscovery)
+                guard items.count >= 2 else { return nil }
 
                 return FranchiseCollection(
                     id: "tmdb-collection-\(collection.id)",
@@ -4881,7 +5068,7 @@ private struct PickForMeOptionButton: View {
 
         private var seriesCollectionItems: [MediaItem] {
             FranchiseLibrary.sortedItems(
-                (franchiseItems + backendRecommendations).uniqued(),
+                (franchiseItems + backendRecommendations).uniqued().filter(\.shouldShowInDiscovery),
                 using: sort,
                 library: model.library,
                 externalRatings: model.externalRatingsCache,
@@ -4902,7 +5089,7 @@ private struct PickForMeOptionButton: View {
 
         private var universeCollectionItems: [MediaItem] {
             FranchiseLibrary.sortedItems(
-                (franchiseItems + backendRecommendations).uniqued(),
+                (franchiseItems + backendRecommendations).uniqued().filter(\.shouldShowInDiscovery),
                 using: sort,
                 library: model.library,
                 externalRatings: model.externalRatingsCache,
@@ -5154,8 +5341,9 @@ private struct PickForMeOptionButton: View {
                 } else {
                     results = try await backendClient.franchiseRecommendations(id: franchise.id, matching: franchise.tvdbListQuery)
                 }
+                let visibleResults = results.filter(\.shouldShowInDiscovery)
                 await MainActor.run {
-                    backendRecommendations = results
+                    backendRecommendations = visibleResults
                     backendRecommendationError = nil
                     isLoadingBackendRecommendations = false
                 }
@@ -5237,7 +5425,7 @@ private struct PickForMeOptionButton: View {
 
         static func items(in franchise: FranchiseCollection, from sourceItems: [MediaItem]) -> [MediaItem] {
             sortedItems(
-                sourceItems.filter { item in matches(item, franchise: franchise) },
+                sourceItems.filter { item in item.shouldShowInDiscovery && matches(item, franchise: franchise) },
                 using: .releaseDate,
                 library: UserLibrary()
             )
@@ -5249,7 +5437,8 @@ private struct PickForMeOptionButton: View {
             
             return sourceItems
                 .filter { item in
-                    matches(item, franchise: franchise)
+                    item.shouldShowInDiscovery
+                    && matches(item, franchise: franchise)
                     && !library.isWatched(item.key)
                     && (!settings.hideUpcomingFromCollectionRecommendations || !item.isUpcoming)
                 }
@@ -5479,6 +5668,7 @@ private struct PickForMeOptionButton: View {
         @State private var showImportWarningAlert = false
         @State private var showImportFilePicker = false
         @State private var isImporting = false
+        @State private var pendingImportFormat: WatchedImportEntry.ImportFormat = .automatic
         
         var body: some View {
             BaseScreen(title: "Settings", filter: .constant(.both), settings: model.settings, contentTopPadding: 18) {
@@ -5777,7 +5967,7 @@ private struct PickForMeOptionButton: View {
                     
                     VStack(alignment: .leading, spacing: 10) {
                         VStack(alignment: .leading, spacing: 8) {
-                            Text("Import one watched title per line: title, star rating, optional f for favourite, and m for movie or s for series. Example: Star Wars 5 f m.")
+                            Text("Import watched titles as title, star rating, optional f for favourite, and m for movie or s for series. .txt can use one item per line or commas; .csv uses commas only. Example: Star Wars 5 f m.")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
 
@@ -5821,7 +6011,7 @@ private struct PickForMeOptionButton: View {
                                         .font(.system(size: 17, weight: .semibold))
                                         .frame(width: 24, height: 22, alignment: .center)
 
-                                    Text("Import .txt file")
+                                    Text("Import .txt or .csv file")
                                         .font(.system(size: 15, weight: .semibold, design: .rounded))
                                         .lineLimit(1)
                                         .frame(height: 22, alignment: .center)
@@ -5923,14 +6113,15 @@ private struct PickForMeOptionButton: View {
                 Button("Continue") {
                     if let pendingImportText {
                         let textToImport = pendingImportText
+                        let formatToImport = pendingImportFormat
                         self.pendingImportText = nil
-                        importWatchedData(textToImport, skipsWarnings: true)
+                        importWatchedData(textToImport, format: formatToImport, skipsWarnings: true)
                     }
                 }
             } message: {
                 Text(importWarningMessage)
             }
-            .fileImporter(isPresented: $showImportFilePicker, allowedContentTypes: [.plainText], allowsMultipleSelection: false) { result in
+            .fileImporter(isPresented: $showImportFilePicker, allowedContentTypes: [.plainText, .commaSeparatedText], allowsMultipleSelection: false) { result in
                 switch result {
                 case .success(let urls):
                     guard let url = urls.first else { return }
@@ -5941,13 +6132,14 @@ private struct PickForMeOptionButton: View {
             }
         }
 
-        private func importWatchedData(_ text: String, skipsWarnings: Bool = false) {
+        private func importWatchedData(_ text: String, format: WatchedImportEntry.ImportFormat = .automatic, skipsWarnings: Bool = false) {
             let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmedText.isEmpty else { return }
 
-            let report = WatchedImportEntry.report(for: trimmedText)
+            let report = WatchedImportEntry.report(for: trimmedText, format: format)
             if !skipsWarnings, let warningMessage = WatchedImportEntry.warningMessage(for: report) {
                 pendingImportText = trimmedText
+                pendingImportFormat = format
                 importWarningMessage = warningMessage
                 showImportWarningAlert = true
                 return
@@ -5955,7 +6147,7 @@ private struct PickForMeOptionButton: View {
 
             isImporting = true
             Task {
-                let notFound = await model.importWatchedText(trimmedText)
+                let notFound = await model.importWatchedText(trimmedText, format: format)
                 await MainActor.run {
                     importNotFound = notFound
                     showImportNotFoundAlert = !notFound.isEmpty
@@ -5974,7 +6166,9 @@ private struct PickForMeOptionButton: View {
 
             guard let text = try? String(contentsOf: url, encoding: .utf8) else { return }
             importText = text
-            importWatchedData(text)
+            let fileExtension = url.pathExtension.lowercased()
+            let format: WatchedImportEntry.ImportFormat = fileExtension == "csv" ? .commaSeparated : .automatic
+            importWatchedData(text, format: format)
         }
     }
 
@@ -6061,12 +6255,13 @@ private struct PickForMeOptionButton: View {
 
     private struct RatingPromptOverlay: ViewModifier {
         @ObservedObject var model: VestigoModel
+        var suppressedItemKey: MediaKey?
         
         func body(content: Content) -> some View {
             ZStack {
                 content
                 
-                if let item = model.pendingRatingPromptItem {
+                if let item = model.pendingRatingPromptItem, item.key != suppressedItemKey {
                     Color.black.opacity(0.32)
                         .ignoresSafeArea()
                         .transition(.opacity)
@@ -6136,8 +6331,8 @@ private struct PickForMeOptionButton: View {
     }
     
     private extension View {
-        func ratingPromptOverlay(model: VestigoModel) -> some View {
-            modifier(RatingPromptOverlay(model: model))
+        func ratingPromptOverlay(model: VestigoModel, suppressedItemKey: MediaKey? = nil) -> some View {
+            modifier(RatingPromptOverlay(model: model, suppressedItemKey: suppressedItemKey))
         }
     }
     
@@ -6166,6 +6361,7 @@ private struct PickForMeOptionButton: View {
         var body: some View {
             detailSheetSurface
                 .favouriteReplacementOverlay(model: model)
+                .ratingPromptOverlay(model: model, suppressedItemKey: item.key)
                 .presentationBackground(.clear)
                 .presentationCornerRadius(54)
                 .task { await model.loadDetail(item) }
@@ -8042,9 +8238,14 @@ private struct PickForMeOptionButton: View {
             if loadedURL == url, platformImage != nil {
                 return
             }
+
+            if let cachedImage = RemoteImageMemoryCache.shared.image(for: url) {
+                setLoadedImage(cachedImage, for: url)
+                return
+            }
             
             do {
-                let request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 20)
+                let request = URLRequest(url: url, cachePolicy: .returnCacheDataElseLoad, timeoutInterval: 20)
                 let (data, response) = try await URLSession.shared.data(for: request)
                 guard let httpResponse = response as? HTTPURLResponse else {
                     setLoadedImage(nil, for: url)
@@ -8058,6 +8259,7 @@ private struct PickForMeOptionButton: View {
                     setLoadedImage(nil, for: url)
                     return
                 }
+                RemoteImageMemoryCache.shared.setImage(image, for: url)
                 setLoadedImage(image, for: url)
             } catch {
                 setLoadedImage(nil, for: url)
@@ -8401,8 +8603,28 @@ private struct PickForMeOptionButton: View {
             if Self.isEraID(genreID) {
                 return try await discoverEra(eraID: genreID, filter: filter, sort: sort)
             }
-            
-            return try await curatedCategoryItems(genreID: genreID, filter: filter)
+
+            async let discoveredItems = discoverCategoryItems(genreID: genreID, filter: filter)
+            async let curatedItems = curatedCategoryItems(genreID: genreID, filter: filter)
+
+            return try await (discoveredItems + curatedItems)
+                .uniqued()
+                .prefixArray(50)
+        }
+
+        private func discoverCategoryItems(genreID: Int, filter: MediaFilter) async throws -> [MediaItem] {
+            switch filter {
+            case .both:
+                async let movies = discoverCategorySingleMedia(genreID: genreID, media: "movie")
+                async let series = discoverCategorySingleMedia(genreID: genreID, media: "tv")
+                return try await (movies + series)
+                    .uniqued()
+                    .prefixArray(50)
+            case .movie:
+                return try await discoverCategorySingleMedia(genreID: genreID, media: "movie")
+            case .tv:
+                return try await discoverCategorySingleMedia(genreID: genreID, media: "tv")
+            }
         }
         
         private func curatedCategoryItems(genreID: Int, filter: MediaFilter) async throws -> [MediaItem] {
@@ -8420,15 +8642,24 @@ private struct PickForMeOptionButton: View {
                 }
             }
             
-            for entry in filteredEntries.prefix(50) {
-                if let item = try await resolveCuratedEntry(entry) {
-                    resolved.append(item)
+            let limitedEntries = Array(filteredEntries.prefix(16))
+            try await withThrowingTaskGroup(of: MediaItem?.self) { group in
+                for entry in limitedEntries {
+                    group.addTask {
+                        try await resolveCuratedEntry(entry)
+                    }
+                }
+
+                for try await item in group {
+                    if let item {
+                        resolved.append(item)
+                    }
                 }
             }
             
             return resolved
                 .uniqued()
-                .prefixArray(50)
+                .prefixArray(16)
         }
         
         private func resolveCuratedEntry(_ entry: CuratedCategoryEntry) async throws -> MediaItem? {
@@ -8733,10 +8964,10 @@ private struct PickForMeOptionButton: View {
                 URLQueryItem(name: "watch_region", value: "US")
             ]
             
-            return try await fetchListPages(path: "/discover/\(media)", query: query, pages: 5)
+            return try await fetchListPages(path: "/discover/\(media)", query: query, pages: 2)
                 .filter { item in
                     guard item.kind == .movie || item.kind == .tv else { return false }
-                    return item.primaryCategoryGenreID == genreID
+                    return item.categoryGenreIDs.contains(genreID)
                 }
         }
         
@@ -8747,7 +8978,7 @@ private struct PickForMeOptionButton: View {
             case 28:
                 return [10759]
             case 878:
-                return [10765]
+                return []
             case 14:
                 return [10765]
             case 18:
@@ -8768,24 +8999,20 @@ private struct PickForMeOptionButton: View {
         private func minimumVoteCount(for genreID: Int, media: String) -> String {
             if media == "tv" {
                 switch genreID {
-                case 16:
-                    return "120"
-                case 35:
-                    return "180"
+                case 16, 35, 10762, 10764, 10767:
+                    return "60"
                 case 878, 14:
-                    return "220"
+                    return "120"
                 default:
-                    return "250"
+                    return "100"
                 }
             }
             
             switch genreID {
-            case 16:
-                return "350"
-            case 27, 35:
-                return "450"
+            case 16, 27, 35, 37, 99, 36, 10752, 10749, 10751:
+                return "150"
             default:
-                return "650"
+                return "220"
             }
         }
         
@@ -8793,32 +9020,32 @@ private struct PickForMeOptionButton: View {
             if media == "tv" {
                 switch genreID {
                 case 27:
-                    return "6.2"
-                case 35:
-                    return "6.4"
+                    return "5.8"
+                case 35, 10762, 10764, 10767:
+                    return "6.0"
                 default:
-                    return "6.6"
+                    return "6.1"
                 }
             }
             
             switch genreID {
             case 27:
-                return "6.0"
-            case 35:
-                return "6.2"
+                return "5.7"
+            case 35, 37, 99, 36, 10752, 10749, 10751:
+                return "5.9"
             default:
-                return "6.4"
+                return "6.0"
             }
         }
         
         func recommendations(for key: MediaKey) async throws -> [MediaItem] {
             try await fetchList(path: "/\(key.kind.tmdbPath)/\(key.id)/recommendations", query: [])
-                .filter { !$0.isUpcoming }
+                .filter { $0.shouldShowInDiscovery && !$0.isUpcoming }
         }
         
         func sameSeriesOrSimilar(for key: MediaKey) async throws -> [MediaItem] {
             try await fetchList(path: "/\(key.kind.tmdbPath)/\(key.id)/similar", query: [])
-                .filter { !$0.isUpcoming }
+                .filter { $0.shouldShowInDiscovery && !$0.isUpcoming }
         }
         
         func detail(for item: MediaItem) async throws -> MediaDetail {
@@ -9287,7 +9514,7 @@ private struct PickForMeOptionButton: View {
         let placeOfBirth: String?
         let knownForDepartment: String?
         
-        init(
+        nonisolated init(
             id: Int,
             biography: String,
             birthday: String? = nil,
@@ -9902,7 +10129,7 @@ private struct PickForMeOptionButton: View {
         let runtime: Int?
         let originalLanguage: String?
         
-        init(
+        nonisolated init(
             id: Int,
             kind: MediaKind,
             title: String,
@@ -9974,7 +10201,7 @@ private struct PickForMeOptionButton: View {
         }
     }
     
-    private struct MediaKey: Codable, Hashable, Identifiable {
+    private struct MediaKey: Codable, nonisolated Hashable, Identifiable {
         let id: Int
         let kind: MediaKind
         var stableID: String { "\(kind.rawValue)-\(id)" }
@@ -10089,10 +10316,161 @@ private struct PickForMeOptionButton: View {
             let mappedSimilar: [MediaItem] = combinedResults.map { dto in
                 MediaItem(dto)
             }
-            similar = mappedSimilar
-                .uniqued()
-                .filter { !$0.isUpcoming }
-                .sortedBySimilarity(to: fallback)
+            similar = Self.rankedSimilarItems(
+                mappedSimilar.uniqued().filter { $0.shouldShowInDiscovery && !$0.isUpcoming && $0.key != fallback.key },
+                source: fallback,
+                cast: mappedCast,
+                keyCrew: uniqueKeyCrew,
+                runtime: runtime
+            )
+        }
+
+        func addingSimilarCandidates(_ candidates: [MediaItem], source: MediaItem) -> MediaDetail {
+            MediaDetail(
+                director: director,
+                creator: creator,
+                cast: cast,
+                castAndKeyCrew: castAndKeyCrew,
+                seasons: seasons,
+                similar: Self.rankedSimilarItems(
+                    (similar + candidates).uniqued().filter { $0.shouldShowInDiscovery && !$0.isUpcoming && $0.key != source.key },
+                    source: source,
+                    cast: cast,
+                    keyCrew: castAndKeyCrew,
+                    runtime: runtime
+                ),
+                firstAirDate: firstAirDate,
+                lastAirDate: lastAirDate,
+                status: status,
+                runtime: runtime,
+                ageRating: ageRating,
+                tmdbCollectionID: tmdbCollectionID
+            )
+        }
+
+        private init(director: PersonSummary?, creator: PersonSummary?, cast: [PersonSummary], castAndKeyCrew: [PersonSummary], seasons: [SeasonInfo], similar: [MediaItem], firstAirDate: String?, lastAirDate: String?, status: String?, runtime: Int?, ageRating: String?, tmdbCollectionID: Int?) {
+            self.director = director
+            self.creator = creator
+            self.cast = cast
+            self.castAndKeyCrew = castAndKeyCrew
+            self.seasons = seasons
+            self.similar = similar
+            self.firstAirDate = firstAirDate
+            self.lastAirDate = lastAirDate
+            self.status = status
+            self.runtime = runtime
+            self.ageRating = ageRating
+            self.tmdbCollectionID = tmdbCollectionID
+        }
+
+        private static func rankedSimilarItems(_ items: [MediaItem], source: MediaItem, cast: [PersonSummary], keyCrew: [PersonSummary], runtime: Int?) -> [MediaItem] {
+            let sourceGenres = Set(source.genreIDs)
+            let sourceText = normalizedSimilarityText("\(source.title) \(source.overview)")
+            let sourceTokens = Set(sourceText.split(separator: " ").map(String.init).filter { $0.count >= 4 })
+            let castNames = Set(cast.prefix(6).map { normalizedSimilarityText($0.name) })
+            let crewNames = Set(keyCrew.prefix(6).map { normalizedSimilarityText($0.name) })
+
+            return items
+                .map { item -> (item: MediaItem, score: Double) in
+                    let itemGenres = Set(item.genreIDs)
+                    let itemText = normalizedSimilarityText("\(item.title) \(item.overview)")
+                    let itemTokens = Set(itemText.split(separator: " ").map(String.init).filter { $0.count >= 4 })
+                    let sharedSpecificTokens = sourceTokens.intersection(itemTokens).filter { !broadSimilarityTokens.contains($0) }
+                    var score = 0.0
+
+                    score += titleRelationshipScore(sourceTitle: source.title, itemTitle: item.title)
+
+                    score += Double(sharedSpecificTokens.count) * 4.0
+                    score += Double(sourceGenres.intersection(itemGenres).count) * 1.4
+
+                    if item.originalLanguage == source.originalLanguage {
+                        score += 2.0
+                    }
+
+                    if let sourceYear = source.releaseYearNumber, let itemYear = item.releaseYearNumber {
+                        let distance = abs(sourceYear - itemYear)
+                        if distance <= 3 {
+                            score += 2.0
+                        } else if distance <= 8 {
+                            score += 0.8
+                        }
+                    }
+
+                    if let runtime, let itemRuntime = item.runtime {
+                        let runtimeDistance = abs(runtime - itemRuntime)
+                        if runtimeDistance <= 15 {
+                            score += 1.4
+                        } else if runtimeDistance <= 30 {
+                            score += 0.6
+                        }
+                    }
+
+                    if itemText.containsAny(Array(castNames)) {
+                        score += 3.0
+                    }
+
+                    if itemText.containsAny(Array(crewNames)) {
+                        score += 4.0
+                    }
+
+                    score += min(item.voteAverage, 10) * 0.25
+
+                    return (item, score)
+                }
+                .sorted { lhs, rhs in
+                    if lhs.score != rhs.score { return lhs.score > rhs.score }
+                    return lhs.item.voteAverage > rhs.item.voteAverage
+                }
+                .map(\.item)
+        }
+
+        private static let broadSimilarityTokens: Set<String> = [
+            "movie", "film", "series", "story", "life", "world", "young", "find", "must", "when", "after", "about", "into", "from", "their", "with"
+        ]
+
+        private static func normalizedSimilarityText(_ value: String) -> String {
+            value
+                .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+                .lowercased()
+                .replacingOccurrences(of: "[^a-z0-9]+", with: " ", options: .regularExpression)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        private static func titleStem(_ value: String) -> String {
+            normalizedSimilarityText(value)
+                .replacingOccurrences(of: "\\b(the|a|an|part|chapter|season|movie|film)\\b", with: "", options: .regularExpression)
+                .split(separator: " ")
+                .prefix(3)
+                .joined(separator: " ")
+        }
+
+        private static func titleRelationshipScore(sourceTitle: String, itemTitle: String) -> Double {
+            let source = normalizedSimilarityText(sourceTitle)
+            let item = normalizedSimilarityText(itemTitle)
+            guard !source.isEmpty, !item.isEmpty else { return 0 }
+            if source == item { return 42 }
+
+            if item.hasPrefix(source + " ") {
+                let suffix = item.dropFirst(source.count).trimmingCharacters(in: .whitespacesAndNewlines)
+                let firstToken = suffix.split(separator: " ").first.map(String.init) ?? ""
+                let sequelTokens: Set<String> = ["2", "3", "4", "5", "6", "7", "8", "9", "ii", "iii", "iv", "v", "vi", "vii", "viii", "ix"]
+
+                if sequelTokens.contains(firstToken) {
+                    return 92
+                }
+
+                if suffix.hasPrefix("part ") || suffix.hasPrefix("chapter ") || suffix.hasPrefix("vol ") || suffix.hasPrefix("volume ") {
+                    return 78
+                }
+
+                return 38
+            }
+
+            let sourceStem = titleStem(sourceTitle)
+            let itemStem = titleStem(itemTitle)
+            if !sourceStem.isEmpty && sourceStem == itemStem { return 36 }
+            if !sourceStem.isEmpty && (itemStem.contains(sourceStem) || sourceStem.contains(itemStem)) { return 18 }
+            return 0
         }
         
         var yearRangeText: String {
@@ -10569,13 +10947,14 @@ private struct PickForMeOptionButton: View {
         }
     }
     private struct GenreRoute: Hashable { let genre: GenreDefinition }
-    
+
     private struct GenreDefinition: Identifiable, Hashable {
         var id: Int { tmdbID }
         let name: String
         let tmdbID: Int
         let iconicFilm: String
         let imageURL: String
+        var mediaScope: MediaFilter = .both
         
         var imageURLValue: URL? {
             URL(string: imageURL)
@@ -10583,6 +10962,7 @@ private struct PickForMeOptionButton: View {
         
         static let all = [
             GenreDefinition(name: "Action", tmdbID: 28, iconicFilm: "Die Hard", imageURL: "https://image.tmdb.org/t/p/w780/4HWAQu28e2yaWrtupFPGFkdNU7V.jpg"),
+            GenreDefinition(name: "Adventure", tmdbID: 12, iconicFilm: "Indiana Jones", imageURL: "https://image.tmdb.org/t/p/w780/ceG9VzoRAVGwivFU403Wc3AHRys.jpg"),
             GenreDefinition(name: "Sci-Fi", tmdbID: 878, iconicFilm: "Blade Runner 2049", imageURL: "https://image.tmdb.org/t/p/w780/8rpDcsfLJypbO6vREc0547VKqEv.jpg"),
             GenreDefinition(name: "Fantasy", tmdbID: 14, iconicFilm: "The Lord of the Rings", imageURL: "https://image.tmdb.org/t/p/w780/6oom5QYQ2yQTMJIbnvbkBL9cHo6.jpg"),
             GenreDefinition(name: "Drama", tmdbID: 18, iconicFilm: "The Godfather", imageURL: "https://image.tmdb.org/t/p/w780/3bhkrj58Vtu7enYsRolD1fZdja1.jpg"),
@@ -10590,6 +10970,17 @@ private struct PickForMeOptionButton: View {
             GenreDefinition(name: "Animation", tmdbID: 16, iconicFilm: "Spirited Away", imageURL: "https://image.tmdb.org/t/p/w780/39wmItIWsg5sZMyRUHLkWBcuVCM.jpg"),
             GenreDefinition(name: "Crime", tmdbID: 80, iconicFilm: "Pulp Fiction", imageURL: "https://image.tmdb.org/t/p/w500/d5iIlFn5s0ImszYzBPb8JPIfbXD.jpg"),
             GenreDefinition(name: "Comedy", tmdbID: 35, iconicFilm: "Airplane!", imageURL: "https://image.tmdb.org/t/p/w780/hiURvJjCgk0s10urHVCg80TFF11.jpg"),
+            GenreDefinition(name: "Mystery", tmdbID: 9648, iconicFilm: "Knives Out", imageURL: "https://image.tmdb.org/t/p/w780/pThyQovXQrw2m0s9x82twj48Jq4.jpg"),
+            GenreDefinition(name: "Thriller", tmdbID: 53, iconicFilm: "Gone Girl", imageURL: "https://image.tmdb.org/t/p/w780/qymaJhucquUwjpb8oiqynMeXnID.jpg"),
+            GenreDefinition(name: "Romance", tmdbID: 10749, iconicFilm: "Before Sunrise", imageURL: "https://image.tmdb.org/t/p/w780/kf1Jb1c2JAOqjuzA3H4oDM263uB.jpg", mediaScope: .movie),
+            GenreDefinition(name: "Family", tmdbID: 10751, iconicFilm: "Paddington", imageURL: "https://image.tmdb.org/t/p/w780/wpchRGhRhvhtU083PfX2yixXtiw.jpg", mediaScope: .movie),
+            GenreDefinition(name: "Documentary", tmdbID: 99, iconicFilm: "Free Solo", imageURL: "https://image.tmdb.org/t/p/w780/oQHF0Y4gCw6VdPmapjsbZoxY2ht.jpg"),
+            GenreDefinition(name: "History", tmdbID: 36, iconicFilm: "Oppenheimer", imageURL: "https://image.tmdb.org/t/p/w780/8Gxv8gSFCU0XGDykEGv7zR1n2ua.jpg", mediaScope: .movie),
+            GenreDefinition(name: "War", tmdbID: 10752, iconicFilm: "1917", imageURL: "https://image.tmdb.org/t/p/w780/iZf0KyrE25z1sage4SYFLCCrMi9.jpg", mediaScope: .movie),
+            GenreDefinition(name: "Western", tmdbID: 37, iconicFilm: "Unforgiven", imageURL: "https://image.tmdb.org/t/p/w780/yKyLJmRAtyXEEYKOvPhKHXIcPq9.jpg"),
+            GenreDefinition(name: "Kids", tmdbID: 10762, iconicFilm: "Bluey", imageURL: "https://image.tmdb.org/t/p/w780/9p4F6TA5KqMVcRbzKeO8Q7r6YpH.jpg", mediaScope: .tv),
+            GenreDefinition(name: "Reality", tmdbID: 10764, iconicFilm: "The Traitors", imageURL: "https://image.tmdb.org/t/p/w780/7lD7Q3dP6tQheQw3JIgYfR3MN6Y.jpg", mediaScope: .tv),
+            GenreDefinition(name: "Talk", tmdbID: 10767, iconicFilm: "Hot Ones", imageURL: "https://image.tmdb.org/t/p/w780/2n95p9isIi1LYTscTcGytlI4zYd.jpg", mediaScope: .tv),
             GenreDefinition(name: "80s", tmdbID: 1980, iconicFilm: "Back to the Future", imageURL: "https://image.tmdb.org/t/p/w780/fNOH9f1aA7XRTzl1sAOx9iF553Q.jpg"),
             GenreDefinition(name: "90s", tmdbID: 1990, iconicFilm: "Jurassic Park", imageURL: "https://image.tmdb.org/t/p/w780/9i3plLl89DHMz7mahksDaAo7HIS.jpg"),
             GenreDefinition(name: "00s", tmdbID: 2000, iconicFilm: "The Dark Knight", imageURL: "https://image.tmdb.org/t/p/w780/qJ2tW6WMUDux911r6m7haRef0WH.jpg"),
@@ -10613,22 +11004,33 @@ private struct PickForMeOptionButton: View {
     }
     
     private extension MediaItem {
-        var primaryCategoryGenreID: Int? {
-            guard let firstGenreID = genreIDs.first else { return nil }
-            return Self.categoryGenrePriorityMap[firstGenreID]
+        var categoryGenreIDs: Set<Int> {
+            Set(genreIDs.compactMap { Self.categoryGenrePriorityMap[$0] })
         }
         
         private static let categoryGenrePriorityMap: [Int: Int] = [
             28: 28,
-            12: 28,
+            12: 12,
             878: 878,
-            10765: 878,
+            10765: 14,
             14: 14,
             18: 18,
             27: 27,
             16: 16,
             80: 80,
             35: 35,
+            9648: 9648,
+            53: 53,
+            10749: 10749,
+            10751: 10751,
+            99: 99,
+            36: 36,
+            10752: 10752,
+            10768: 10752,
+            37: 37,
+            10762: 10762,
+            10764: 10764,
+            10767: 10767,
             10759: 28
         ]
     }
@@ -10681,7 +11083,7 @@ private struct PickForMeOptionButton: View {
             case 10764:
                 return ["Reality"]
             case 10765:
-                return ["Sci-Fi", "Fantasy"]
+                return ["Fantasy"]
             case 10766:
                 return ["Soap"]
             case 10767:
