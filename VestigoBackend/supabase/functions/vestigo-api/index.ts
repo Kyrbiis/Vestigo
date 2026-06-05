@@ -26,31 +26,71 @@ function previewSecret(name: string) {
   }
 }
 
+async function fetchWithTimeout(url: URL | string, init: RequestInit = {}, timeoutMilliseconds = 8000) {
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), timeoutMilliseconds)
+
+  try {
+    return await fetch(url, {
+      ...init,
+      signal: controller.signal
+    })
+  } finally {
+    clearTimeout(timeout)
+  }
+}
+
+function tmdbVoteAverage(result: any) {
+  return typeof result?.vote_average === "number" ? result.vote_average : 0
+}
+
+function itemTitle(result: any, kind: "movie" | "tv") {
+  return kind === "movie"
+    ? result.title ?? result.original_title ?? "Untitled"
+    : result.name ?? result.original_name ?? "Untitled"
+}
+
+function itemReleaseDate(result: any, kind: "movie" | "tv") {
+  return kind === "movie"
+    ? result.release_date ?? null
+    : result.first_air_date ?? null
+}
+
+function releaseYear(value: unknown) {
+  if (typeof value !== "string" || value.length < 4) return null
+  const year = Number(value.slice(0, 4))
+  return Number.isFinite(year) && year > 0 ? String(year) : null
+}
+
 function tmdbMovieDTO(result: any) {
+  const title = itemTitle(result, "movie")
+
   return {
     id: result.id,
     kind: "movie",
-    title: result.title ?? result.original_title ?? "Untitled",
+    title,
     overview: result.overview ?? "",
     posterPath: result.poster_path ?? null,
     backdropPath: result.backdrop_path ?? null,
-    releaseDate: result.release_date ?? null,
-    voteAverage: typeof result.vote_average === "number" ? result.vote_average : 0,
+    releaseDate: itemReleaseDate(result, "movie"),
+    voteAverage: tmdbVoteAverage(result),
     genreIDs: Array.isArray(result.genre_ids) ? result.genre_ids : [],
     originalLanguage: result.original_language ?? null
   }
 }
 
 function tmdbTVDTO(result: any) {
+  const title = itemTitle(result, "tv")
+
   return {
     id: result.id,
     kind: "tv",
-    title: result.name ?? result.original_name ?? "Untitled",
+    title,
     overview: result.overview ?? "",
     posterPath: result.poster_path ?? null,
     backdropPath: result.backdrop_path ?? null,
-    releaseDate: result.first_air_date ?? null,
-    voteAverage: typeof result.vote_average === "number" ? result.vote_average : 0,
+    releaseDate: itemReleaseDate(result, "tv"),
+    voteAverage: tmdbVoteAverage(result),
     genreIDs: Array.isArray(result.genre_ids) ? result.genre_ids : [],
     originalLanguage: result.original_language ?? null
   }
@@ -71,7 +111,7 @@ async function fetchTMDb(path: string, params: Record<string, string> = {}) {
     url.searchParams.set(key, value)
   }
 
-  const response = await fetch(url)
+  const response = await fetchWithTimeout(url)
 
   if (!response.ok) {
     const text = await response.text()
@@ -81,29 +121,64 @@ async function fetchTMDb(path: string, params: Record<string, string> = {}) {
   return await response.json()
 }
 
-const fallbackOMDbAPIKey = "346c15b4"
+const emergencyOMDbAPIKey = "4c35bdef"
 
 async function fetchOMDb(params: Record<string, string>) {
-  const omdbKey = Deno.env.get("OMDB_API_KEY") ?? fallbackOMDbAPIKey
-  const url = new URL("https://www.omdbapi.com/")
-  url.searchParams.set("apikey", omdbKey)
+  const configuredOMDbKey = Deno.env.get("OMDB_API_KEY")
+  const keys = configuredOMDbKey
+    ? [
+        { key: configuredOMDbKey, label: "OMDB_API_KEY", isEmergency: false },
+        { key: emergencyOMDbAPIKey, label: "emergency backup key", isEmergency: true }
+      ]
+    : [
+        { key: emergencyOMDbAPIKey, label: "emergency backup key", isEmergency: true }
+      ]
 
-  for (const [key, value] of Object.entries(params)) {
-    if (value.trim().length > 0) {
-      url.searchParams.set(key, value)
+  let rateLimitError: string | null = null
+
+  for (const attempt of keys) {
+    const url = new URL("https://www.omdbapi.com/")
+    url.searchParams.set("apikey", attempt.key)
+
+    for (const [key, value] of Object.entries(params)) {
+      if (value.trim().length > 0) {
+        url.searchParams.set(key, value)
+      }
     }
+
+    const response = await fetchWithTimeout(url)
+
+    if (!response.ok) {
+      const text = await response.text()
+      const loweredText = text.toLowerCase()
+
+      if (loweredText.includes("request limit reached") && !attempt.isEmergency) {
+        rateLimitError = `OMDb request limit reached for ${attempt.label}`
+        continue
+      }
+
+      throw new Error(`OMDb request failed for ${attempt.label}: ${response.status} ${text}`)
+    }
+
+    const data = await response.json()
+    const errorText = String(data?.Error ?? "")
+
+    if (data?.Response === "False" && errorText.toLowerCase().includes("request limit reached")) {
+      rateLimitError = `OMDb request limit reached for ${attempt.label}`
+
+      if (!attempt.isEmergency) {
+        continue
+      }
+
+      throw new Error(rateLimitError)
+    }
+
+    if (data?.Response === "False") return null
+
+    return data
   }
 
-  const response = await fetch(url)
-
-  if (!response.ok) {
-    const text = await response.text()
-    throw new Error(`OMDb request failed: ${response.status} ${text}`)
-  }
-
-  const data = await response.json()
-  if (data?.Response === "False") return null
-  return data
+  throw new Error(rateLimitError ?? "Missing OMDB_API_KEY")
 }
 
 function parseOMDbNumber(value: unknown) {
@@ -134,7 +209,7 @@ function normalizeOMDbRatings(data: any) {
   }
 }
 
-async function omdbRatingsForTMDbID(tmdbID: number, kind: "movie" | "tv", title: string | null) {
+async function omdbRatingsForTMDbID(tmdbID: number, kind: "movie" | "tv", title: string | null, year: string | null = null) {
   let imdbID: string | null = null
 
   try {
@@ -147,16 +222,30 @@ async function omdbRatingsForTMDbID(tmdbID: number, kind: "movie" | "tv", title:
 
   if (imdbID) {
     const data = await fetchOMDb({ i: imdbID, plot: "short" })
-    return normalizeOMDbRatings(data)
+    const ratings = normalizeOMDbRatings(data)
+    if (ratings?.imdbRating || ratings?.rottenTomatoesRating || ratings?.rottenTomatoesText) {
+      return ratings
+    }
   }
 
   if (title && title.trim().length > 0) {
-    const data = await fetchOMDb({
+    const baseParams = {
       t: title,
       type: kind === "movie" ? "movie" : "series",
       plot: "short"
-    })
-    return normalizeOMDbRatings(data)
+    }
+
+    const attempts = year
+      ? [{ ...baseParams, y: year }, baseParams]
+      : [baseParams]
+
+    for (const params of attempts) {
+      const data = await fetchOMDb(params)
+      const ratings = normalizeOMDbRatings(data)
+      if (ratings?.imdbRating || ratings?.rottenTomatoesRating || ratings?.rottenTomatoesText) {
+        return ratings
+      }
+    }
   }
 
   return null
@@ -549,7 +638,7 @@ async function tmdbCollectionByID(collectionID: number) {
   const parts = Array.isArray(collection.parts) ? collection.parts : []
   const items = parts
     .filter((item: any) => typeof item.id === "number")
-    .map(tmdbMovieDTO)
+    .map((item: any) => tmdbMovieDTO(item))
 
   return {
     id: collection.id,
@@ -1002,6 +1091,7 @@ Deno.serve(async (req) => {
       const tmdbID = Number(url.searchParams.get("tmdbID") ?? url.searchParams.get("id"))
       const rawKind = String(url.searchParams.get("kind") ?? "movie").toLowerCase()
       const title = url.searchParams.get("title")
+      const year = releaseYear(url.searchParams.get("year"))
 
       if (!Number.isFinite(tmdbID) || tmdbID <= 0) {
         return Response.json(
@@ -1017,7 +1107,7 @@ Deno.serve(async (req) => {
         )
       }
 
-      const ratings = await omdbRatingsForTMDbID(tmdbID, rawKind, title)
+      const ratings = await omdbRatingsForTMDbID(tmdbID, rawKind, title, year)
 
       return Response.json({
         ok: true,
