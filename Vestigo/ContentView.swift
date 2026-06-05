@@ -576,6 +576,7 @@ private final class VestigoModel: ObservableObject {
     @Published var imageRefreshToken = 0
     
     private let tmdb = TMDbService()
+    private let tasteDive = TasteDiveService()
     private let streaming = StreamingAvailabilityService()
     private let backend = VestigoBackendClient()
     private let externalRatingBatchLimit = 24
@@ -587,6 +588,8 @@ private final class VestigoModel: ObservableObject {
     private var searchRequestID = UUID()
     private var mediaSearchCache: [String: [MediaItem]] = [:]
     private var peopleSearchCache: [String: [PersonSummary]] = [:]
+    private var tasteDiveSimilarCache: [MediaKey: [MediaItem]] = [:]
+    private var tmdbExpandedSimilarCache: [MediaKey: [MediaItem]] = [:]
 
     func refreshImages() {
         imageRefreshToken &+= 1
@@ -1861,22 +1864,8 @@ private final class VestigoModel: ObservableObject {
             )
 
             let preparedItems = preparedResults(items, hideWatched: settings.hideWatchedFromSearch)
-            let firstBatch = Array(preparedItems.prefix(14))
-            if !firstBatch.isEmpty {
-                await MainActor.run {
-                    genreResults[cacheKey] = firstBatch
-                }
-            }
-
             let visibleItems = await filteredShortFilmsIfNeeded(preparedItems, enabled: settings.hideShortFilmsFromSearch)
-            let initialVisibleItems = Array(visibleItems.prefix(24))
-            if !initialVisibleItems.isEmpty {
-                await MainActor.run {
-                    genreResults[cacheKey] = initialVisibleItems
-                }
-            }
-
-            await loadExternalRatings(for: initialVisibleItems, limit: 24)
+            await loadExternalRatings(for: Array(visibleItems.prefix(24)), limit: 24)
             let sortedItems = sort == .tmdbRating
                 ? visibleItems.sorted { lhs, rhs in
                     let lhsRating = ratingSortValue(for: lhs)
@@ -1894,7 +1883,9 @@ private final class VestigoModel: ObservableObject {
             }
         } catch {
             await MainActor.run {
-                genreResults[cacheKey] = []
+                if genreResults[cacheKey] == nil {
+                    genreResults[cacheKey] = []
+                }
             }
         }
     }
@@ -1913,6 +1904,22 @@ private final class VestigoModel: ObservableObject {
                 detailsCache[item.key] = detail.addingSimilarCandidates(collectionItems, source: item)
             } catch { }
         }
+        if let detail = detailsCache[item.key] {
+            do {
+                let expandedTMDbItems = try await expandedTMDbSimilarCandidates(for: item, detail: detail)
+                detailsCache[item.key] = detail.addingSimilarCandidates(expandedTMDbItems, source: item)
+            } catch { }
+        }
+        if let detail = detailsCache[item.key] {
+            do {
+                let tasteDiveItems = try await tasteDiveCandidates(for: item)
+                detailsCache[item.key] = detail.addingSimilarCandidates(
+                    tasteDiveItems,
+                    source: item,
+                    sourceBoosts: Dictionary(uniqueKeysWithValues: tasteDiveItems.map { ($0.key, 10.0) })
+                )
+            } catch { }
+        }
         await loadExternalRatings(item, priority: true)
         if providerCache[item.key] == nil {
             do {
@@ -1921,6 +1928,88 @@ private final class VestigoModel: ObservableObject {
                 providerCache[item.key] = []
             }
         }
+    }
+
+    private func expandedTMDbSimilarCandidates(for item: MediaItem, detail: MediaDetail) async throws -> [MediaItem] {
+        if let cached = tmdbExpandedSimilarCache[item.key] {
+            return cached
+        }
+
+        let personIDs = Array(detail.castAndKeyCrew.map(\.id).prefix(8))
+        async let keywordItems = tmdb.keywordDiscoveryCandidates(for: item, keywordIDs: detail.keywordIDs)
+        async let personItems = tmdb.sharedPersonCandidates(for: item, personIDs: personIDs)
+        let candidates = try await (keywordItems + personItems)
+            .uniqued()
+            .filter { $0.shouldShowInDiscovery && !$0.isUpcoming && $0.key != item.key }
+        tmdbExpandedSimilarCache[item.key] = candidates
+        return candidates
+    }
+
+    private func tasteDiveCandidates(for item: MediaItem) async throws -> [MediaItem] {
+        if let cached = tasteDiveSimilarCache[item.key] {
+            return cached
+        }
+
+        let names = try await tasteDive.similarTitles(for: item.title, kind: item.kind)
+        var resolved: [MediaItem] = []
+        let filter: MediaFilter = item.kind == .tv ? .tv : .movie
+        let tmdb = self.tmdb
+
+        try await withThrowingTaskGroup(of: MediaItem?.self) { group in
+            for name in names.prefix(12) {
+                group.addTask {
+                    let results = try await tmdb.search(query: name, filter: filter)
+                    return Self.bestTasteDiveMatch(named: name, from: results, matching: item.kind)
+                }
+            }
+
+            for try await item in group {
+                if let item, item.shouldShowInDiscovery {
+                    resolved.append(item)
+                }
+            }
+        }
+
+        let candidates = resolved.uniqued().filter { $0.key != item.key }
+        tasteDiveSimilarCache[item.key] = candidates
+        return candidates
+    }
+
+    private nonisolated static func bestTasteDiveMatch(named title: String, from results: [MediaItem], matching kind: MediaKind) -> MediaItem? {
+        let normalizedTitle = normalizedTasteDiveMatchTitle(title)
+        return results
+            .filter { item in
+                item.kind == kind
+                && item.voteAverage > 0
+                && item.releaseDate.flatMap { Int($0.prefix(4)) } != nil
+                && !item.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            }
+            .sorted { lhs, rhs in
+                let lhsScore = tasteDiveMatchScore(lhs.title, normalizedTitle: normalizedTitle)
+                let rhsScore = tasteDiveMatchScore(rhs.title, normalizedTitle: normalizedTitle)
+                if lhsScore != rhsScore {
+                    return lhsScore > rhsScore
+                }
+                return lhs.voteAverage > rhs.voteAverage
+            }
+            .first
+    }
+
+    private nonisolated static func normalizedTasteDiveMatchTitle(_ title: String) -> String {
+        title
+            .lowercased()
+            .replacingOccurrences(of: "&", with: "and")
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+    }
+
+    private nonisolated static func tasteDiveMatchScore(_ title: String, normalizedTitle: String) -> Int {
+        let normalized = normalizedTasteDiveMatchTitle(title)
+        if normalized == normalizedTitle { return 100 }
+        if normalized.contains(normalizedTitle) { return 75 }
+        if normalizedTitle.contains(normalized) { return 60 }
+        return 0
     }
 
     func loadExternalRatings(_ item: MediaItem, priority: Bool = false) async {
@@ -8529,8 +8618,7 @@ private struct PickForMeOptionButton: View {
     // MARK: - API Services
     
     private struct TMDbService {
-        private let apiKey = "98eefd757e87d7462c815c87d8aa2ce4"
-        private let base = "https://api.themoviedb.org/3"
+        private let base = "https://mtttuyvpjyugudkevchj.supabase.co/functions/v1/vestigo-api"
         
         func trending(filter: MediaFilter) async throws -> [MediaItem] {
             try await fetchList(path: "/trending/\(filter.tmdbPath)/week", query: [])
@@ -8918,6 +9006,38 @@ private struct PickForMeOptionButton: View {
 
             return try await fetchListPages(path: "/discover/\(media)", query: query, pages: 3)
         }
+
+        func keywordDiscoveryCandidates(for item: MediaItem, keywordIDs: [Int]) async throws -> [MediaItem] {
+            let keywordIDs = Array(keywordIDs.prefix(8))
+            guard !keywordIDs.isEmpty else { return [] }
+            let media = item.kind == .tv ? "tv" : "movie"
+            return try await fetchListPages(path: "/discover/\(media)", query: [
+                URLQueryItem(name: "sort_by", value: "popularity.desc"),
+                URLQueryItem(name: "with_keywords", value: keywordIDs.map(String.init).joined(separator: "|")),
+                URLQueryItem(name: "include_adult", value: "false"),
+                URLQueryItem(name: "include_video", value: "false"),
+                URLQueryItem(name: "vote_count.gte", value: item.kind == .tv ? "50" : "80"),
+                URLQueryItem(name: "vote_average.gte", value: "5.8"),
+                URLQueryItem(name: "region", value: "US"),
+                URLQueryItem(name: "watch_region", value: "US")
+            ], pages: 2)
+        }
+
+        func sharedPersonCandidates(for item: MediaItem, personIDs: [Int]) async throws -> [MediaItem] {
+            let personIDs = Array(personIDs.prefix(8))
+            guard !personIDs.isEmpty else { return [] }
+            let media = item.kind == .tv ? "tv" : "movie"
+            return try await fetchListPages(path: "/discover/\(media)", query: [
+                URLQueryItem(name: "sort_by", value: "popularity.desc"),
+                URLQueryItem(name: "with_people", value: personIDs.map(String.init).joined(separator: "|")),
+                URLQueryItem(name: "include_adult", value: "false"),
+                URLQueryItem(name: "include_video", value: "false"),
+                URLQueryItem(name: "vote_count.gte", value: item.kind == .tv ? "50" : "80"),
+                URLQueryItem(name: "vote_average.gte", value: "5.8"),
+                URLQueryItem(name: "region", value: "US"),
+                URLQueryItem(name: "watch_region", value: "US")
+            ], pages: 2)
+        }
         
         private func discoverFilteredSearchSingleMedia(media: String, runtimeFilter: RuntimeSearchFilter, minimumRating: Double, includeAdult: Bool) async throws -> [MediaItem] {
             var query: [URLQueryItem] = [
@@ -9052,8 +9172,8 @@ private struct PickForMeOptionButton: View {
             let response: TMDbDetailResponse = try await fetch(path: "/\(item.kind.tmdbPath)/\(item.id)", query: [URLQueryItem(
                 name: "append_to_response",
                 value: item.kind == .movie
-                ? "credits,similar,watch/providers,release_dates"
-                : "credits,similar,watch/providers,content_ratings"
+                ? "credits,similar,recommendations,keywords,watch/providers,release_dates"
+                : "credits,similar,recommendations,keywords,watch/providers,content_ratings"
             )])
             
             guard item.kind == .tv else {
@@ -9137,10 +9257,9 @@ private struct PickForMeOptionButton: View {
         }
         
         private func fetch<T: Decodable>(path: String, query: [URLQueryItem], page: Int) async throws -> T {
-            var comps = URLComponents(string: base + path)!
+            var comps = URLComponents(string: base + "/tmdb-proxy")!
             comps.queryItems = [
-                URLQueryItem(name: "api_key", value: apiKey),
-                URLQueryItem(name: "language", value: "en-US"),
+                URLQueryItem(name: "path", value: path),
                 URLQueryItem(name: "page", value: String(page))
             ] + query
             guard let url = comps.url else { throw URLError(.badURL) }
@@ -9148,6 +9267,36 @@ private struct PickForMeOptionButton: View {
             if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) { throw URLError(.badServerResponse) }
             return try JSONDecoder().decode(T.self, from: data)
         }
+    }
+
+    private struct TasteDiveService {
+        private let base = "https://mtttuyvpjyugudkevchj.supabase.co/functions/v1/vestigo-api"
+
+        func similarTitles(for title: String, kind: MediaKind) async throws -> [String] {
+            guard kind == .movie || kind == .tv else { return [] }
+
+            var components = URLComponents(string: base + "/tastedive-similar")!
+            components.queryItems = [
+                URLQueryItem(name: "q", value: title),
+                URLQueryItem(name: "type", value: kind == .tv ? "show" : "movie"),
+                URLQueryItem(name: "limit", value: "20")
+            ]
+
+            guard let url = components.url else { throw URLError(.badURL) }
+            let (data, response) = try await URLSession.shared.data(from: url)
+            if let httpResponse = response as? HTTPURLResponse, !(200...299).contains(httpResponse.statusCode) {
+                throw URLError(.badServerResponse)
+            }
+
+            let decoded = try JSONDecoder().decode(TasteDiveSimilarResponse.self, from: data)
+            return decoded.results
+                .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        }
+    }
+
+    private struct TasteDiveSimilarResponse: Decodable {
+        let ok: Bool
+        let results: [String]
     }
 
     private struct StreamingAvailabilityService {
@@ -9290,6 +9439,7 @@ private struct PickForMeOptionButton: View {
         let releaseDates: TMDbReleaseDatesResponse?
         let contentRatings: TMDbContentRatingsResponse?
         let belongsToCollection: TMDbCollectionReference?
+        let keywords: TMDbKeywordsResponse?
         
         enum CodingKeys: String, CodingKey {
             case runtime
@@ -9306,6 +9456,7 @@ private struct PickForMeOptionButton: View {
             case releaseDates = "release_dates"
             case contentRatings = "content_ratings"
             case belongsToCollection = "belongs_to_collection"
+            case keywords
         }
         
         init(
@@ -9322,7 +9473,8 @@ private struct PickForMeOptionButton: View {
             recommendations: TMDbListResponse?,
             releaseDates: TMDbReleaseDatesResponse?,
             contentRatings: TMDbContentRatingsResponse?,
-            belongsToCollection: TMDbCollectionReference?
+            belongsToCollection: TMDbCollectionReference?,
+            keywords: TMDbKeywordsResponse?
         ) {
             self.runtime = runtime
             self.numberOfSeasons = numberOfSeasons
@@ -9338,6 +9490,7 @@ private struct PickForMeOptionButton: View {
             self.releaseDates = releaseDates
             self.contentRatings = contentRatings
             self.belongsToCollection = belongsToCollection
+            self.keywords = keywords
         }
         
         func replacingSeasons(_ hydratedSeasons: [SeasonDTO]) -> TMDbDetailResponse {
@@ -9355,7 +9508,8 @@ private struct PickForMeOptionButton: View {
                 recommendations: recommendations,
                 releaseDates: releaseDates,
                 contentRatings: contentRatings,
-                belongsToCollection: belongsToCollection
+                belongsToCollection: belongsToCollection,
+                keywords: keywords
             )
         }
         
@@ -9380,6 +9534,20 @@ private struct PickForMeOptionButton: View {
         }
     }
     
+    private struct TMDbKeywordsResponse: Decodable {
+        let keywords: [TMDbKeyword]?
+        let results: [TMDbKeyword]?
+
+        var keywordIDs: [Int] {
+            (keywords ?? results ?? []).map(\.id)
+        }
+    }
+
+    private struct TMDbKeyword: Decodable, Hashable {
+        let id: Int
+        let name: String
+    }
+
     private struct TMDbReleaseDatesResponse: Decodable {
         let results: [TMDbReleaseDatesCountry]
     }
@@ -10235,6 +10403,7 @@ private struct PickForMeOptionButton: View {
         let runtime: Int?
         let ageRating: String?
         let tmdbCollectionID: Int?
+        let keywordIDs: [Int]
         
         init(response: TMDbDetailResponse, fallback: MediaItem) {
             let crewList: [PersonDTO] = response.credits?.crew ?? []
@@ -10245,6 +10414,7 @@ private struct PickForMeOptionButton: View {
             status = response.status
             runtime = response.runtime
             ageRating = response.usAgeRating
+            keywordIDs = response.keywords?.keywordIDs ?? []
             
             let directorDTO = crewList.first { dto in
                 dto.job == "Director"
@@ -10321,11 +10491,12 @@ private struct PickForMeOptionButton: View {
                 source: fallback,
                 cast: mappedCast,
                 keyCrew: uniqueKeyCrew,
-                runtime: runtime
+                runtime: runtime,
+                sourceBoosts: [:]
             )
         }
 
-        func addingSimilarCandidates(_ candidates: [MediaItem], source: MediaItem) -> MediaDetail {
+        func addingSimilarCandidates(_ candidates: [MediaItem], source: MediaItem, sourceBoosts: [MediaKey: Double] = [:]) -> MediaDetail {
             MediaDetail(
                 director: director,
                 creator: creator,
@@ -10337,18 +10508,20 @@ private struct PickForMeOptionButton: View {
                     source: source,
                     cast: cast,
                     keyCrew: castAndKeyCrew,
-                    runtime: runtime
+                    runtime: runtime,
+                    sourceBoosts: sourceBoosts
                 ),
                 firstAirDate: firstAirDate,
                 lastAirDate: lastAirDate,
                 status: status,
                 runtime: runtime,
                 ageRating: ageRating,
-                tmdbCollectionID: tmdbCollectionID
+                tmdbCollectionID: tmdbCollectionID,
+                keywordIDs: keywordIDs
             )
         }
 
-        private init(director: PersonSummary?, creator: PersonSummary?, cast: [PersonSummary], castAndKeyCrew: [PersonSummary], seasons: [SeasonInfo], similar: [MediaItem], firstAirDate: String?, lastAirDate: String?, status: String?, runtime: Int?, ageRating: String?, tmdbCollectionID: Int?) {
+        private init(director: PersonSummary?, creator: PersonSummary?, cast: [PersonSummary], castAndKeyCrew: [PersonSummary], seasons: [SeasonInfo], similar: [MediaItem], firstAirDate: String?, lastAirDate: String?, status: String?, runtime: Int?, ageRating: String?, tmdbCollectionID: Int?, keywordIDs: [Int]) {
             self.director = director
             self.creator = creator
             self.cast = cast
@@ -10361,9 +10534,10 @@ private struct PickForMeOptionButton: View {
             self.runtime = runtime
             self.ageRating = ageRating
             self.tmdbCollectionID = tmdbCollectionID
+            self.keywordIDs = keywordIDs
         }
 
-        private static func rankedSimilarItems(_ items: [MediaItem], source: MediaItem, cast: [PersonSummary], keyCrew: [PersonSummary], runtime: Int?) -> [MediaItem] {
+        private static func rankedSimilarItems(_ items: [MediaItem], source: MediaItem, cast: [PersonSummary], keyCrew: [PersonSummary], runtime: Int?, sourceBoosts: [MediaKey: Double]) -> [MediaItem] {
             let sourceGenres = Set(source.genreIDs)
             let sourceText = normalizedSimilarityText("\(source.title) \(source.overview)")
             let sourceTokens = Set(sourceText.split(separator: " ").map(String.init).filter { $0.count >= 4 })
@@ -10413,6 +10587,7 @@ private struct PickForMeOptionButton: View {
                         score += 4.0
                     }
 
+                    score += sourceBoosts[item.key] ?? 0
                     score += min(item.voteAverage, 10) * 0.25
 
                     return (item, score)

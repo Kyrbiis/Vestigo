@@ -21,8 +21,7 @@ function previewSecret(name: string) {
   const value = Deno.env.get(name)
 
   return {
-    exists: Boolean(value),
-    preview: value ? `${value.slice(0, 4)}...${value.slice(-4)}` : null
+    exists: Boolean(value)
   }
 }
 
@@ -121,18 +120,84 @@ async function fetchTMDb(path: string, params: Record<string, string> = {}) {
   return await response.json()
 }
 
-const emergencyOMDbAPIKey = "4c35bdef"
+function isAllowedTMDbProxyPath(path: string) {
+  if (!path.startsWith("/")) return false
+  if (path.includes("..")) return false
+
+  return [
+    /^\/trending\/(all|movie|tv)\/(day|week)$/,
+    /^\/movie\/(popular|now_playing|upcoming)$/,
+    /^\/tv\/(popular|on_the_air|airing_today)$/,
+    /^\/search\/(multi|movie|tv|person)$/,
+    /^\/discover\/(movie|tv)$/,
+    /^\/movie\/\d+\/(recommendations|similar|external_ids|release_dates|keywords)$/,
+    /^\/tv\/\d+\/(recommendations|similar|external_ids|content_ratings|keywords)$/,
+    /^\/movie\/\d+$/,
+    /^\/tv\/\d+$/,
+    /^\/tv\/\d+\/season\/\d+$/,
+    /^\/person\/\d+$/,
+    /^\/person\/\d+\/combined_credits$/
+  ].some((pattern) => pattern.test(path))
+}
+
+async function tmdbProxy(path: string, params: URLSearchParams) {
+  if (!isAllowedTMDbProxyPath(path)) {
+    throw new Error("TMDb proxy path is not allowed")
+  }
+
+  const forwardedParams: Record<string, string> = {}
+  const blockedParams = new Set(["api_key", "path"])
+
+  for (const [key, value] of params.entries()) {
+    if (!blockedParams.has(key)) {
+      forwardedParams[key] = value
+    }
+  }
+
+  return await fetchTMDb(path, forwardedParams)
+}
+
+async function tasteDiveSimilar(query: string, type: string, limit: string) {
+  const tasteDiveKey = Deno.env.get("TASTEDIVE_API_KEY")
+
+  if (!tasteDiveKey) {
+    throw new Error("Missing TASTEDIVE_API_KEY")
+  }
+
+  const normalizedType = type === "show" ? "show" : "movie"
+  const url = new URL("https://tastedive.com/api/similar")
+  url.searchParams.set("q", query)
+  url.searchParams.set("type", normalizedType)
+  url.searchParams.set("limit", limit)
+  url.searchParams.set("k", tasteDiveKey)
+
+  const response = await fetchWithTimeout(url)
+
+  if (!response.ok) {
+    const text = await response.text()
+    throw new Error(`TasteDive request failed: ${response.status} ${text}`)
+  }
+
+  const data = await response.json()
+  const results = Array.isArray(data?.Similar?.Results) ? data.Similar.Results : []
+
+  return results
+    .filter((result: any) => result?.Type === normalizedType)
+    .map((result: any) => String(result?.Name ?? "").trim())
+    .filter((name: string) => name.length > 0)
+}
 
 async function fetchOMDb(params: Record<string, string>) {
   const configuredOMDbKey = Deno.env.get("OMDB_API_KEY")
-  const keys = configuredOMDbKey
-    ? [
-        { key: configuredOMDbKey, label: "OMDB_API_KEY", isEmergency: false },
-        { key: emergencyOMDbAPIKey, label: "emergency backup key", isEmergency: true }
-      ]
-    : [
-        { key: emergencyOMDbAPIKey, label: "emergency backup key", isEmergency: true }
-      ]
+  const emergencyOMDbKey = Deno.env.get("OMDB_EMERGENCY_API_KEY")
+  const keys = [
+    configuredOMDbKey ? { key: configuredOMDbKey, label: "OMDB_API_KEY", isEmergency: false } : null,
+    emergencyOMDbKey ? { key: emergencyOMDbKey, label: "OMDB_EMERGENCY_API_KEY", isEmergency: true } : null
+  ].filter((attempt): attempt is { key: string; label: string; isEmergency: boolean } => attempt !== null)
+
+  if (keys.length === 0) {
+    throw new Error("Missing OMDB_API_KEY and OMDB_EMERGENCY_API_KEY")
+  }
 
   let rateLimitError: string | null = null
 
@@ -1014,8 +1079,53 @@ Deno.serve(async (req) => {
           TMDB_API_KEY: previewSecret("TMDB_API_KEY"),
           MOVIE_OF_THE_NIGHT_KEY: previewSecret("MOVIE_OF_THE_NIGHT_KEY"),
           WATCHMODE_API_KEY: previewSecret("WATCHMODE_API_KEY"),
-          OMDB_API_KEY: previewSecret("OMDB_API_KEY")
+          OMDB_API_KEY: previewSecret("OMDB_API_KEY"),
+          OMDB_EMERGENCY_API_KEY: previewSecret("OMDB_EMERGENCY_API_KEY"),
+          TASTEDIVE_API_KEY: previewSecret("TASTEDIVE_API_KEY")
         }
+      })
+    }
+
+    if (url.pathname.endsWith("/tmdb-proxy")) {
+      const path = url.searchParams.get("path")
+
+      if (!path) {
+        return Response.json(
+          { ok: false, error: "Missing TMDb path" },
+          { status: 400 }
+        )
+      }
+
+      const data = await tmdbProxy(path, url.searchParams)
+      return Response.json(data)
+    }
+
+    if (url.pathname.endsWith("/tastedive-similar")) {
+      const query = String(url.searchParams.get("q") ?? "").trim()
+      const type = String(url.searchParams.get("type") ?? "movie").toLowerCase()
+      const limit = String(url.searchParams.get("limit") ?? "20")
+
+      if (!query) {
+        return Response.json(
+          { ok: false, error: "Missing TasteDive query" },
+          { status: 400 }
+        )
+      }
+
+      if (type !== "movie" && type !== "show") {
+        return Response.json(
+          { ok: false, error: "type must be movie or show" },
+          { status: 400 }
+        )
+      }
+
+      const results = await tasteDiveSimilar(query, type, limit)
+      return Response.json({
+        ok: true,
+        source: "tastedive",
+        query,
+        type,
+        results
       })
     }
 
