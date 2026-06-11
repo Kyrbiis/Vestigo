@@ -10,28 +10,107 @@ import Foundation
 import Combine
 import UniformTypeIdentifiers
 
-private let pickForMeHistoricalTrueEventSignals = [
+private let pickForMeHistoricalTrueEventSignals: [String] = [
     "true story",
     "based on true",
     "based on actual",
     "real events",
     "real-life",
-    "biography",
-    "biopic",
-    "documentary",
+    "true events",
+    "actual events",
+    "based on the life",
+    "biopic"
+]
+
+private let pickForMeHistoricalContextSignals: [String] = [
     "political history",
     "historical event",
     "world war",
+    "world war i",
+    "world war ii",
+    "wwi",
+    "wwii",
     "civil war",
+    "cold war",
+    "holocaust",
+    "nazi",
+    "revolution",
     "president",
     "prime minister",
     "queen",
     "king",
-    "activist",
-    "journalist"
+    "roman empire",
+    "tudor",
+    "dynasty"
 ]
 
-private let pickForMeHistoricalGenreIDs: Set<Int> = [36, 99, 10752]
+private let pickForMeNonHistoricalDocumentarySignals: [String] = [
+    "nature",
+    "wildlife",
+    "planet",
+    "climate",
+    "environment",
+    "ocean",
+    "animal",
+    "animals",
+    "music",
+    "concert",
+    "sports",
+    "stand-up",
+    "comedy special",
+    "behind the scenes",
+    "making of"
+]
+
+private let pickForMeHumanTriumphSignals: [String] = [
+    "overcome",
+    "overcoming",
+    "triumph",
+    "perseverance",
+    "resilience",
+    "underdog",
+    "against the odds",
+    "inspiring",
+    "inspirational",
+    "determination",
+    "adversity",
+    "achievement",
+    "champion",
+    "courage",
+    "barrier",
+    "barriers",
+    "obstacle",
+    "obstacles",
+    "disability",
+    "disabled",
+    "redemption",
+    "breakthrough"
+]
+
+private let pickForMeWarDealBreakerSignals: [String] = [
+    "war",
+    "wartime",
+    "battlefield",
+    "soldier",
+    "troops",
+    "military",
+    "armed forces",
+    "front line",
+    "invasion",
+    "invades",
+    "invading",
+    "occupation",
+    "occupied",
+    "resistance fighter",
+    "armed resistance",
+    "guerrilla",
+    "enemy forces",
+    "foreign army",
+    "paratrooper"
+]
+
+private let pickForMeHistoricalGenreIDs: Set<Int> = [36]
+private let pickForMeWarGenreIDs: Set<Int> = [10752, 10768]
 
 @MainActor
 private final class RemoteImageMemoryCache {
@@ -530,7 +609,7 @@ private final class VestigoModel: ObservableObject {
     @Published var expandedSearchFilterSections: Set<SearchFilterSection> = []
     @Published var selectedRuntimeFilters: Set<SearchRuntimeFilter> = []
     @Published var selectedDateFilters: Set<SearchDateFilter> = []
-    @Published var minimumTMDbRatingFilter: SearchRatingFilter? = .one
+    @Published var minimumTMDbRatingFilter: SearchRatingFilter?
     @Published var searchText = ""
     @Published var searchFilter: SearchFilter = .all
     @Published var searchFieldIsFocused = false
@@ -567,6 +646,7 @@ private final class VestigoModel: ObservableObject {
     @Published var isLoading = false
     @Published var errorText: String?
     @Published var exportDocument = ExportDocument(text: "")
+    @Published var exportFormat: ExportFormat = .text
     @Published var showExporter = false
     @Published var pendingFavouriteReplacement: MediaItem?
     @Published var showFavouriteReplacementAlert = false
@@ -689,39 +769,64 @@ private final class VestigoModel: ObservableObject {
         return runtime > 0 && runtime <= 40
     }
 
+    func shouldHideForLowestAgeRating(_ item: MediaItem, enabled: Bool) -> Bool {
+        guard enabled else { return false }
+        guard let ageRating = detailsCache[item.key]?.ageRating else { return false }
+        return Self.isLowestAgeRating(ageRating)
+    }
+
+    private static func isLowestAgeRating(_ rawRating: String) -> Bool {
+        let normalized = rawRating
+            .uppercased()
+            .replacingOccurrences(of: "_", with: "-")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        return ["G", "U", "TV-Y", "TV-G", "TV-Y7", "TV-Y7-FV"].contains(normalized)
+    }
+
     func filteredShortFilmsIfNeeded(_ items: [MediaItem], enabled: Bool) async -> [MediaItem] {
-        guard enabled else { return items }
+        guard enabled || settings.hideLowestAgeRatings else { return items }
 
         var filtered: [MediaItem] = []
 
         for item in items {
-            guard item.kind == .movie else {
-                filtered.append(item)
+            if detailsCache[item.key] == nil {
+                await loadBasicDetailIfNeeded(item)
+            }
+
+            if shouldHideAsShortFilm(item, enabled: enabled) {
                 continue
             }
 
-            if detailsCache[item.key] == nil {
-                await loadDetail(item)
+            if shouldHideForLowestAgeRating(item, enabled: settings.hideLowestAgeRatings) {
+                continue
             }
 
-            if !shouldHideAsShortFilm(item, enabled: enabled) {
-                filtered.append(item)
-            }
+            filtered.append(item)
         }
 
         return filtered
     }
-    
-    func preparedResults(_ items: [MediaItem], hideWatched: Bool = false) -> [MediaItem] {
-        filteredForWatchedPreference(
-            filteredForAnimePreference(
-                prioritisedForLanguage(items.filter(\.shouldShowInDiscovery))
-            ),
-            hideWatched: hideWatched
-        )
+
+    func filteredLowestAgeRatingsIfNeeded(_ items: [MediaItem]) -> [MediaItem] {
+        guard settings.hideLowestAgeRatings else { return items }
+
+        return items.filter { item in
+            !shouldHideForLowestAgeRating(item, enabled: true)
+        }
     }
     
-    
+    func preparedResults(_ items: [MediaItem], hideWatched: Bool = false) -> [MediaItem] {
+        filteredLowestAgeRatingsIfNeeded(
+            filteredForWatchedPreference(
+                filteredForAnimePreference(
+                    prioritisedForLanguage(items.filter(\.shouldShowInDiscovery))
+                ),
+                hideWatched: hideWatched
+            )
+        )
+    }
+
     func clearSearchFilters() {
         selectedRuntimeFilters.removeAll()
         selectedDateFilters.removeAll()
@@ -860,6 +965,7 @@ private final class VestigoModel: ObservableObject {
                 
                 for (index, candidate) in rec.enumerated() {
                     guard !library.isWatched(candidate.key) else { continue }
+                    guard !library.isNeverShowAgain(candidate.key) else { continue }
                     
                     let positionScore = 1.0 / (1.0 + Double(index) * 0.08)
                     let similarityBoost = genreSimilarity(candidate, record) * (0.35 + normalizedStrength * 0.45)
@@ -895,7 +1001,7 @@ private final class VestigoModel: ObservableObject {
             .map(\.item)
         
         let visibleRecommendations = preparedResults(
-            sortedRecommendations.filter { !library.isWatched($0.key) },
+            sortedRecommendations.filter { !library.isWatched($0.key) && !library.isNeverShowAgain($0.key) },
             hideWatched: true
         )
         recommendations = await filteredShortFilmsIfNeeded(
@@ -903,7 +1009,7 @@ private final class VestigoModel: ObservableObject {
             enabled: settings.hideShortFilmsFromRecommended
         )
         seriesNext = await filteredShortFilmsIfNeeded(
-            preparedResults(nextItems.uniqued().filter { !library.isWatched($0.key) }, hideWatched: true),
+            preparedResults(nextItems.uniqued().filter { !library.isWatched($0.key) && !library.isNeverShowAgain($0.key) }, hideWatched: true),
             enabled: settings.hideShortFilmsFromRecommended
         )
 
@@ -956,6 +1062,7 @@ private final class VestigoModel: ObservableObject {
         if let topGenreID = watchedGenreIDs.frequencySorted().first {
             let preparedTopGenre = visibleRecommendations
                 .filter { $0.shouldShowInDiscovery && !$0.isUpcoming && $0.genreIDs.contains(topGenreID) }
+                .filter { !library.isNeverShowAgain($0.key) }
                 .filter { settings.prioritiseEnglish ? (($0.originalLanguage ?? "en") == "en") : true }
 
             fromTopGenre = await filteredShortFilmsIfNeeded(
@@ -972,6 +1079,7 @@ private final class VestigoModel: ObservableObject {
                 .filter { item in
                     !item.isUpcoming &&
                     !library.isWatched(item.key) &&
+                    !library.isNeverShowAgain(item.key) &&
                     watchedGenreSet.isDisjoint(with: Set(item.genreIDs)) &&
                     (settings.prioritiseEnglish ? ((item.originalLanguage ?? "en") == "en") : true)
                 }
@@ -1000,33 +1108,69 @@ private final class VestigoModel: ObservableObject {
 
     func pickForMeRecommendations(for answers: PickForMeAnswers) async -> [MediaItem] {
         let effectiveFilter = answers.effectiveMediaFilter
+        let wantsMainstreamResults = answers.recommendationType == .crowdPleaser
+        let wantsNewReleaseResults = answers.releaseAge == .newReleases
+        let discoveryGenreIDs = pickForMeDiscoveryGenreIDs(for: answers)
+        var sourceMaterialCandidateKeys: Set<MediaKey> = []
         var candidates = (
             recommendations +
             moreLikeLastWatched +
             moreLikeFavourite +
             fromTopGenre +
-            trySomethingNewRecommendations +
             seriesNext +
-            library.watchlistItems +
-            popular +
-            trending +
-            newReleases
+            library.watchlistItems
         )
         .uniqued()
+
+        if wantsMainstreamResults {
+            candidates.append(contentsOf: popular + trending)
+        }
+
+        if wantsNewReleaseResults {
+            candidates.append(contentsOf: newReleases)
+        }
+
+        if wantsMainstreamResults || wantsNewReleaseResults {
+            candidates.append(contentsOf: trySomethingNewRecommendations)
+        }
 
         do {
             let discovered = try await tmdb.discoverPickForMe(
                 filter: effectiveFilter,
-                genreIDs: [],
+                genreIDs: discoveryGenreIDs,
                 runtime: answers.runtime,
                 minimumRating: 0,
-                includeAdult: !settings.hideAdultResults
+                includeAdult: !settings.hideAdultResults,
+                sortBy: wantsMainstreamResults ? "popularity.desc" : "vote_average.desc"
             )
             candidates.append(contentsOf: discovered)
         } catch { }
 
+        for supplementalGenreIDs in pickForMeSupplementalDiscoveryGenreIDs(for: answers) {
+            do {
+                let discovered = try await tmdb.discoverPickForMe(
+                    filter: effectiveFilter,
+                    genreIDs: supplementalGenreIDs,
+                    runtime: answers.runtime,
+                    minimumRating: 0,
+                    includeAdult: !settings.hideAdultResults,
+                    sortBy: wantsMainstreamResults ? "popularity.desc" : "vote_average.desc"
+                )
+                candidates.append(contentsOf: discovered)
+            } catch { }
+        }
+
+        if let sourceMaterial = answers.sourceMaterial, sourceMaterial != .noPreference {
+            do {
+                let sourceMaterialCandidates = try await tmdb.discoverSourceMaterial(sourceMaterial, filter: effectiveFilter)
+                sourceMaterialCandidateKeys = Set(sourceMaterialCandidates.map(\.key))
+                candidates.append(contentsOf: sourceMaterialCandidates)
+            } catch { }
+        }
+
         let uniqueCandidates = candidates.uniqued()
         await loadExternalRatings(for: uniqueCandidates, limit: 160)
+        await loadPickForMeStrictFilterDetails(for: uniqueCandidates, answers: answers)
 
         let filtered = uniqueCandidates
             .uniqued()
@@ -1043,15 +1187,28 @@ private final class VestigoModel: ObservableObject {
                     return false
                 }
 
-                if !pickForMeHistoricalAllows(item, answers: answers) {
+                if !pickForMeDocumentaryAllows(item, answers: answers) {
                     return false
                 }
 
-                if !answers.contentRatings.isEmpty,
-                   let detailRating = detailsCache[item.key]?.ageRating,
-                   !detailRating.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                   !PickForMeContentRating.selectionAllows(answers.contentRatings, rating: detailRating) {
+                if !pickForMeSourceMaterialAllows(item, sourceMaterial: answers.sourceMaterial, sourceMaterialCandidateKeys: sourceMaterialCandidateKeys) {
                     return false
+                }
+
+                if !pickForMeRealismAllows(item, answers: answers) {
+                    return false
+                }
+
+                if !pickForMeHistoryAllows(item, answers: answers) {
+                    return false
+                }
+
+                if !answers.contentRatings.isEmpty && !answers.contentRatings.contains(.any) {
+                    if let detailRating = detailsCache[item.key]?.ageRating,
+                       !detailRating.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                       !PickForMeContentRating.selectionAllows(answers.contentRatings, rating: detailRating) {
+                        return false
+                    }
                 }
 
                 if answers.dealBreakers.contains(where: { pickForMeDealBreakerMatches(item: item, dealBreaker: $0) }) {
@@ -1087,6 +1244,96 @@ private final class VestigoModel: ObservableObject {
         return balancedPickForMeResults(sorted, filter: effectiveFilter, limit: 120)
     }
 
+    private func pickForMeDiscoveryGenreIDs(for answers: PickForMeAnswers) -> Set<Int> {
+        var genreIDs: Set<Int> = []
+
+        if answers.wantsStrictHistorical {
+            genreIDs.formUnion(pickForMeHistoricalGenreIDs)
+        }
+
+        if answers.wantsHumanTriumph {
+            genreIDs.insert(18)
+        }
+
+        for genrePreference in answers.genrePreferences {
+            switch genrePreference {
+            case .history:
+                break
+            case .war:
+                genreIDs.formUnion(pickForMeWarGenreIDs)
+            case .crime:
+                genreIDs.insert(80)
+            case .sciFi:
+                genreIDs.formUnion([878, 10765])
+            case .fantasy:
+                genreIDs.formUnion([14, 10765])
+            case .horror:
+                genreIDs.insert(27)
+            case .romance:
+                genreIDs.insert(10749)
+            case .animation:
+                genreIDs.insert(16)
+            case .family:
+                genreIDs.formUnion([10751, 10762])
+            case .space, .noPreference:
+                break
+            }
+        }
+
+        return genreIDs
+    }
+
+    private func pickForMeSupplementalDiscoveryGenreIDs(for answers: PickForMeAnswers) -> [Set<Int>] {
+        var genreIDs: [Set<Int>] = []
+
+        func append(_ ids: Set<Int>) {
+            guard !ids.isEmpty, !genreIDs.contains(ids) else { return }
+            genreIDs.append(ids)
+        }
+
+        let archetypes = answers.archetypes.union(answers.secondaryArchetypes)
+        for archetype in archetypes {
+            switch archetype {
+            case .thriller:
+                append([53])
+            case .mystery, .mindBending:
+                append([9648])
+                append([878])
+                append([53])
+            case .heist:
+                append([80])
+                append([53])
+                append([28])
+            case .mission:
+                append([28])
+                append([53])
+            case .smartProblems:
+                append([18])
+                append([53])
+            case .adventure:
+                append([12])
+            case .thoughtfulSciFi:
+                append([878])
+            case .war:
+                append(pickForMeWarGenreIDs)
+            case .humanTriumph:
+                append([18])
+            case .feelGood, .comedy, .characterRelationships, .documentary, .historical, .epicSpectacle, .horror, .surprise, .noPreference:
+                break
+            }
+        }
+
+        switch answers.realism {
+        case .someSpeculative:
+            append([878])
+            append([14])
+        case .mostlyRealistic, .realWorld, .completelyFictional, .anything, nil:
+            break
+        }
+
+        return Array(genreIDs.prefix(6))
+    }
+
     private func balancedPickForMeResults(_ items: [MediaItem], filter: MediaFilter, limit: Int) -> [MediaItem] {
         guard filter == .both else { return items.prefixArray(limit) }
 
@@ -1115,11 +1362,32 @@ private final class VestigoModel: ObservableObject {
         return runtime.contains(minutes)
     }
 
+    private func loadPickForMeStrictFilterDetails(for items: [MediaItem], answers: PickForMeAnswers) async {
+        let needsRuntime = answers.runtime != nil && answers.runtime != .any
+        let needsContentRating = !answers.contentRatings.isEmpty && !answers.contentRatings.contains(.any)
+        guard needsRuntime || needsContentRating else { return }
+
+        for item in items.prefix(120) where detailsCache[item.key] == nil {
+            do {
+                detailsCache[item.key] = try await tmdb.detail(for: item)
+            } catch { }
+        }
+    }
+
     private func pickForMeReleaseAgeAllows(_ item: MediaItem, releaseAge: PickForMeReleaseAge?) -> Bool {
         guard let releaseAge, releaseAge != .noPreference else { return true }
         guard let releaseDate = item.releaseDateValue else { return false }
+        let now = Date()
+        guard releaseDate <= now else { return false }
 
-        let yearsOld = Calendar.current.dateComponents([.year], from: releaseDate, to: Date()).year ?? 0
+        if releaseAge == .newReleases {
+            guard let cutoffDate = Calendar.current.date(byAdding: .month, value: -6, to: now) else {
+                return false
+            }
+            return releaseDate >= cutoffDate
+        }
+
+        let yearsOld = Calendar.current.dateComponents([.year], from: releaseDate, to: now).year ?? 0
 
         if let maximumYearsOld = releaseAge.maximumYearsOld {
             return yearsOld <= maximumYearsOld
@@ -1132,22 +1400,56 @@ private final class VestigoModel: ObservableObject {
         return true
     }
 
-    private func pickForMeHistoricalAllows(_ item: MediaItem, answers: PickForMeAnswers) -> Bool {
-        let wantsHistorical = answers.archetypes.contains(.historical) ||
-            answers.secondaryArchetypes.contains(.historical) ||
-            answers.genrePreferences.contains(.history)
+    private func pickForMeDocumentaryAllows(_ item: MediaItem, answers: PickForMeAnswers) -> Bool {
+        guard answers.wantsDocumentary else { return true }
+        return item.genreIDs.contains(99)
+    }
 
-        guard wantsHistorical else { return true }
+    private func pickForMeSourceMaterialAllows(_ item: MediaItem, sourceMaterial: PickForMeSourceMaterial?, sourceMaterialCandidateKeys: Set<MediaKey>) -> Bool {
+        guard let sourceMaterial, sourceMaterial != .noPreference else { return true }
+        if sourceMaterialCandidateKeys.contains(item.key) { return true }
 
+        let text = pickForMeSearchableText(for: item)
+
+        switch sourceMaterial {
+        case .trueStory:
+            return text.containsAny(["based on true", "based on actual", "true story", "true events", "real events", "real-life", "real life"])
+        case .book:
+            return text.containsAny(["based on the novel", "based on a novel", "based on the book", "based on a book", "adapted from the novel", "adapted from a novel", "book by", "novel by"])
+        case .game:
+            return text.containsAny(["based on the video game", "based on a video game", "video game", "videogame", "game series", "computer game"])
+        case .noPreference:
+            return true
+        }
+    }
+
+    private func pickForMeRealismAllows(_ item: MediaItem, answers: PickForMeAnswers) -> Bool {
         let genres = Set(item.genreIDs)
         let text = pickForMeSearchableText(for: item)
-        return pickForMeHistoricalEventScore(genres: genres, text: text) > 0
+
+        switch answers.realism {
+        case .realWorld:
+            return !pickForMeIsSpeculative(genres: genres, text: text)
+        case .mostlyRealistic, .someSpeculative, .completelyFictional, .anything, nil:
+            return true
+        }
+    }
+
+    private func pickForMeHistoryAllows(_ item: MediaItem, answers: PickForMeAnswers) -> Bool {
+        guard answers.wantsStrictHistorical else { return true }
+
+        let historicalScore = pickForMeHistoricalEventScore(genres: Set(item.genreIDs), text: pickForMeSearchableText(for: item))
+        return historicalScore > 0
     }
 
     private func pickForMeScore(_ item: MediaItem, answers: PickForMeAnswers) -> Double {
         var score = max(ratingSortValue(for: item), 0) * 0.75
         let genreIDs = Set(item.genreIDs)
         let text = pickForMeSearchableText(for: item)
+
+        if library.isNeverShowAgain(item.key) {
+            score -= 250.0
+        }
 
         let primaryArchetypeScores = answers.archetypes.map { archetype in
             pickForMeArchetypeScore(item: item, archetype: archetype)
@@ -1157,7 +1459,7 @@ private final class VestigoModel: ObservableObject {
             score += archetypeScore * (archetype == .surprise ? 0.65 : 1.0)
         }
 
-        for secondaryArchetype in answers.secondaryArchetypes where secondaryArchetype != .surprise {
+        for secondaryArchetype in answers.secondaryArchetypes where !secondaryArchetype.isAnyOption {
             score += pickForMeArchetypeScore(item: item, archetype: secondaryArchetype) * 0.42
         }
 
@@ -1191,9 +1493,18 @@ private final class VestigoModel: ObservableObject {
             score += pickForMeMinimumRatingScore(for: item, minimumRating: minimumRating)
         }
 
-        if !answers.contentRatings.isEmpty,
-           let detailRating = detailsCache[item.key]?.ageRating {
-            score += PickForMeContentRating.preferenceScore(selection: answers.contentRatings, rating: detailRating)
+        if item.genreIDs.contains(99) && !answers.wantsDocumentary {
+            score -= pickForMeDocumentaryDownweight(for: answers)
+        }
+
+        score -= pickForMeArchetypeMismatchPenalty(genres: genreIDs, text: text, answers: answers)
+
+        if answers.wantsHistorical && !genreIDs.intersection(pickForMeWarGenreIDs).isEmpty && !answers.wantsWar {
+            score -= pickForMeHistoricalWarDownweight(for: answers)
+        }
+
+        if shouldPenalizeMissingContentRating(item, answers: answers) {
+            score -= 1.5
         }
 
         if let goreLevel = answers.goreLevel {
@@ -1255,8 +1566,18 @@ private final class VestigoModel: ObservableObject {
         case .characterRelationships:
             return pickForMeKeywordScore(text, ["family", "friendship", "relationship", "relationships", "coming of age", "personal growth", "love"]) * 1.7 +
                 (genres.intersection([18, 35, 10749]).isEmpty ? 0 : 4.0)
+        case .humanTriumph:
+            return pickForMeKeywordScore(text, pickForMeHumanTriumphSignals) * 2.1 +
+                (genres.intersection([18, 36]).isEmpty ? 0 : 3.2) -
+                (genres.intersection([27, 878, 14]).isEmpty ? 0 : 2.0)
+        case .documentary:
+            return pickForMeKeywordScore(text, ["documentary", "docuseries", "true story", "real-life", "real life", "interview", "archive", "behind the scenes"]) * 2.1 +
+                (genres.contains(99) ? 6.0 : 0)
         case .historical:
-            return pickForMeHistoricalEventScore(genres: genres, text: text)
+            return pickForMeHistoricalEventScore(genres: genres, text: text) * 1.65
+        case .war:
+            return pickForMeKeywordScore(text, pickForMeWarDealBreakerSignals) * 2.1 +
+                (genres.intersection(pickForMeWarGenreIDs).isEmpty ? 0 : 6.0)
         case .epicSpectacle:
             return pickForMeKeywordScore(text, ["epic", "space", "disaster", "war", "planet", "future", "battle", "large-scale", "world"]) * 1.9 +
                 (genres.intersection([878, 28, 12, 10752]).isEmpty ? 0 : 4.8)
@@ -1272,6 +1593,8 @@ private final class VestigoModel: ObservableObject {
                 (genres.intersection([28, 10752]).isEmpty ? 0 : 1.0)
         case .surprise:
             return ratingSortValue(for: item) + (library.isInWatchlist(item.key) ? 2.0 : 0)
+        case .noPreference:
+            return 0
         }
     }
 
@@ -1307,7 +1630,8 @@ private final class VestigoModel: ObservableObject {
         case .sciFi:
             return genres.contains(878) || genres.contains(10765) ? 1.25 : 0
         case .history:
-            return pickForMeHistoricalEventScore(genres: genres, text: text) > 0 ? 1.6 : -0.5
+            let historicalScore = pickForMeHistoricalEventScore(genres: genres, text: text)
+            return historicalScore > 0 ? 1.0 + min(historicalScore * 0.35, 2.2) : 0
         case .crime:
             return genres.contains(80) || text.containsAny(["crime", "detective", "police"]) ? 1.15 : 0
         case .war:
@@ -1326,7 +1650,7 @@ private final class VestigoModel: ObservableObject {
     }
 
     private func pickForMeRealismScore(genres: Set<Int>, text: String, realism: PickForMeRealism) -> Double {
-        let speculative = !genres.intersection([878, 14, 10765]).isEmpty || text.containsAny(["superhero", "magic", "alien", "monster"])
+        let speculative = pickForMeIsSpeculative(genres: genres, text: text)
         switch realism {
         case .realWorld:
             return speculative ? -6.0 : (genres.intersection([18, 36, 53, 10752]).isEmpty ? 1.2 : 3.0)
@@ -1334,9 +1658,20 @@ private final class VestigoModel: ObservableObject {
             return speculative ? -2.2 : 2.0
         case .someSpeculative:
             return speculative ? 1.8 : 0.8
+        case .completelyFictional:
+            let nonfictionPenalty = pickForMeIsNonfictionOrTrueEvent(genres: genres, text: text) ? -8.0 : 0
+            return nonfictionPenalty + (speculative ? 2.0 : 1.4)
         case .anything:
             return 0
         }
+    }
+
+    private func pickForMeIsSpeculative(genres: Set<Int>, text: String) -> Bool {
+        !genres.intersection([878, 14, 10765]).isEmpty || text.containsAny(["superhero", "magic", "alien", "monster"])
+    }
+
+    private func pickForMeIsNonfictionOrTrueEvent(genres: Set<Int>, text: String) -> Bool {
+        genres.contains(99) || pickForMeHistoricalEventScore(genres: genres, text: text) > 0
     }
 
     private func pickForMeActionScore(genres: Set<Int>, actionLevel: PickForMeActionLevel) -> Double {
@@ -1415,15 +1750,82 @@ private final class VestigoModel: ObservableObject {
     private func pickForMeMinimumRatingScore(for item: MediaItem, minimumRating: PickForMeMinimumRating) -> Double {
         guard let minimum = minimumRating.minimumRating else { return 0 }
         let rating = ratingSortValue(for: item)
+
         if rating >= minimum {
-            return 2.4 + min(rating - minimum, 1.5)
+            return 3.0 + min((rating - minimum) * 1.4, 2.2)
         }
 
-        if rating >= minimum - 0.5 {
-            return 0.4
+        if rating >= minimum - 0.4 {
+            return -0.4
         }
 
-        return -2.0
+        if rating >= minimum - 0.8 {
+            return -1.8
+        }
+
+        return -4.0
+    }
+
+    private func shouldPenalizeMissingContentRating(_ item: MediaItem, answers: PickForMeAnswers) -> Bool {
+        guard !answers.contentRatings.isEmpty, !answers.contentRatings.contains(.any) else { return false }
+        guard let rawRating = detailsCache[item.key]?.ageRating else { return true }
+        return rawRating.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private func pickForMeDocumentaryDownweight(for answers: PickForMeAnswers) -> Double {
+        if answers.dealBreakers.contains(.documentary) {
+            return 250.0
+        }
+
+        if answers.wantsHistorical {
+            return 10.0
+        }
+
+        if answers.sourceMaterial == .trueStory || answers.realism == .realWorld {
+            return 5.0
+        }
+
+        return 8.0
+    }
+
+    private func pickForMeHistoricalWarDownweight(for answers: PickForMeAnswers) -> Double {
+        if answers.actionLevels.contains(.none) || answers.actionLevels.contains(.little) {
+            return 18.0
+        }
+
+        if answers.archetypes.contains(.mission) || answers.secondaryArchetypes.contains(.mission) {
+            return 8.0
+        }
+
+        return 14.0
+    }
+
+    private func pickForMeArchetypeMismatchPenalty(genres: Set<Int>, text: String, answers: PickForMeAnswers) -> Double {
+        var penalty = 0.0
+
+        if answers.wantsHumanTriumph {
+            let triumphSignalCount = pickForMeKeywordScore(text, pickForMeHumanTriumphSignals)
+            let hasTriumphGenreShape = !genres.intersection([18, 36]).isEmpty && genres.isDisjoint(with: [27, 878, 14])
+
+            if triumphSignalCount == 0 && !hasTriumphGenreShape {
+                penalty += 9.0
+            }
+
+            if triumphSignalCount == 0 && !genres.intersection([80, 9648]).isEmpty {
+                penalty += 10.0
+            }
+
+            if !genres.intersection([27, 878, 14]).isEmpty {
+                penalty += 8.0
+            }
+
+            let actionOrWarGenres = Set([53, 28]).union(pickForMeWarGenreIDs)
+            if !genres.intersection(actionOrWarGenres).isEmpty && !text.containsAny(pickForMeHumanTriumphSignals) {
+                penalty += 8.0
+            }
+        }
+
+        return penalty
     }
 
     private func pickForMePersonalizationScore(for item: MediaItem) -> Double {
@@ -1461,6 +1863,12 @@ private final class VestigoModel: ObservableObject {
             return genres.contains(10749) && genres.intersection([28, 12, 878, 9648, 53]).isEmpty
         case .animation:
             return genres.contains(16)
+        case .documentary:
+            return genres.contains(99) ||
+                text.containsAny(["documentary", "docuseries", "nonfiction", "non-fiction", "concert", "live in", "live at", "world tour", "tour film", "live performance", "behind the scenes"]) ||
+                (genres.contains(10402) && text.containsAny(["live", "tour", "concert", "performance"]))
+        case .war:
+            return !genres.intersection(pickForMeWarGenreIDs).isEmpty || text.containsAny(pickForMeWarDealBreakerSignals)
         case .superhero:
             return text.containsAny(["superhero", "super hero", "marvel", "dc comics", "batman", "superman", "spider-man", "spider man", "avengers", "x-men", "comic book"])
         case .verySad:
@@ -1479,25 +1887,57 @@ private final class VestigoModel: ObservableObject {
         Double(keywords.filter { text.contains($0) }.count)
     }
 
-    private func pickForMeHistoricalEventScore(genres: Set<Int>, text: String) -> Double {
-        let signalCount = pickForMeKeywordScore(text, pickForMeHistoricalTrueEventSignals)
-        let hasHistoricalGenre = !genres.intersection(pickForMeHistoricalGenreIDs).isEmpty
+    private func pickForMeHistoricalYearScore(_ text: String) -> Double {
+        guard let currentYear = Calendar.current.dateComponents([.year], from: Date()).year else { return 0 }
+        let historicalCutoffYear = currentYear - 20
+        let pattern = #"\b(1[5-9][0-9]{2}|20[0-9]{2})\b"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return 0 }
+        let range = NSRange(text.startIndex..<text.endIndex, in: text)
+        let matches = regex.matches(in: text, range: range)
 
-        if signalCount > 0 {
-            let keywordScore = signalCount * 3.2
-            let genreBonus = hasHistoricalGenre ? 2.6 : 0
-            return keywordScore + genreBonus
-        }
+        for match in matches {
+            guard let yearRange = Range(match.range, in: text),
+                  let year = Int(text[yearRange]),
+                  year <= historicalCutoffYear else {
+                continue
+            }
 
-        if genres.contains(99) {
-            return 3.0
-        }
-
-        if genres.contains(36) || genres.contains(10752) {
-            return -1.2
+            return year <= 1975 ? 2.8 : 1.6
         }
 
         return 0
+    }
+
+    private func pickForMeHistoricalEventScore(genres: Set<Int>, text: String) -> Double {
+        let trueEventSignalCount = pickForMeKeywordScore(text, pickForMeHistoricalTrueEventSignals)
+        let historicalContextSignalCount = pickForMeKeywordScore(text, pickForMeHistoricalContextSignals)
+        let historicalYearScore = pickForMeHistoricalYearScore(text)
+        let nonHistoricalDocumentarySignalCount = pickForMeKeywordScore(text, pickForMeNonHistoricalDocumentarySignals)
+        let hasHistoricalGenre = !genres.intersection(pickForMeHistoricalGenreIDs).isEmpty
+        let isDocumentary = genres.contains(99)
+
+        let hasHistoricalYearEvidence = historicalYearScore > 0 && (trueEventSignalCount > 0 || hasHistoricalGenre)
+
+        if historicalContextSignalCount > 0 || hasHistoricalYearEvidence {
+            let keywordScore = trueEventSignalCount * 1.2 + historicalContextSignalCount * 3.4 + (hasHistoricalYearEvidence ? historicalYearScore : 0)
+            let genreBonus = hasHistoricalGenre ? 3.4 : 0
+            let documentaryPenalty = isDocumentary && nonHistoricalDocumentarySignalCount > 0 ? 5.0 : 0
+            let generalDocumentaryPenalty = isDocumentary ? 1.8 : 0
+            return keywordScore + genreBonus - documentaryPenalty - generalDocumentaryPenalty
+        }
+
+        if hasHistoricalGenre {
+            let genreBonus = genres.contains(36) ? 4.0 : 3.2
+            let trueEventBonus = min(trueEventSignalCount * 1.2, 2.4)
+            let documentaryPenalty = isDocumentary ? 2.5 : 0
+            return genreBonus + trueEventBonus - documentaryPenalty
+        }
+
+        if isDocumentary {
+            return -4.0
+        }
+
+        return nonHistoricalDocumentarySignalCount > 0 ? -1.5 : 0
     }
 
     private func pickForMeSearchableText(for item: MediaItem) -> String {
@@ -1523,10 +1963,16 @@ private final class VestigoModel: ObservableObject {
         } else if searchFilter != .people, let cachedResults = mediaSearchCache[cacheKey] {
             searchResults = cachedResults
             searchPeopleResults = []
+        } else if searchFilter != .people {
+            searchResults = instantSearchRefinement(for: query)
+            searchPeopleResults = []
+        } else {
+            searchPeopleResults = []
+            searchResults = []
         }
         
         searchTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 320_000_000)
+            try? await Task.sleep(nanoseconds: 120_000_000)
             guard let self, !Task.isCancelled else { return }
             guard await MainActor.run(body: { self.searchRequestID == requestID }) else { return }
 
@@ -1546,6 +1992,12 @@ private final class VestigoModel: ObservableObject {
                         self.mediaSearchCache[cacheKey] = rankedVisibleResults
                         self.searchResults = rankedVisibleResults
                         self.searchPeopleResults = []
+                        self.refreshSearchRatingsIfCurrent(
+                            rankedVisibleResults,
+                            query: query,
+                            requestID: requestID,
+                            cacheKey: cacheKey
+                        )
                     }
                 }
             } catch {
@@ -1584,6 +2036,12 @@ private final class VestigoModel: ObservableObject {
                 mediaSearchCache[cacheKey] = results
                 searchResults = results
                 searchPeopleResults = []
+                refreshSearchRatingsIfCurrent(
+                    results,
+                    query: query,
+                    requestID: requestID,
+                    cacheKey: cacheKey
+                )
             }
         } catch {
             if LoadErrorFilter.shouldIgnore(error) {
@@ -1599,7 +2057,10 @@ private final class VestigoModel: ObservableObject {
 
         for searchQuery in searchQueries {
             collectedResults.append(contentsOf: try await tmdb.search(query: searchQuery, filter: filter, includeAdult: !settings.hideAdultResults))
-            collectedResults.append(contentsOf: try await tmdb.contextualSearch(query: searchQuery, filter: filter, includeAdult: !settings.hideAdultResults))
+        }
+
+        if collectedResults.isEmpty {
+            collectedResults.append(contentsOf: try await tmdb.contextualSearch(query: query, filter: filter, includeAdult: !settings.hideAdultResults))
         }
 
         let baseResults = preparedResults(
@@ -1629,9 +2090,12 @@ private final class VestigoModel: ObservableObject {
             enrichedResults,
             enabled: settings.hideShortFilmsFromSearch
         )
-        await loadExternalRatings(for: visibleResults, limit: 120)
 
-        let ratingFilteredResults = visibleResults.filter { item in
+        return finalizedSearchResults(visibleResults, query: query)
+    }
+
+    private func finalizedSearchResults(_ items: [MediaItem], query: String) -> [MediaItem] {
+        let ratingFilteredResults = items.filter { item in
             guard let minimumTMDbRatingFilter else { return true }
             return ratingSortValue(for: item) >= minimumTMDbRatingFilter.minimumRating
         }
@@ -1652,6 +2116,45 @@ private final class VestigoModel: ObservableObject {
 
             return (lhs.releaseDateValue ?? .distantPast) > (rhs.releaseDateValue ?? .distantPast)
         }
+    }
+
+    private func refreshSearchRatingsIfCurrent(_ items: [MediaItem], query: String, requestID: UUID, cacheKey: String) {
+        Task { [weak self] in
+            guard let self else { return }
+            await self.loadExternalRatings(for: items, limit: 24)
+            guard self.searchRequestID == requestID else { return }
+            guard self.normalizedSearchCacheKey(query, filter: self.searchFilter) == cacheKey else { return }
+
+            let updatedResults = self.finalizedSearchResults(items, query: query)
+            self.mediaSearchCache[cacheKey] = updatedResults
+            self.searchResults = updatedResults
+        }
+    }
+
+    private func instantSearchRefinement(for query: String) -> [MediaItem] {
+        let normalizedQuery = normalizedSearchText(query)
+        let queryTokens = normalizedQuery
+            .split(separator: " ")
+            .map(String.init)
+            .filter { $0.count >= 2 && $0 != "the" }
+
+        guard !normalizedQuery.isEmpty, !searchResults.isEmpty else { return [] }
+
+        let refined = searchResults.filter { item in
+            let title = normalizedSearchText(item.title)
+            let overview = normalizedSearchText(item.overview)
+
+            if title.contains(normalizedQuery) {
+                return true
+            }
+
+            guard !queryTokens.isEmpty else { return false }
+            return queryTokens.allSatisfy { token in
+                title.contains(token) || overview.contains(token)
+            }
+        }
+
+        return finalizedSearchResults(refined, query: query)
     }
     
     private func fuzzySearchQueries(from rawQuery: String) -> [String] {
@@ -1789,7 +2292,7 @@ private final class VestigoModel: ObservableObject {
 
     private func normalizedSearchCacheKey(_ query: String, filter: SearchFilter) -> String {
         let minimumRatingKey = minimumTMDbRatingFilter.map { String($0.rawValue) } ?? "none"
-        return "\(filter.rawValue)|\(normalizedSearchText(query))|\(settings.prioritiseEnglish)|\(settings.hideAdultResults)|\(settings.hideWatchedFromSearch)|\(minimumRatingKey)|\(selectedRuntimeFilters.map(\.rawValue).sorted().joined(separator: ","))|\(settings.hideShortFilmsFromSearch)"
+        return "\(filter.rawValue)|\(normalizedSearchText(query))|\(settings.prioritiseEnglish)|\(settings.hideAdultResults)|\(settings.hideWatchedFromSearch)|\(settings.hideLowestAgeRatings)|\(minimumRatingKey)|\(selectedRuntimeFilters.map(\.rawValue).sorted().joined(separator: ","))|\(settings.hideShortFilmsFromSearch)"
     }
 
     private func levenshteinDistance(_ a: String, _ b: String) -> Int {
@@ -1865,8 +2368,25 @@ private final class VestigoModel: ObservableObject {
 
             let preparedItems = preparedResults(items, hideWatched: settings.hideWatchedFromSearch)
             let visibleItems = await filteredShortFilmsIfNeeded(preparedItems, enabled: settings.hideShortFilmsFromSearch)
-            await loadExternalRatings(for: Array(visibleItems.prefix(24)), limit: 24)
-            let sortedItems = sort == .tmdbRating
+            let fastSortedItems = sort == .tmdbRating
+                ? visibleItems.sorted { lhs, rhs in
+                    let lhsRating = lhs.voteAverage
+                    let rhsRating = rhs.voteAverage
+                    if lhsRating != rhsRating {
+                        return lhsRating > rhsRating
+                    }
+
+                    return (lhs.releaseDateValue ?? .distantPast) > (rhs.releaseDateValue ?? .distantPast)
+                }
+                : visibleItems
+
+            await MainActor.run {
+                genreResults[cacheKey] = fastSortedItems
+            }
+
+            await loadExternalRatings(for: Array(visibleItems.prefix(12)), limit: 12)
+
+            let finalSortedItems = sort == .tmdbRating
                 ? visibleItems.sorted { lhs, rhs in
                     let lhsRating = ratingSortValue(for: lhs)
                     let rhsRating = ratingSortValue(for: rhs)
@@ -1879,7 +2399,7 @@ private final class VestigoModel: ObservableObject {
                 : visibleItems
 
             await MainActor.run {
-                genreResults[cacheKey] = sortedItems
+                genreResults[cacheKey] = finalSortedItems
             }
         } catch {
             await MainActor.run {
@@ -1892,6 +2412,13 @@ private final class VestigoModel: ObservableObject {
     
     func genreCacheKey(genreID: Int, filter: MediaFilter = .both, sort: GenreSort = .tmdbRating) -> String {
         "\(genreID)-category-\(filter.rawValue)-\(sort.rawValue)"
+    }
+
+    func loadBasicDetailIfNeeded(_ item: MediaItem) async {
+        guard detailsCache[item.key] == nil else { return }
+        do {
+            detailsCache[item.key] = try await tmdb.detail(for: item)
+        } catch { }
     }
     
     func loadDetail(_ item: MediaItem) async {
@@ -2295,6 +2822,20 @@ private final class VestigoModel: ObservableObject {
         Task { await loadSmartRecommendations() }
     }
 
+    func toggleNeverShowAgain(_ item: MediaItem) {
+        guard item.kind == .movie || item.kind == .tv else { return }
+
+        library.toggleNeverShowAgain(item)
+
+        if library.isNeverShowAgain(item.key) {
+            removeFromForYouRecommendations(item)
+        }
+
+        saveLocalSoon()
+        objectWillChange.send()
+        Task { await loadSmartRecommendations() }
+    }
+
     func confirmFavouriteReplacement() {
         pendingFavouriteReplacement = nil
         showFavouriteReplacementAlert = false
@@ -2373,8 +2914,8 @@ private final class VestigoModel: ObservableObject {
         return notFound
     }
 
-    func prepareExport() {
-        let lines = library.watchedItems
+    func prepareExport(format: ExportFormat = .text) {
+        let entries = library.watchedItems
             .sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
             .map { item in
                 WatchedImportEntry.exportLine(
@@ -2383,8 +2924,9 @@ private final class VestigoModel: ObservableObject {
                     isFavourite: library.isFavourite(item)
                 )
             }
-            .joined(separator: "\n")
-        exportDocument = ExportDocument(text: lines)
+
+        exportDocument = ExportDocument(text: entries.joined(separator: format.separator))
+        exportFormat = format
         showExporter = true
     }
 
@@ -2418,7 +2960,7 @@ private final class VestigoModel: ObservableObject {
         expandedSearchFilterSections.removeAll()
         selectedRuntimeFilters.removeAll()
         selectedDateFilters.removeAll()
-        minimumTMDbRatingFilter = .one
+        minimumTMDbRatingFilter = nil
 
         searchText = ""
         searchResults = []
@@ -2519,7 +3061,7 @@ private final class VestigoModel: ObservableObject {
             expandedSearchFilterSections.removeAll()
             selectedRuntimeFilters.removeAll()
             selectedDateFilters.removeAll()
-            minimumTMDbRatingFilter = .one
+            minimumTMDbRatingFilter = nil
             searchFilter = settings.defaultSearchFilter
 
         case .forYou:
@@ -3541,6 +4083,20 @@ private struct PickForMeView: View {
         }
         .onChange(of: answers.archetypes) { _, newValue in
             answers.secondaryArchetypes.subtract(newValue)
+            if newValue.contains(.documentary) {
+                answers.dealBreakers.remove(.documentary)
+            }
+            if newValue.contains(.war) {
+                answers.dealBreakers.remove(.war)
+            }
+        }
+        .onChange(of: answers.secondaryArchetypes) { _, newValue in
+            if newValue.contains(.documentary) {
+                answers.dealBreakers.remove(.documentary)
+            }
+            if newValue.contains(.war) {
+                answers.dealBreakers.remove(.war)
+            }
         }
         .onChange(of: answers.contentRatings) { _, _ in
             if !answers.shouldAskGoreQuestion {
@@ -3666,6 +4222,8 @@ private struct PickForMeView: View {
             singleChoiceList(PickForMeSeriousness.allCases, selection: $answers.seriousness)
         case .realism:
             singleChoiceList(PickForMeRealism.allCases, selection: $answers.realism)
+        case .sourceMaterial:
+            singleChoiceList(PickForMeSourceMaterial.allCases, selection: $answers.sourceMaterial)
         case .action:
             multiChoiceList(PickForMeActionLevel.allCases, selection: $answers.actionLevels)
         case .engagement:
@@ -3685,7 +4243,7 @@ private struct PickForMeView: View {
         case .minimumRating:
             singleChoiceList(PickForMeMinimumRating.allCases, selection: $answers.minimumRating)
         case .dealBreakers:
-            multiChoiceList(PickForMeDealBreaker.allCases, selection: $answers.dealBreakers)
+            multiChoiceList(dealBreakerOptions, selection: $answers.dealBreakers)
         }
     }
 
@@ -3757,6 +4315,20 @@ private struct PickForMeView: View {
                 .opacity(item.isUpcoming ? 0.45 : 1)
             }
 
+            Button(role: model.library.isNeverShowAgain(item.key) ? nil : .destructive) {
+                toggleNeverShowAgainForCurrentResult(item)
+            } label: {
+                Label(
+                    model.library.isNeverShowAgain(item.key) ? "Show in recommendations again" : "Never show this again",
+                    systemImage: model.library.isNeverShowAgain(item.key) ? "eye" : "eye.slash"
+                )
+                .font(.headline.bold())
+                .frame(maxWidth: .infinity)
+                .frame(height: 48)
+                .liquidGlass(cornerRadius: 24)
+            }
+            .buttonStyle(.plain)
+
             Button {
                 editAnswers()
             } label: {
@@ -3805,8 +4377,25 @@ private struct PickForMeView: View {
 
     private var secondaryArchetypeOptions: [PickForMeArchetype] {
         PickForMeArchetype.allCases.filter { option in
-            option != .surprise && !answers.archetypes.contains(option)
+            option != .surprise && (option == .noPreference || !answers.archetypes.contains(option))
         }
+    }
+
+    private var dealBreakerOptions: [PickForMeDealBreaker] {
+        PickForMeDealBreaker.allCases.filter { option in
+            switch option {
+            case .documentary:
+                return !answers.wantsDocumentary
+            case .war:
+                return !answers.wantsWar
+            default:
+                return true
+            }
+        }
+    }
+
+    private var hasEnoughDataForSurprise: Bool {
+        model.library.watchedItems.count >= 3
     }
 
     private func scrollToTop(with proxy: ScrollViewProxy) {
@@ -3854,7 +4443,7 @@ private struct PickForMeView: View {
 
     private func mediaFormatChoiceList(selection: Binding<PickForMeMediaFormat?>) -> some View {
         VStack(spacing: 10) {
-            ForEach(PickForMeMediaFormat.allCases) { option in
+            ForEach(PickForMeMediaFormat.allCases.filter { $0 != .both }) { option in
                 PickForMeOptionButton(title: option.title, subtitle: option.subtitle, isSelected: selection.wrappedValue == option) {
                     selection.wrappedValue = option
                     errorText = nil
@@ -3865,7 +4454,9 @@ private struct PickForMeView: View {
 
     private func primaryArchetypeChoiceList(selection: Binding<Set<PickForMeArchetype>>) -> some View {
         VStack(spacing: 10) {
-            ForEach(PickForMeArchetype.allCases) { option in
+            ForEach(PickForMeArchetype.allCases.filter { option in
+                option != .noPreference && (option != .surprise || hasEnoughDataForSurprise)
+            }) { option in
                 PickForMeOptionButton(title: option.title, subtitle: option.subtitle, isSelected: selection.wrappedValue.contains(option)) {
                     selection.wrappedValue = [option]
                     answers.secondaryArchetypes.remove(option)
@@ -3949,6 +4540,8 @@ private struct PickForMeView: View {
             answers.seriousness = nil
         case .realism:
             answers.realism = nil
+        case .sourceMaterial:
+            answers.sourceMaterial = nil
         case .action:
             answers.actionLevels = []
         case .engagement:
@@ -4035,6 +4628,20 @@ private struct PickForMeView: View {
         }
     }
 
+    private func toggleNeverShowAgainForCurrentResult(_ item: MediaItem) {
+        let willHide = !model.library.isNeverShowAgain(item.key)
+        model.toggleNeverShowAgain(item)
+
+        guard willHide else { return }
+        results.removeAll { $0.key == item.key }
+
+        if results.isEmpty {
+            editAnswers()
+        } else {
+            resultIndex = min(resultIndex, results.count - 1)
+        }
+    }
+
     private func editAnswers() {
         results = []
         resultIndex = 0
@@ -4057,6 +4664,8 @@ private struct PickForMeView: View {
             return answers.seriousness != nil
         case .realism:
             return answers.realism != nil
+        case .sourceMaterial:
+            return answers.sourceMaterial != nil
         case .action:
             return !answers.actionLevels.isEmpty
         case .engagement:
@@ -5758,10 +6367,38 @@ private struct PickForMeOptionButton: View {
         @State private var showImportFilePicker = false
         @State private var isImporting = false
         @State private var pendingImportFormat: WatchedImportEntry.ImportFormat = .automatic
+        @State private var selectedCategory: SettingsCategory = .content
+        @State private var importPlaceholderIndex = 0
+
+        private enum SettingsCategory: String, CaseIterable, Identifiable {
+            case content
+            case display
+            case data
+
+            var id: String { rawValue }
+            var title: String {
+                switch self {
+                case .display: return "Display"
+                case .content: return "Content"
+                case .data: return "Data"
+                }
+            }
+        }
+
+        private var importPlaceholderText: String {
+            let examples = [
+                "Star Wars 5 f m\nRed Notice 4.5\nThe Flash 4 s",
+                "Star Wars 5 f m, Red Notice 4.5, The Flash 4 s"
+            ]
+            return examples[importPlaceholderIndex % examples.count]
+        }
         
         var body: some View {
             BaseScreen(title: "Settings", filter: .constant(.both), settings: model.settings, contentTopPadding: 18) {
                 VStack(alignment: .leading, spacing: 18) {
+                    settingsCategoryPills
+
+                    if selectedCategory == .display {
                     Text("Display")
                         .sectionTitle()
                     
@@ -5791,7 +6428,9 @@ private struct PickForMeOptionButton: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .settingBubble()
                     }
+                    }
                     
+                    if selectedCategory == .content {
                     Text("Content")
                         .sectionTitle()
                         .padding(.top, 6)
@@ -5863,6 +6502,22 @@ private struct PickForMeOptionButton: View {
                             model.searchResults = model.preparedResults(model.searchResults)
                             Task { await model.loadHome() }
                         }
+
+                        VStack(alignment: .leading, spacing: 6) {
+                            Toggle("Hide lowest age ratings", isOn: $model.settings.hideLowestAgeRatings)
+                                .font(.headline.bold())
+                                .tint(model.settings.accentColor)
+
+                            Text("When this is on, Vestigo hides titles rated for the youngest audiences, including G, U, TV-Y, TV-Y7, and TV-G, where certification data is available.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        .settingBubble()
+                        .onChange(of: model.settings.hideLowestAgeRatings) { _, _ in
+                            model.searchResults = model.preparedResults(model.searchResults)
+                            model.updateSearch()
+                            Task { await model.loadHome() }
+                        }
                         
                         DisclosureGroup {
                             VStack(alignment: .leading, spacing: 10) {
@@ -5911,18 +6566,43 @@ private struct PickForMeOptionButton: View {
                         
                         ShortFilmsSettingsGroup(model: model)
                         
-                        VStack(alignment: .leading, spacing: 10) {
-                            Text("Hide upcoming releases")
-                                .font(.headline.bold())
-                            
-                            Text("Choose where unreleased titles should be hidden. Home does not have a toggle because Upcoming releases is its own carousel.")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                            
-                            Toggle("Search", isOn: $model.settings.hideUpcomingFromSearch)
-                            Toggle("For You / Recommended", isOn: $model.settings.hideUpcomingFromRecommended)
-                            Toggle("Collection and franchise recommendations", isOn: $model.settings.hideUpcomingFromCollectionRecommendations)
+                        DisclosureGroup {
+                            VStack(alignment: .leading, spacing: 10) {
+                                Toggle("Search", isOn: $model.settings.hideUpcomingFromSearch)
+                                    .font(.subheadline.bold())
+                                    .foregroundStyle(.primary)
+                                    .tint(model.settings.accentColor)
+                                    .padding(.trailing, 6)
+
+                                Toggle("For You / Recommended", isOn: $model.settings.hideUpcomingFromRecommended)
+                                    .font(.subheadline.bold())
+                                    .foregroundStyle(.primary)
+                                    .tint(model.settings.accentColor)
+                                    .padding(.trailing, 6)
+
+                                Toggle("Collection and franchise recommendations", isOn: $model.settings.hideUpcomingFromCollectionRecommendations)
+                                    .font(.subheadline.bold())
+                                    .foregroundStyle(.primary)
+                                    .tint(model.settings.accentColor)
+                                    .padding(.trailing, 6)
+                            }
+                            .padding(.top, 8)
+                        } label: {
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text("Hide upcoming releases")
+                                    .font(.headline.bold())
+                                    .foregroundStyle(.primary)
+
+                                Text("Choose where unreleased titles should be hidden. Home does not have a toggle because Upcoming releases is its own carousel.")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .multilineTextAlignment(.leading)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
                         }
+                        .foregroundStyle(.primary)
+                        .tint(model.settings.accentColor)
                         .settingBubble()
                         .onChange(of: model.settings.hideUpcomingFromSearch) { _, _ in
                             model.updateSearch()
@@ -6049,19 +6729,21 @@ private struct PickForMeOptionButton: View {
                         .settingBubble()
                         
                     }
+                    }
                     
+                    if selectedCategory == .data {
                     Text("Data")
                         .sectionTitle()
                         .padding(.top, 6)
                     
                     VStack(alignment: .leading, spacing: 10) {
                         VStack(alignment: .leading, spacing: 8) {
-                            Text("Import watched titles as title, star rating, optional f for favourite, and m for movie or s for series. .txt can use one item per line or commas; .csv uses commas only. Example: Star Wars 5 f m.")
+                            Text("Import watched titles as title, star rating, optional f for favourite, and m for movie or s for series. .txt can use one item per line or commas; .csv uses commas only.")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
 
                             
-                            TextField("Star Wars 5 f m\nRed Notice 4.5 m\nThe Flash 4 s", text: $importText, axis: .vertical)
+                            TextField(importPlaceholderText, text: $importText, axis: .vertical)
                                 .lineLimit(3...5)
                                 .textFieldStyle(.plain)
                                 .padding(12)
@@ -6119,30 +6801,34 @@ private struct PickForMeOptionButton: View {
                         .padding(10)
                         .liquidGlass(cornerRadius: 22)
                         
-                        Button {
-                            model.prepareExport()
-                        } label: {
-                            HStack(alignment: .center, spacing: 10) {
-                                Image(systemName: "square.and.arrow.up")
-                                    .font(.system(size: 17, weight: .semibold))
-                                    .frame(width: 24, height: 22, alignment: .center)
-                                
-                                Text("Export watched data")
-                                    .font(.system(size: 15, weight: .semibold, design: .rounded))
-                                    .lineLimit(1)
-                                    .frame(height: 22, alignment: .center)
-                                
-                                Spacer(minLength: 0)
+                        HStack(spacing: 10) {
+                            ForEach(ExportFormat.allCases) { format in
+                                Button {
+                                    model.prepareExport(format: format)
+                                } label: {
+                                    HStack(alignment: .center, spacing: 8) {
+                                        Image(systemName: "square.and.arrow.up")
+                                            .font(.system(size: 17, weight: .semibold))
+                                            .frame(width: 22, height: 22, alignment: .center)
+
+                                        Text("Export \(format.title)")
+                                            .font(.system(size: 15, weight: .semibold, design: .rounded))
+                                            .lineLimit(1)
+                                            .frame(height: 22, alignment: .center)
+
+                                        Spacer(minLength: 0)
+                                    }
+                                    .foregroundStyle(.primary)
+                                    .padding(.horizontal, 12)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .frame(height: 48, alignment: .center)
+                                    .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                                }
+                                .buttonStyle(.plain)
+                                .liquidGlass(cornerRadius: 18)
                             }
-                            .foregroundStyle(.primary)
-                            .padding(.horizontal, 12)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .frame(height: 48, alignment: .center)
-                            .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
                         }
-                        .buttonStyle(.plain)
-                        .liquidGlass(cornerRadius: 18)
-                        .fileExporter(isPresented: $model.showExporter, document: model.exportDocument, contentType: .plainText, defaultFilename: "Vestigo Watched") { _ in }
+                        .fileExporter(isPresented: $model.showExporter, document: model.exportDocument, contentType: model.exportFormat.contentType, defaultFilename: model.exportFormat.filename) { _ in }
                         
                         Button("Reset settings") {
                             model.settings = AppSettings()
@@ -6178,9 +6864,17 @@ private struct PickForMeOptionButton: View {
                             .frame(maxWidth: .infinity, alignment: .center)
                     }
                     .frame(maxWidth: .infinity, alignment: .center)
+                    }
                 }
             }
             .onChange(of: model.settings) { _, _ in Storage.save(model.settings, key: "Vestigo.settings") }
+            .task {
+                while !Task.isCancelled {
+                    try? await Task.sleep(nanoseconds: 5_000_000_000)
+                    guard !Task.isCancelled else { return }
+                    importPlaceholderIndex = (importPlaceholderIndex + 1) % 2
+                }
+            }
             .alert("Delete all Vestigo data?", isPresented: $showClearConfirm) {
                 Button("Cancel", role: .cancel) { clearPresses = 0 }
                 Button("Delete", role: .destructive) {
@@ -6219,6 +6913,16 @@ private struct PickForMeOptionButton: View {
                     break
                 }
             }
+        }
+
+        private var settingsCategoryPills: some View {
+            Picker("Settings category", selection: $selectedCategory) {
+                ForEach(SettingsCategory.allCases) { category in
+                    Text(category.title).tag(category)
+                }
+            }
+            .pickerStyle(.segmented)
+            .liquidGlass(cornerRadius: 18)
         }
 
         private func importWatchedData(_ text: String, format: WatchedImportEntry.ImportFormat = .automatic, skipsWarnings: Bool = false) {
@@ -6432,9 +7136,11 @@ private struct PickForMeOptionButton: View {
         let item: MediaItem
         @ObservedObject var model: VestigoModel
         var allowsPersonSheet: Bool = true
+        @Environment(\.imageRefreshToken) private var imageRefreshToken
         @State private var showCast = false
         @State private var showCollections = false
         @State private var selectedNestedItem: MediaItem?
+        @State private var isPosterPreviewPresented = false
         
         private var detail: MediaDetail? { model.detailsCache[item.key] }
         private var providers: [StreamingOption] { model.providerCache[item.key] ?? [] }
@@ -6449,6 +7155,13 @@ private struct PickForMeOptionButton: View {
         
         var body: some View {
             detailSheetSurface
+                .overlay {
+                    if isPosterPreviewPresented {
+                        posterPreviewOverlay
+                            .transition(.opacity)
+                    }
+                }
+                .animation(.easeInOut(duration: 0.18), value: isPosterPreviewPresented)
                 .favouriteReplacementOverlay(model: model)
                 .ratingPromptOverlay(model: model, suppressedItemKey: item.key)
                 .presentationBackground(.clear)
@@ -6508,7 +7221,14 @@ private struct PickForMeOptionButton: View {
         
         private var headerSection: some View {
             HStack(alignment: .top, spacing: 16) {
-                PosterView(item: item, width: 126, height: 188, isFavourite: model.library.isFavourite(item))
+                Button {
+                    isPosterPreviewPresented = true
+                } label: {
+                    PosterView(item: item, width: 126, height: 188, isFavourite: model.library.isFavourite(item))
+                }
+                .buttonStyle(.plain)
+                .disabled(item.posterURL == nil)
+                .accessibilityLabel("Open poster")
                 
                 VStack(alignment: .leading, spacing: 10) {
                     titleText
@@ -6522,6 +7242,43 @@ private struct PickForMeOptionButton: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .clipped()
+        }
+
+        private var posterPreviewOverlay: some View {
+            GeometryReader { proxy in
+                ZStack {
+                    Color.black.opacity(0.72)
+                        .ignoresSafeArea()
+                        .onTapGesture {
+                            isPosterPreviewPresented = false
+                        }
+                    
+                    posterPreviewImage(maxSize: proxy.size)
+                        .onTapGesture { }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+
+        private func posterPreviewImage(maxSize: CGSize) -> some View {
+            let width = min(maxSize.width * 0.86, maxSize.height * 0.82 * 2 / 3)
+            let height = width * 1.5
+            
+            return AsyncImage(url: item.posterURL?.refreshedImageURL(token: imageRefreshToken)) { phase in
+                switch phase {
+                case .success(let image):
+                    image
+                        .resizable()
+                        .scaledToFit()
+                default:
+                    ProgressView()
+                        .tint(.white)
+                }
+            }
+                .frame(width: width, height: height)
+                .background(.black.opacity(0.92))
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .shadow(color: .black.opacity(0.38), radius: 28, x: 0, y: 18)
         }
         
         private var titleText: some View {
@@ -7629,6 +8386,15 @@ private struct PickForMeOptionButton: View {
                     )
                 }
             }
+
+            Button(role: model.library.isNeverShowAgain(item.key) ? nil : .destructive) {
+                model.toggleNeverShowAgain(item)
+            } label: {
+                Label(
+                    model.library.isNeverShowAgain(item.key) ? "Show in recommendations again" : "Never show this again",
+                    systemImage: model.library.isNeverShowAgain(item.key) ? "eye" : "eye.slash"
+                )
+            }
             
             if case .collection(let id) = swipeContext {
                 Button(role: .destructive) {
@@ -8075,7 +8841,6 @@ private struct PickForMeOptionButton: View {
     }
     
     private enum SearchRatingFilter: Int, CaseIterable, Identifiable {
-        case zero = 0
         case one = 1
         case two = 2
         case three = 3
@@ -8692,6 +9457,10 @@ private struct PickForMeOptionButton: View {
                 return try await discoverEra(eraID: genreID, filter: filter, sort: sort)
             }
 
+            if let keywordIDs = Self.specialCategoryKeywordIDs[genreID] {
+                return try await discoverKeywordCategory(keywordIDs: keywordIDs, filter: filter, sort: sort)
+            }
+
             async let discoveredItems = discoverCategoryItems(genreID: genreID, filter: filter)
             async let curatedItems = curatedCategoryItems(genreID: genreID, filter: filter)
 
@@ -8714,6 +9483,32 @@ private struct PickForMeOptionButton: View {
                 return try await discoverCategorySingleMedia(genreID: genreID, media: "tv")
             }
         }
+
+        private func discoverKeywordCategory(keywordIDs: [Int], filter: MediaFilter, sort: GenreSort) async throws -> [MediaItem] {
+            switch filter {
+            case .both:
+                async let movies = discoverKeywordCategorySingleMedia(keywordIDs: keywordIDs, media: "movie", sort: sort)
+                async let series = discoverKeywordCategorySingleMedia(keywordIDs: keywordIDs, media: "tv", sort: sort)
+                return try await (movies + series).uniqued().prefixArray(50)
+            case .movie:
+                return try await discoverKeywordCategorySingleMedia(keywordIDs: keywordIDs, media: "movie", sort: sort)
+            case .tv:
+                return try await discoverKeywordCategorySingleMedia(keywordIDs: keywordIDs, media: "tv", sort: sort)
+            }
+        }
+
+        private func discoverKeywordCategorySingleMedia(keywordIDs: [Int], media: String, sort: GenreSort) async throws -> [MediaItem] {
+            try await fetchListPages(path: "/discover/\(media)", query: [
+                URLQueryItem(name: "sort_by", value: sort.tmdbSort),
+                URLQueryItem(name: "with_keywords", value: keywordIDs.map(String.init).joined(separator: "|")),
+                URLQueryItem(name: "include_adult", value: "false"),
+                URLQueryItem(name: "include_video", value: "false"),
+                URLQueryItem(name: "vote_count.gte", value: media == "movie" ? "80" : "50"),
+                URLQueryItem(name: "vote_average.gte", value: "5.5"),
+                URLQueryItem(name: "region", value: "US"),
+                URLQueryItem(name: "watch_region", value: "US")
+            ], pages: 5)
+        }
         
         private func curatedCategoryItems(genreID: Int, filter: MediaFilter) async throws -> [MediaItem] {
             guard let entries = Self.curatedCategoryEntries[genreID] else { return [] }
@@ -8730,7 +9525,7 @@ private struct PickForMeOptionButton: View {
                 }
             }
             
-            let limitedEntries = Array(filteredEntries.prefix(16))
+            let limitedEntries = Array(filteredEntries.prefix(6))
             try await withThrowingTaskGroup(of: MediaItem?.self) { group in
                 for entry in limitedEntries {
                     group.addTask {
@@ -8747,7 +9542,7 @@ private struct PickForMeOptionButton: View {
             
             return resolved
                 .uniqued()
-                .prefixArray(16)
+                .prefixArray(6)
         }
         
         private func resolveCuratedEntry(_ entry: CuratedCategoryEntry) async throws -> MediaItem? {
@@ -8788,6 +9583,16 @@ private struct PickForMeOptionButton: View {
         private static func show(_ title: String) -> CuratedCategoryEntry {
             CuratedCategoryEntry(title: title, kind: .tv)
         }
+
+        private static let basedOnTrueStoryCategoryID = 30001
+        private static let basedOnBookCategoryID = 30002
+        private static let basedOnGameCategoryID = 30003
+
+        private static let specialCategoryKeywordIDs: [Int: [Int]] = [
+            basedOnTrueStoryCategoryID: [9672],
+            basedOnBookCategoryID: [818],
+            basedOnGameCategoryID: [41645]
+        ]
         
         private static let curatedCategoryEntries: [Int: [CuratedCategoryEntry]] = [
             28: [
@@ -8965,22 +9770,51 @@ private struct PickForMeOptionButton: View {
             return []
         }
 
-        func discoverPickForMe(filter: MediaFilter, genreIDs: Set<Int>, runtime: PickForMeRuntime?, minimumRating: Double, includeAdult: Bool) async throws -> [MediaItem] {
+        func discoverPickForMe(filter: MediaFilter, genreIDs: Set<Int>, runtime: PickForMeRuntime?, minimumRating: Double, includeAdult: Bool, sortBy: String) async throws -> [MediaItem] {
             switch filter {
             case .movie:
-                return try await discoverPickForMeSingleMedia(media: "movie", genreIDs: genreIDs, runtime: runtime, minimumRating: minimumRating, includeAdult: includeAdult)
+                return try await discoverPickForMeSingleMedia(media: "movie", genreIDs: genreIDs, runtime: runtime, minimumRating: minimumRating, includeAdult: includeAdult, sortBy: sortBy)
             case .tv:
-                return try await discoverPickForMeSingleMedia(media: "tv", genreIDs: genreIDs, runtime: runtime, minimumRating: minimumRating, includeAdult: includeAdult)
+                return try await discoverPickForMeSingleMedia(media: "tv", genreIDs: genreIDs, runtime: runtime, minimumRating: minimumRating, includeAdult: includeAdult, sortBy: sortBy)
             case .both:
-                async let movies = discoverPickForMeSingleMedia(media: "movie", genreIDs: genreIDs, runtime: runtime, minimumRating: minimumRating, includeAdult: includeAdult)
-                async let series = discoverPickForMeSingleMedia(media: "tv", genreIDs: genreIDs, runtime: runtime, minimumRating: minimumRating, includeAdult: includeAdult)
+                async let movies = discoverPickForMeSingleMedia(media: "movie", genreIDs: genreIDs, runtime: runtime, minimumRating: minimumRating, includeAdult: includeAdult, sortBy: sortBy)
+                async let series = discoverPickForMeSingleMedia(media: "tv", genreIDs: genreIDs, runtime: runtime, minimumRating: minimumRating, includeAdult: includeAdult, sortBy: sortBy)
                 return try await movies + series
             }
         }
 
-        private func discoverPickForMeSingleMedia(media: String, genreIDs: Set<Int>, runtime: PickForMeRuntime?, minimumRating: Double, includeAdult: Bool) async throws -> [MediaItem] {
+        func discoverSourceMaterial(_ sourceMaterial: PickForMeSourceMaterial, filter: MediaFilter) async throws -> [MediaItem] {
+            let keywordIDs = sourceMaterial.keywordIDs
+            guard !keywordIDs.isEmpty else { return [] }
+
+            switch filter {
+            case .movie:
+                return try await discoverSourceMaterialSingleMedia(keywordIDs: keywordIDs, media: "movie")
+            case .tv:
+                return try await discoverSourceMaterialSingleMedia(keywordIDs: keywordIDs, media: "tv")
+            case .both:
+                async let movies = discoverSourceMaterialSingleMedia(keywordIDs: keywordIDs, media: "movie")
+                async let series = discoverSourceMaterialSingleMedia(keywordIDs: keywordIDs, media: "tv")
+                return try await movies + series
+            }
+        }
+
+        private func discoverSourceMaterialSingleMedia(keywordIDs: [Int], media: String) async throws -> [MediaItem] {
+            return try await fetchListPages(path: "/discover/\(media)", query: [
+                URLQueryItem(name: "sort_by", value: "vote_average.desc"),
+                URLQueryItem(name: "with_keywords", value: keywordIDs.map(String.init).joined(separator: "|")),
+                URLQueryItem(name: "include_adult", value: "false"),
+                URLQueryItem(name: "include_video", value: "false"),
+                URLQueryItem(name: "vote_count.gte", value: media == "movie" ? "80" : "50"),
+                URLQueryItem(name: "vote_average.gte", value: "5.5"),
+                URLQueryItem(name: "region", value: "US"),
+                URLQueryItem(name: "watch_region", value: "US")
+            ], pages: 2)
+        }
+
+        private func discoverPickForMeSingleMedia(media: String, genreIDs: Set<Int>, runtime: PickForMeRuntime?, minimumRating: Double, includeAdult: Bool, sortBy: String) async throws -> [MediaItem] {
             var query: [URLQueryItem] = [
-                URLQueryItem(name: "sort_by", value: "popularity.desc"),
+                URLQueryItem(name: "sort_by", value: sortBy),
                 URLQueryItem(name: "include_adult", value: includeAdult ? "true" : "false"),
                 URLQueryItem(name: "include_video", value: "false"),
                 URLQueryItem(name: "region", value: "US"),
@@ -10809,15 +11643,57 @@ private struct PickForMeOptionButton: View {
         var watched: Set<MediaKey> = []
         var ratings: [MediaKey: Double] = [:]
         var favouriteKeys: Set<MediaKey> = []
+        var neverShowAgain: Set<MediaKey> = []
         var watchedOrder: [MediaKey] = []
         var collections: [MediaCollection] = []
         var watchedEpisodes: Set<EpisodeKey> = []
+
+        private enum CodingKeys: String, CodingKey {
+            case items
+            case watchlist
+            case watched
+            case ratings
+            case favouriteKeys
+            case neverShowAgain
+            case watchedOrder
+            case collections
+            case watchedEpisodes
+        }
+
+        init() { }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            items = try container.decodeIfPresent([MediaKey: MediaItem].self, forKey: .items) ?? [:]
+            watchlist = try container.decodeIfPresent(Set<MediaKey>.self, forKey: .watchlist) ?? []
+            watched = try container.decodeIfPresent(Set<MediaKey>.self, forKey: .watched) ?? []
+            ratings = try container.decodeIfPresent([MediaKey: Double].self, forKey: .ratings) ?? [:]
+            favouriteKeys = try container.decodeIfPresent(Set<MediaKey>.self, forKey: .favouriteKeys) ?? []
+            neverShowAgain = try container.decodeIfPresent(Set<MediaKey>.self, forKey: .neverShowAgain) ?? []
+            watchedOrder = try container.decodeIfPresent([MediaKey].self, forKey: .watchedOrder) ?? []
+            collections = try container.decodeIfPresent([MediaCollection].self, forKey: .collections) ?? []
+            watchedEpisodes = try container.decodeIfPresent(Set<EpisodeKey>.self, forKey: .watchedEpisodes) ?? []
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(items, forKey: .items)
+            try container.encode(watchlist, forKey: .watchlist)
+            try container.encode(watched, forKey: .watched)
+            try container.encode(ratings, forKey: .ratings)
+            try container.encode(favouriteKeys, forKey: .favouriteKeys)
+            try container.encode(neverShowAgain, forKey: .neverShowAgain)
+            try container.encode(watchedOrder, forKey: .watchedOrder)
+            try container.encode(collections, forKey: .collections)
+            try container.encode(watchedEpisodes, forKey: .watchedEpisodes)
+        }
 
         var watchlistItems: [MediaItem] { watchlist.compactMap { items[$0] } }
         var watchedItems: [MediaItem] { watched.compactMap { items[$0] } }
 
         func isInWatchlist(_ key: MediaKey) -> Bool { watchlist.contains(key) }
         func isWatched(_ key: MediaKey) -> Bool { watched.contains(key) }
+        func isNeverShowAgain(_ key: MediaKey) -> Bool { neverShowAgain.contains(key) }
 
         mutating func toggleWatchlist(_ item: MediaItem) {
             items[item.key] = item
@@ -10890,6 +11766,15 @@ private struct PickForMeOptionButton: View {
             }
         }
 
+        mutating func toggleNeverShowAgain(_ item: MediaItem) {
+            items[item.key] = item
+            if neverShowAgain.contains(item.key) {
+                neverShowAgain.remove(item.key)
+            } else {
+                neverShowAgain.insert(item.key)
+            }
+        }
+
         mutating func clearFavourites(for filter: MediaFilter) {
             switch filter {
             case .both:
@@ -10926,6 +11811,7 @@ private struct PickForMeOptionButton: View {
         var usePlainBackground: Bool = false
         var hideAdultResults: Bool = false
         var hideAnimeResults: Bool = false
+        var hideLowestAgeRatings: Bool = false
         var hideWatchedFromHome: Bool = false
         var hideWatchedFromSearch: Bool = false
         var hideShortFilmsFromHome = false
@@ -11148,12 +12034,14 @@ private struct PickForMeOptionButton: View {
             GenreDefinition(name: "Mystery", tmdbID: 9648, iconicFilm: "Knives Out", imageURL: "https://image.tmdb.org/t/p/w780/pThyQovXQrw2m0s9x82twj48Jq4.jpg"),
             GenreDefinition(name: "Thriller", tmdbID: 53, iconicFilm: "Gone Girl", imageURL: "https://image.tmdb.org/t/p/w780/qymaJhucquUwjpb8oiqynMeXnID.jpg"),
             GenreDefinition(name: "Romance", tmdbID: 10749, iconicFilm: "Before Sunrise", imageURL: "https://image.tmdb.org/t/p/w780/kf1Jb1c2JAOqjuzA3H4oDM263uB.jpg", mediaScope: .movie),
-            GenreDefinition(name: "Family", tmdbID: 10751, iconicFilm: "Paddington", imageURL: "https://image.tmdb.org/t/p/w780/wpchRGhRhvhtU083PfX2yixXtiw.jpg", mediaScope: .movie),
+            GenreDefinition(name: "Family", tmdbID: 10751, iconicFilm: "Paddington", imageURL: "https://image.tmdb.org/t/p/w780/2M2JxEv3HSpjnZWjY9NOdGgfUd.jpg", mediaScope: .movie),
             GenreDefinition(name: "Documentary", tmdbID: 99, iconicFilm: "Free Solo", imageURL: "https://image.tmdb.org/t/p/w780/oQHF0Y4gCw6VdPmapjsbZoxY2ht.jpg"),
             GenreDefinition(name: "History", tmdbID: 36, iconicFilm: "Oppenheimer", imageURL: "https://image.tmdb.org/t/p/w780/8Gxv8gSFCU0XGDykEGv7zR1n2ua.jpg", mediaScope: .movie),
+            GenreDefinition(name: "Based on a True Story", tmdbID: 30001, iconicFilm: "The Social Network", imageURL: "https://image.tmdb.org/t/p/w780/n0ybibhJtQ5icDqTp8eRytcIHJx.jpg"),
+            GenreDefinition(name: "Based on a Book", tmdbID: 30002, iconicFilm: "The Lord of the Rings", imageURL: "https://image.tmdb.org/t/p/w780/6oom5QYQ2yQTMJIbnvbkBL9cHo6.jpg"),
+            GenreDefinition(name: "Based on a Game", tmdbID: 30003, iconicFilm: "The Last of Us", imageURL: "https://image.tmdb.org/t/p/w780/uKvVjHNqB5VmOrdxqAt2F7J78ED.jpg"),
             GenreDefinition(name: "War", tmdbID: 10752, iconicFilm: "1917", imageURL: "https://image.tmdb.org/t/p/w780/iZf0KyrE25z1sage4SYFLCCrMi9.jpg", mediaScope: .movie),
             GenreDefinition(name: "Western", tmdbID: 37, iconicFilm: "Unforgiven", imageURL: "https://image.tmdb.org/t/p/w780/yKyLJmRAtyXEEYKOvPhKHXIcPq9.jpg"),
-            GenreDefinition(name: "Kids", tmdbID: 10762, iconicFilm: "Bluey", imageURL: "https://image.tmdb.org/t/p/w780/9p4F6TA5KqMVcRbzKeO8Q7r6YpH.jpg", mediaScope: .tv),
             GenreDefinition(name: "Reality", tmdbID: 10764, iconicFilm: "The Traitors", imageURL: "https://image.tmdb.org/t/p/w780/7lD7Q3dP6tQheQw3JIgYfR3MN6Y.jpg", mediaScope: .tv),
             GenreDefinition(name: "Talk", tmdbID: 10767, iconicFilm: "Hot Ones", imageURL: "https://image.tmdb.org/t/p/w780/2n95p9isIi1LYTscTcGytlI4zYd.jpg", mediaScope: .tv),
             GenreDefinition(name: "80s", tmdbID: 1980, iconicFilm: "Back to the Future", imageURL: "https://image.tmdb.org/t/p/w780/fNOH9f1aA7XRTzl1sAOx9iF553Q.jpg"),
@@ -11472,7 +12360,45 @@ private struct PickForMeOptionButton: View {
             needles.contains { contains($0) }
         }
     }
-    
+
+    private struct LiquidGlassModifier: ViewModifier {
+        @Environment(\.colorScheme) private var colorScheme
+        let cornerRadius: CGFloat
+
+        func body(content: Content) -> some View {
+            let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+
+            if #available(iOS 26.0, *) {
+                content
+                    .padding(1)
+                    .background(.clear, in: shape)
+                    .glassEffect(.regular, in: shape)
+                    .overlay {
+                        shape.fill(colorScheme == .light ? .black.opacity(0.055) : .clear)
+                    }
+                    .overlay {
+                        shape.stroke(colorScheme == .light ? .black.opacity(0.12) : .clear, lineWidth: 1)
+                    }
+                    .clipShape(shape)
+                    .shadow(color: .black.opacity(colorScheme == .light ? 0.12 : 0.18), radius: 16, x: 0, y: 9)
+            } else {
+                content
+                    .background {
+                        shape
+                            .fill(.ultraThinMaterial)
+                            .background(
+                                shape.fill(colorScheme == .light ? .black.opacity(0.075) : .white.opacity(0.10))
+                            )
+                            .overlay {
+                                shape.stroke(colorScheme == .light ? .black.opacity(0.12) : .white.opacity(0.16), lineWidth: 1)
+                            }
+                            .shadow(color: .black.opacity(colorScheme == .light ? 0.10 : 0.22), radius: 18, x: 0, y: 10)
+                    }
+                    .clipShape(shape)
+            }
+        }
+    }
+
 #if canImport(UIKit)
     @MainActor
     private func dismissKeyboardNow() {
@@ -11613,32 +12539,8 @@ private struct PickForMeOptionButton: View {
         func appScrollTouchSafe() -> some View {
             self
         }
-        @ViewBuilder
         func liquidGlass(cornerRadius: CGFloat = 24) -> some View {
-            let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-            
-            if #available(iOS 26.0, *) {
-                self
-                    .padding(1)
-                    .background(.clear, in: shape)
-                    .glassEffect(.regular, in: shape)
-                    .clipShape(shape)
-                    .shadow(color: .black.opacity(0.18), radius: 16, x: 0, y: 9)
-            } else {
-                self
-                    .background {
-                        shape
-                            .fill(.ultraThinMaterial)
-                            .background(
-                                shape.fill(.white.opacity(0.10))
-                            )
-                            .overlay {
-                                shape.stroke(.white.opacity(0.16), lineWidth: 1)
-                            }
-                            .shadow(color: .black.opacity(0.22), radius: 18, x: 0, y: 10)
-                    }
-                    .clipShape(shape)
-            }
+            modifier(LiquidGlassModifier(cornerRadius: cornerRadius))
         }
         
         @ViewBuilder
@@ -11816,6 +12718,7 @@ private struct PickForMeOptionButton: View {
         var genrePreferences: Set<PickForMeGenrePreference> = []
         var seriousness: PickForMeSeriousness?
         var realism: PickForMeRealism?
+        var sourceMaterial: PickForMeSourceMaterial?
         var actionLevels: Set<PickForMeActionLevel> = []
         var engagement: PickForMeEngagement?
         var recommendationType: PickForMeRecommendationType?
@@ -11835,6 +12738,7 @@ private struct PickForMeOptionButton: View {
             if !genrePreferences.isEmpty { count += 1 }
             if seriousness != nil { count += 1 }
             if realism != nil { count += 1 }
+            if sourceMaterial != nil { count += 1 }
             if !actionLevels.isEmpty { count += 1 }
             if engagement != nil { count += 1 }
             if recommendationType != nil { count += 1 }
@@ -11852,10 +12756,11 @@ private struct PickForMeOptionButton: View {
             var count = 0
             if mediaFormat != nil { count += 1 }
             if !archetypes.isEmpty && !archetypes.contains(.surprise) { count += 1 }
-            if !secondaryArchetypes.isEmpty && !secondaryArchetypes.contains(.surprise) { count += 1 }
+            if !secondaryArchetypes.isEmpty && !secondaryArchetypes.contains(where: \.isAnyOption) { count += 1 }
             if !genrePreferences.isEmpty && !genrePreferences.contains(.noPreference) { count += 1 }
             if let seriousness, seriousness != .noPreference { count += 1 }
             if let realism, realism != .anything { count += 1 }
+            if let sourceMaterial, sourceMaterial != .noPreference { count += 1 }
             if !actionLevels.isEmpty && !actionLevels.contains(.noPreference) { count += 1 }
             if let engagement, engagement != .noPreference { count += 1 }
             if let recommendationType, recommendationType != .noPreference { count += 1 }
@@ -11880,10 +12785,37 @@ private struct PickForMeOptionButton: View {
         var shouldAskGoreQuestion: Bool {
             PickForMeContentRating.selectionAllowsGoreQuestion(contentRatings)
         }
+
+        var wantsDocumentary: Bool {
+            archetypes.contains(.documentary) || secondaryArchetypes.contains(.documentary)
+        }
+
+        var wantsHumanTriumph: Bool {
+            archetypes.contains(.humanTriumph) || secondaryArchetypes.contains(.humanTriumph)
+        }
+
+        var wantsStrictHistorical: Bool {
+            archetypes.contains(.historical) ||
+            secondaryArchetypes.contains(.historical)
+        }
+
+        var wantsHistoryFlavor: Bool {
+            genrePreferences.contains(.history)
+        }
+
+        var wantsHistorical: Bool {
+            wantsStrictHistorical || wantsHistoryFlavor
+        }
+
+        var wantsWar: Bool {
+            archetypes.contains(.war) ||
+            secondaryArchetypes.contains(.war) ||
+            genrePreferences.contains(.war)
+        }
     }
 
     private enum PickForMeStep: CaseIterable {
-        case format, archetype, secondaryArchetypes, genrePreferences, seriousness, realism, action, engagement, recommendationType, runtime, releaseAge, ageRating, gore, sex, minimumRating, dealBreakers
+        case format, archetype, secondaryArchetypes, genrePreferences, seriousness, realism, sourceMaterial, action, engagement, recommendationType, runtime, releaseAge, ageRating, gore, sex, minimumRating, dealBreakers
 
         static func steps(for answers: PickForMeAnswers) -> [PickForMeStep] {
             var steps: [PickForMeStep] = [
@@ -11899,6 +12831,7 @@ private struct PickForMeOptionButton: View {
                 .genrePreferences,
                 .seriousness,
                 .realism,
+                .sourceMaterial,
                 .action,
                 .engagement,
                 .recommendationType
@@ -11934,6 +12867,7 @@ private struct PickForMeOptionButton: View {
             case .genrePreferences: return "Any genre flavors you want?"
             case .seriousness: return "How serious should it be?"
             case .realism: return "How realistic should it be?"
+            case .sourceMaterial: return "Should it be based on something?"
             case .action: return "How much action do you want?"
             case .engagement: return "How mentally engaging should it be?"
             case .recommendationType: return "What type of recommendation do you want?"
@@ -11950,18 +12884,22 @@ private struct PickForMeOptionButton: View {
         var subtitle: String? {
             switch self {
             case .format: return "Choose one."
-            case .archetype: return "Choose one. This carries the most weight in the recommendation."
-            case .secondaryArchetypes: return "Choose any number. These help, but carry less weight than the main answer."
-            case .genrePreferences: return "These are light boosts, not strict filters."
+            case .archetype: return "Choose one. Documentary is a strict filter; Historical means stories about historical events."
+            case .secondaryArchetypes: return "Choose any number, or choose no preference. Documentary is strict; Historical means stories about historical events."
+            case .genrePreferences: return "These are light boosts. History only nudges older true-event stories upward."
+            case .seriousness: return "This is a ranking preference, not a strict filter."
+            case .realism: return "Real-world only is a strict filter. The other answers are ranking preferences."
+            case .sourceMaterial: return "Strict filter. Choose no preference if the source does not matter."
+            case .action: return "This is a ranking preference, not a strict filter."
             case .engagement: return "Easy viewing means relaxed. Fully focused means something more demanding."
+            case .recommendationType: return "This changes ranking and candidate sources, not a hard filter."
             case .runtime: return "Runtime filters out movies outside the time window you choose."
-            case .releaseAge: return "Release age filters out titles older than the window you choose."
-            case .ageRating: return "Choose any number. R and higher also allow lower ratings."
-            case .gore: return "This appears when you allow Any Rating, R, or NC-17."
-            case .sex: return "This appears with the gore question for mature ratings."
-            case .minimumRating: return "Uses IMDb when available."
-            case .dealBreakers: return "Multiple answers are possible. Leave this blank if none apply."
-            default: return nil
+            case .releaseAge: return "Release age is a strict filter, not a ranking boost."
+            case .ageRating: return "This is a maximum rating filter when data is available. Missing data is penalized."
+            case .gore: return "This is a ranking preference, not a strict filter."
+            case .sex: return "This is a ranking preference, not a strict filter."
+            case .minimumRating: return "Strong rating preference. Uses IMDb when available."
+            case .dealBreakers: return "Strict filters. Choose none if nothing applies."
             }
         }
     }
@@ -11999,7 +12937,7 @@ private struct PickForMeOptionButton: View {
     }
 
     private enum PickForMeArchetype: String, CaseIterable, PickForMeOption {
-        case feelGood, comedy, mystery, thriller, smartProblems, mission, heist, adventure, characterRelationships, historical, epicSpectacle, mindBending, horror, thoughtfulSciFi, surprise
+        case feelGood, comedy, mystery, thriller, smartProblems, mission, heist, adventure, characterRelationships, humanTriumph, documentary, historical, war, epicSpectacle, mindBending, horror, thoughtfulSciFi, surprise, noPreference
         var id: String { rawValue }
         var title: String {
             switch self {
@@ -12012,12 +12950,16 @@ private struct PickForMeOptionButton: View {
             case .heist: return "Heist"
             case .adventure: return "Adventure"
             case .characterRelationships: return "Character and Relationships"
-            case .historical: return "Historical / Real Events"
+            case .humanTriumph: return "Human Triumph"
+            case .documentary: return "Documentary"
+            case .historical: return "Historical"
+            case .war: return "War"
             case .epicSpectacle: return "Epic / Spectacle"
             case .mindBending: return "Mind-Bending"
             case .horror: return "Horror"
             case .thoughtfulSciFi: return "Thought-Provoking Sci-Fi"
             case .surprise: return "Surprise me"
+            case .noPreference: return "No preference"
             }
         }
         var subtitle: String? {
@@ -12031,15 +12973,19 @@ private struct PickForMeOptionButton: View {
             case .heist: return "A robbery, con, caper, theft, or elaborate scheme."
             case .adventure: return "Exploration, discovery, and excitement."
             case .characterRelationships: return "Relationships, family dynamics, and personal growth."
-            case .historical: return "Real people, true events, or historical periods."
+            case .humanTriumph: return "Overcoming hurdles, resilience, achievement, or against-the-odds stories."
+            case .documentary: return "Nonfiction, real subjects, and factual storytelling."
+            case .historical: return "Fiction or nonfiction about a historical event."
+            case .war: return "War, combat, military conflict, or wartime survival."
             case .epicSpectacle: return "Scale, visuals, action, and world-building."
             case .mindBending: return "Twists, puzzles, unusual structure, or reality-questioning stories."
             case .horror: return "Fear, dread, terror, or psychological discomfort."
             case .thoughtfulSciFi: return "Idea-driven science fiction, ethics, technology, or consciousness."
             case .surprise: return "Let the app lean on your history and strong ratings."
+            case .noPreference: return nil
             }
         }
-        var isAnyOption: Bool { self == .surprise }
+        var isAnyOption: Bool { self == .surprise || self == .noPreference }
     }
 
     private enum PickForMeSeriousness: String, CaseIterable, PickForMeOption {
@@ -12080,17 +13026,40 @@ private struct PickForMeOptionButton: View {
     }
 
     private enum PickForMeRealism: String, CaseIterable, PickForMeOption {
-        case realWorld, mostlyRealistic, someSpeculative, anything
+        case realWorld, mostlyRealistic, someSpeculative, completelyFictional, anything
         var id: String { rawValue }
         var title: String {
             switch self {
             case .realWorld: return "Real-world only"
             case .mostlyRealistic: return "Mostly realistic"
             case .someSpeculative: return "Some sci-fi or fantasy"
+            case .completelyFictional: return "Completely fictional"
             case .anything: return "No preference"
             }
         }
         var isAnyOption: Bool { self == .anything }
+    }
+
+    private enum PickForMeSourceMaterial: String, CaseIterable, PickForMeOption {
+        case trueStory, book, game, noPreference
+        var id: String { rawValue }
+        var title: String {
+            switch self {
+            case .trueStory: return "Based on a true story"
+            case .book: return "Based on a book"
+            case .game: return "Based on a game"
+            case .noPreference: return "No preference"
+            }
+        }
+        var isAnyOption: Bool { self == .noPreference }
+        var keywordIDs: [Int] {
+            switch self {
+            case .trueStory: return [9672]
+            case .book: return [818]
+            case .game: return [41645]
+            case .noPreference: return []
+            }
+        }
     }
 
     private enum PickForMeActionLevel: String, CaseIterable, PickForMeOption {
@@ -12192,10 +13161,11 @@ private struct PickForMeOptionButton: View {
     }
 
     private enum PickForMeReleaseAge: String, CaseIterable, PickForMeOption {
-        case lastFiveYears, olderThanFiveYears, lastTenYears, olderThanTenYears, lastTwentyFiveYears, olderThanTwentyFiveYears, noPreference
+        case newReleases, lastFiveYears, olderThanFiveYears, lastTenYears, olderThanTenYears, lastTwentyFiveYears, olderThanTwentyFiveYears, noPreference
         var id: String { rawValue }
         var title: String {
             switch self {
+            case .newReleases: return "New releases"
             case .lastFiveYears: return "Last 5 years"
             case .olderThanFiveYears: return "Older than 5 years"
             case .lastTenYears: return "Last 10 years"
@@ -12211,7 +13181,7 @@ private struct PickForMeOptionButton: View {
             case .olderThanFiveYears: return 5
             case .olderThanTenYears: return 10
             case .olderThanTwentyFiveYears: return 25
-            case .lastFiveYears, .lastTenYears, .lastTwentyFiveYears, .noPreference: return nil
+            case .newReleases, .lastFiveYears, .lastTenYears, .lastTwentyFiveYears, .noPreference: return nil
             }
         }
         var maximumYearsOld: Int? {
@@ -12219,7 +13189,7 @@ private struct PickForMeOptionButton: View {
             case .lastFiveYears: return 5
             case .lastTenYears: return 10
             case .lastTwentyFiveYears: return 25
-            case .olderThanFiveYears, .olderThanTenYears, .olderThanTwentyFiveYears, .noPreference: return nil
+            case .newReleases, .olderThanFiveYears, .olderThanTenYears, .olderThanTwentyFiveYears, .noPreference: return nil
             }
         }
     }
@@ -12264,25 +13234,6 @@ private struct PickForMeOptionButton: View {
             selection.contains(.any) || selection.contains(.r) || selection.contains(.nc17)
         }
 
-        static func preferenceScore(selection: Set<PickForMeContentRating>, rating rawRating: String) -> Double {
-            guard !selection.contains(.any),
-                  let actualRank = rank(for: rawRating),
-                  let closestDistance = selection
-                    .map(\.maturityRank)
-                    .filter({ actualRank <= $0 })
-                    .map({ $0 - actualRank })
-                    .min()
-            else {
-                return 0
-            }
-
-            switch closestDistance {
-            case 0: return 1.5
-            case 1: return 0.9
-            case 2: return 0.4
-            default: return 0.15
-            }
-        }
         private static func rank(for rawRating: String) -> Int? {
             let normalized = rawRating.uppercased().replacingOccurrences(of: "_", with: "-")
             switch normalized {
@@ -12321,16 +13272,18 @@ private struct PickForMeOptionButton: View {
     }
 
     private enum PickForMeDealBreaker: String, CaseIterable, PickForMeOption {
-        case horror, romanceHeavy, animation, superhero, verySad, foreignLanguage, longRuntime, none
+        case horror, romanceHeavy, animation, documentary, war, superhero, verySad, foreignLanguage, longRuntime, none
         var id: String { rawValue }
         var title: String {
             switch self {
             case .horror: return "Horror"
             case .romanceHeavy: return "Romance-heavy"
             case .animation: return "Animation"
+            case .documentary: return "Documentary"
+            case .war: return "War"
             case .superhero: return "Superhero"
             case .verySad: return "Very sad"
-            case .foreignLanguage: return "Foreign language"
+            case .foreignLanguage: return "Foreign language (not English)"
             case .longRuntime: return "Long runtime (180+ minutes)"
             case .none: return "None"
             }
@@ -12418,8 +13371,39 @@ private extension Array where Element == MediaCollection {
         }
     }
     
+    private enum ExportFormat: String, CaseIterable, Identifiable {
+        case text
+        case csv
+
+        var id: String { rawValue }
+        var title: String {
+            switch self {
+            case .text: return ".txt"
+            case .csv: return ".csv"
+            }
+        }
+        var separator: String {
+            switch self {
+            case .text: return "\n"
+            case .csv: return ", "
+            }
+        }
+        var contentType: UTType {
+            switch self {
+            case .text: return .plainText
+            case .csv: return .commaSeparatedText
+            }
+        }
+        var filename: String {
+            switch self {
+            case .text: return "Vestigo Watched"
+            case .csv: return "Vestigo Watched CSV"
+            }
+        }
+    }
+
     private struct ExportDocument: FileDocument {
-        static var readableContentTypes: [UTType] { [.plainText] }
+        static var readableContentTypes: [UTType] { [.plainText, .commaSeparatedText] }
         var text: String
         init(text: String = "") { self.text = text }
         init(configuration: ReadConfiguration) throws { text = String(data: configuration.file.regularFileContents ?? Data(), encoding: .utf8) ?? "" }
