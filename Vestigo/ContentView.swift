@@ -9,6 +9,9 @@ typealias PlatformImage = NSImage
 import Foundation
 import Combine
 import UniformTypeIdentifiers
+#if canImport(WebKit)
+import WebKit
+#endif
 
 private let pickForMeHistoricalTrueEventSignals: [String] = [
     "true story",
@@ -629,6 +632,7 @@ private final class VestigoModel: ObservableObject {
     @Published var detailsCache: [MediaKey: MediaDetail] = [:]
     @Published var externalRatingsCache: [MediaKey: ExternalRatings] = [:]
     @Published var providerCache: [MediaKey: [StreamingOption]] = [:]
+    @Published var relatedMediaCache: [MediaKey: [RelatedMediaSection]] = [:]
     @Published var personCreditsCache: [Int: [MediaItem]] = [:]
     @Published var personDetails: [Int: PersonDetail] = [:]
     @Published var collectionRecommendations: [UUID: [MediaItem]] = [:]
@@ -658,6 +662,7 @@ private final class VestigoModel: ObservableObject {
     private let tmdb = TMDbService()
     private let tasteDive = TasteDiveService()
     private let streaming = StreamingAvailabilityService()
+    private let relatedMedia = RelatedMediaService()
     private let backend = VestigoBackendClient()
     private let externalRatingBatchLimit = 24
     private let externalRatingSessionLimit = 200
@@ -2450,9 +2455,26 @@ private final class VestigoModel: ObservableObject {
         await loadExternalRatings(item, priority: true)
         if providerCache[item.key] == nil {
             do {
-                providerCache[item.key] = try await streaming.providers(for: item)
+                let pricedProviders = try await streaming.providers(for: item)
+                if pricedProviders.isEmpty, let tmdbProviders = detailsCache[item.key]?.tmdbProviders, !tmdbProviders.isEmpty {
+                    providerCache[item.key] = tmdbProviders
+                } else {
+                    providerCache[item.key] = pricedProviders
+                }
             } catch {
-                providerCache[item.key] = []
+                providerCache[item.key] = detailsCache[item.key]?.tmdbProviders ?? []
+            }
+        }
+        if relatedMediaCache[item.key] == nil {
+            guard let imdbID = detailsCache[item.key]?.imdbID else {
+                relatedMediaCache[item.key] = []
+                return
+            }
+
+            do {
+                relatedMediaCache[item.key] = try await relatedMedia.sections(imdbID: imdbID)
+            } catch {
+                relatedMediaCache[item.key] = []
             }
         }
     }
@@ -7143,7 +7165,13 @@ private struct PickForMeOptionButton: View {
         @State private var isPosterPreviewPresented = false
         
         private var detail: MediaDetail? { model.detailsCache[item.key] }
-        private var providers: [StreamingOption] { model.providerCache[item.key] ?? [] }
+        private var providers: [StreamingOption]? { model.providerCache[item.key] }
+        private var visibleProviders: [StreamingOption]? {
+            providers?.filter { provider in
+                !provider.serviceName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            }
+        }
+        private var relatedMediaSections: [RelatedMediaSection] { model.relatedMediaCache[item.key] ?? [] }
         private var externalRatings: ExternalRatings? { model.externalRatingsCache[item.key] }
         
         private var selectedPersonBinding: Binding<PersonSummary?> {
@@ -7204,7 +7232,10 @@ private struct PickForMeOptionButton: View {
                     castSection
                     episodeSection
                     similarSection
+                    trailerSection
                     providersSection
+                    relatedMediaSection
+                    soundtrackSection
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .contentShape(Rectangle())
@@ -7389,6 +7420,12 @@ private struct PickForMeOptionButton: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
+
+        @ViewBuilder private var trailerSection: some View {
+            if let trailer = detail?.primaryTrailer {
+                TrailerPlayerCard(trailer: trailer)
+            }
+        }
         
         private struct DetailRowButton: View {
             let title: String
@@ -7426,7 +7463,7 @@ private struct PickForMeOptionButton: View {
         
         @ViewBuilder private var episodeSection: some View {
             if item.kind == .tv {
-                EpisodeProgressView(show: item, model: model, seasons: detail?.seasons ?? [])
+                EpisodeProgressView(show: item, model: model, seasons: detail?.seasons ?? [], isLoading: detail == nil)
             }
         }
         
@@ -7449,15 +7486,41 @@ private struct PickForMeOptionButton: View {
             if item.isUpcoming {
                 StatusBubble(title: "Theatrical status", text: "This release is upcoming. Streaming availability may not exist yet.")
             }
-            if providers.isEmpty {
+            if providers == nil {
+                LoadingBubble(title: "Checking availability", text: "Loading US streaming options and prices.")
+            } else if visibleProviders?.isEmpty != false {
                 StatusBubble(title: "No streaming prices found", text: "No US provider data with price and quality was returned for this title.")
             }
         }
         
-        private var providerRows: some View {
-            ForEach(providers.prefix(12)) { provider in
-                ProviderRow(option: provider)
+        @ViewBuilder private var providerRows: some View {
+            if let visibleProviders, !visibleProviders.isEmpty {
+                ForEach(visibleProviders.prefix(12)) { provider in
+                    ProviderRow(option: provider)
+                }
             }
+        }
+
+        @ViewBuilder private var relatedMediaSection: some View {
+            if !relatedMediaSections.isEmpty {
+                VStack(alignment: .leading, spacing: 18) {
+                    ForEach(relatedMediaSections) { section in
+                        RelatedMediaCarousel(section: section)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+
+        @ViewBuilder private var soundtrackSection: some View {
+            if item.kind == .movie || item.kind == .tv {
+                SoundtrackLinksView(query: soundtrackSearchQuery)
+            }
+        }
+
+        private var soundtrackSearchQuery: String {
+            let year = item.releaseYearText == "TBA" ? "" : " \(item.releaseYearText)"
+            return "\(item.title)\(year) soundtrack"
         }
         
         private var detailMetadataLine: String {
@@ -7493,6 +7556,426 @@ private struct PickForMeOptionButton: View {
         }
     }
     
+    private struct TrailerPlayerCard: View {
+        let trailer: TrailerVideo
+
+        var body: some View {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Trailer")
+                    .sectionTitle()
+
+                YouTubeTrailerPlayer(videoKey: trailer.key, title: trailer.displayTitle)
+                    .aspectRatio(16 / 9, contentMode: .fit)
+                    .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            .stroke(.white.opacity(0.12), lineWidth: 1)
+                    }
+
+                Text(trailer.displayTitle)
+                    .font(.caption.bold())
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    #if canImport(WebKit)
+    #if os(macOS)
+    private struct YouTubeTrailerPlayer: NSViewRepresentable {
+        let videoKey: String
+        let title: String
+
+        func makeNSView(context: Context) -> WKWebView {
+            let webView = WKWebView(frame: .zero, configuration: webViewConfiguration)
+            webView.setValue(false, forKey: "drawsBackground")
+            webView.loadHTMLString(html, baseURL: URL(string: "https://www.youtube-nocookie.com"))
+            return webView
+        }
+
+        func updateNSView(_ webView: WKWebView, context: Context) {
+            webView.loadHTMLString(html, baseURL: URL(string: "https://www.youtube-nocookie.com"))
+        }
+    }
+    #else
+    private struct YouTubeTrailerPlayer: UIViewRepresentable {
+        let videoKey: String
+        let title: String
+
+        func makeUIView(context: Context) -> WKWebView {
+            let webView = WKWebView(frame: .zero, configuration: webViewConfiguration)
+            webView.backgroundColor = .clear
+            webView.isOpaque = false
+            webView.scrollView.isScrollEnabled = false
+            webView.loadHTMLString(html, baseURL: URL(string: "https://www.youtube-nocookie.com"))
+            return webView
+        }
+
+        func updateUIView(_ webView: WKWebView, context: Context) {
+            webView.loadHTMLString(html, baseURL: URL(string: "https://www.youtube-nocookie.com"))
+        }
+    }
+    #endif
+
+    private extension YouTubeTrailerPlayer {
+        var webViewConfiguration: WKWebViewConfiguration {
+            let configuration = WKWebViewConfiguration()
+            configuration.allowsInlineMediaPlayback = true
+            #if os(iOS)
+            configuration.mediaTypesRequiringUserActionForPlayback = []
+            #endif
+            return configuration
+        }
+
+        var html: String {
+            let escapedTitle = title
+                .replacingOccurrences(of: "&", with: "&amp;")
+                .replacingOccurrences(of: "\"", with: "&quot;")
+                .replacingOccurrences(of: "<", with: "&lt;")
+                .replacingOccurrences(of: ">", with: "&gt;")
+
+            return """
+            <!doctype html>
+            <html>
+            <head>
+                <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+                <style>
+                    html, body {
+                        margin: 0;
+                        padding: 0;
+                        width: 100%;
+                        height: 100%;
+                        overflow: hidden;
+                        background: #000;
+                    }
+                    iframe {
+                        border: 0;
+                        width: 100%;
+                        height: 100%;
+                    }
+                </style>
+            </head>
+            <body>
+                <iframe
+                    title="\(escapedTitle)"
+                    src="https://www.youtube-nocookie.com/embed/\(videoKey)?playsinline=1&rel=0&modestbranding=1"
+                    allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                    allowfullscreen>
+                </iframe>
+            </body>
+            </html>
+            """
+        }
+    }
+    #else
+    private struct YouTubeTrailerPlayer: View {
+        let videoKey: String
+        let title: String
+
+        var body: some View {
+            StatusBubble(title: "Trailer unavailable", text: "This platform cannot display embedded web video.")
+        }
+    }
+    #endif
+
+    private struct RelatedMediaCarousel: View {
+        let section: RelatedMediaSection
+
+        var body: some View {
+            VStack(alignment: .leading, spacing: 12) {
+                Text(section.title)
+                    .sectionTitle()
+
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(alignment: .top, spacing: 14) {
+                        ForEach(section.items) { item in
+                            RelatedMediaCard(item: item)
+                        }
+                    }
+                    .padding(.vertical, 6)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .scrollClipDisabled()
+                .scrollIndicators(.hidden)
+                .scrollViewTouchTuning(axis: .horizontal)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private struct RelatedMediaCard: View {
+        let item: RelatedMediaItem
+
+        var body: some View {
+            Link(destination: item.linkURL) {
+                VStack(alignment: .leading, spacing: 6) {
+                    RelatedMediaImageView(url: item.imageURLValue)
+
+                    Text(item.title)
+                        .font(.subheadline.bold())
+                        .foregroundStyle(.primary)
+                        .lineLimit(2)
+                        .frame(width: 132, alignment: .topLeading)
+
+                    if !item.description.isEmpty {
+                        Text(item.description)
+                            .font(.caption2.bold())
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                            .frame(width: 132, alignment: .topLeading)
+                    }
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .frame(width: 132, alignment: .topLeading)
+        }
+    }
+
+    private struct RelatedMediaImageView: View {
+        let url: URL?
+
+        var body: some View {
+            ZStack {
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    .fill(.white.opacity(0.10))
+
+                AsyncImage(url: url) { phase in
+                    switch phase {
+                    case .success(let image):
+                        image
+                            .resizable()
+                            .scaledToFill()
+                    default:
+                        Image(systemName: "book.closed")
+                            .font(.system(size: 28, weight: .bold))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .frame(width: 132, height: 176)
+            .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    .stroke(.white.opacity(0.12), lineWidth: 1)
+            }
+        }
+    }
+
+    private struct SoundtrackLinksView: View {
+        let query: String
+        @State private var availablePlatforms: [SoundtrackPlatform]?
+
+        var body: some View {
+            Group {
+                if let availablePlatforms, !availablePlatforms.isEmpty {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("Soundtrack")
+                            .sectionTitle()
+
+                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 10)], spacing: 10) {
+                            ForEach(availablePlatforms) { platform in
+                                if let url = platform.searchURL(for: query) {
+                                    Link(destination: url) {
+                                        HStack(spacing: 10) {
+                                            SoundtrackPlatformLogoView(platform: platform)
+
+                                            Text(platform.title)
+                                                .font(.subheadline.bold())
+                                                .lineLimit(1)
+                                                .minimumScaleFactor(0.78)
+                                                .foregroundStyle(.primary)
+                                        }
+                                        .frame(maxWidth: .infinity)
+                                        .frame(height: 44)
+                                        .liquidGlass(cornerRadius: 22)
+                                        .contentShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                            }
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+            .task(id: query) {
+                availablePlatforms = await SoundtrackAvailabilityService.availablePlatforms(for: query)
+            }
+        }
+    }
+
+    private struct SoundtrackPlatformLogoView: View {
+        let platform: SoundtrackPlatform
+
+        var body: some View {
+            AsyncImage(url: platform.logoURL) { phase in
+                switch phase {
+                case .success(let image):
+                    image
+                        .resizable()
+                        .scaledToFit()
+                default:
+                    Text(platform.shortTitle)
+                        .font(.caption2.bold())
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .frame(width: 26, height: 26)
+        }
+    }
+
+    private enum SoundtrackPlatform: String, CaseIterable, Identifiable {
+        case appleMusic
+        case deezer
+
+        var id: String { rawValue }
+
+        var title: String {
+            switch self {
+            case .appleMusic:
+                return "Apple Music"
+            case .deezer:
+                return "Deezer"
+            }
+        }
+
+        var shortTitle: String {
+            switch self {
+            case .appleMusic:
+                return "AM"
+            case .deezer:
+                return "DZ"
+            }
+        }
+
+        var logoURL: URL? {
+            let domain: String
+            switch self {
+            case .appleMusic:
+                domain = "music.apple.com"
+            case .deezer:
+                domain = "deezer.com"
+            }
+
+            var components = URLComponents(string: "https://www.google.com/s2/favicons")
+            components?.queryItems = [
+                URLQueryItem(name: "sz", value: "128"),
+                URLQueryItem(name: "domain", value: domain)
+            ]
+            return components?.url
+        }
+
+        func searchURL(for query: String) -> URL? {
+            switch self {
+            case .appleMusic:
+                var components = URLComponents(string: "https://music.apple.com/us/search")
+                components?.queryItems = [URLQueryItem(name: "term", value: query)]
+                return components?.url
+            case .deezer:
+                let encodedPath = query.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? query
+                return URL(string: "https://www.deezer.com/search/\(encodedPath)")
+            }
+        }
+    }
+
+    private struct SoundtrackAvailabilityService {
+        static func availablePlatforms(for query: String) async -> [SoundtrackPlatform] {
+            await withTaskGroup(of: SoundtrackPlatform?.self) { group in
+                group.addTask {
+                    await hasAppleMusicAlbum(for: query) ? .appleMusic : nil
+                }
+                group.addTask {
+                    await hasDeezerAlbum(for: query) ? .deezer : nil
+                }
+
+                var platforms: [SoundtrackPlatform] = []
+                for await platform in group {
+                    if let platform {
+                        platforms.append(platform)
+                    }
+                }
+
+                let order = Dictionary(uniqueKeysWithValues: SoundtrackPlatform.allCases.enumerated().map { ($0.element, $0.offset) })
+                return platforms.sorted { (order[$0] ?? 0) < (order[$1] ?? 0) }
+            }
+        }
+
+        private static func hasAppleMusicAlbum(for query: String) async -> Bool {
+            var components = URLComponents(string: "https://itunes.apple.com/search")
+            components?.queryItems = [
+                URLQueryItem(name: "term", value: query),
+                URLQueryItem(name: "media", value: "music"),
+                URLQueryItem(name: "entity", value: "album"),
+                URLQueryItem(name: "limit", value: "6")
+            ]
+            guard let url = components?.url else { return false }
+
+            do {
+                let response: AppleMusicSearchResponse = try await fetch(url)
+                return response.results.contains { result in
+                    result.collectionName.normalizedSoundtrackSearchText.containsSoundtrackSignal
+                }
+            } catch {
+                return false
+            }
+        }
+
+        private static func hasDeezerAlbum(for query: String) async -> Bool {
+            var components = URLComponents(string: "https://api.deezer.com/search/album")
+            components?.queryItems = [
+                URLQueryItem(name: "q", value: query),
+                URLQueryItem(name: "limit", value: "6")
+            ]
+            guard let url = components?.url else { return false }
+
+            do {
+                let response: DeezerAlbumSearchResponse = try await fetch(url)
+                return response.data.contains { album in
+                    album.title.normalizedSoundtrackSearchText.containsSoundtrackSignal
+                }
+            } catch {
+                return false
+            }
+        }
+
+        private static func fetch<Response: Decodable>(_ url: URL) async throws -> Response {
+            let (data, response) = try await URLSession.shared.data(from: url)
+            if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+                throw URLError(.badServerResponse)
+            }
+            return try JSONDecoder().decode(Response.self, from: data)
+        }
+    }
+
+    private struct AppleMusicSearchResponse: Decodable {
+        let results: [AppleMusicAlbumResult]
+    }
+
+    private struct AppleMusicAlbumResult: Decodable {
+        let collectionName: String
+    }
+
+    private struct DeezerAlbumSearchResponse: Decodable {
+        let data: [DeezerAlbumResult]
+    }
+
+    private struct DeezerAlbumResult: Decodable {
+        let title: String
+    }
+
+    private extension String {
+        var normalizedSoundtrackSearchText: String {
+            folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+                .lowercased()
+        }
+
+        var containsSoundtrackSignal: Bool {
+            contains("soundtrack") || contains("original motion picture") || contains("original series")
+        }
+    }
+
     
     private struct CastCarousel: View {
         let people: [PersonSummary]
@@ -7875,6 +8358,7 @@ private struct PickForMeOptionButton: View {
         let show: MediaItem
         @ObservedObject var model: VestigoModel
         let seasons: [SeasonInfo]
+        let isLoading: Bool
         @State private var expandedSeasonNumbers = Set<Int>()
         
         var body: some View {
@@ -7884,7 +8368,9 @@ private struct PickForMeOptionButton: View {
                 
                 let usableSeasons = seasons.filter { $0.number > 0 }
                 
-                if usableSeasons.isEmpty {
+                if isLoading {
+                    LoadingBubble(title: "Loading episodes", text: "Fetching season and episode data from TMDb.")
+                } else if usableSeasons.isEmpty {
                     StatusBubble(title: "No episode data", text: "TMDb did not return season or episode information for this series.")
                 } else {
                     VStack(spacing: 10) {
@@ -9315,6 +9801,31 @@ private struct PickForMeOptionButton: View {
             .appScrollTouchSafe()
         }
     }
+
+    private struct LoadingBubble: View {
+        let title: String
+        let text: String
+
+        var body: some View {
+            HStack(alignment: .top, spacing: 12) {
+                ProgressView()
+                    .controlSize(.small)
+                    .tint(.primary)
+                    .padding(.top, 2)
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(title).font(.headline.bold())
+                    Text(text).font(.subheadline).foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(minHeight: 72, alignment: .leading)
+            .padding(14)
+            .liquidGlass(cornerRadius: 22)
+            .appScrollTouchSafe()
+        }
+    }
     
     private struct AppBackground: View {
         let settings: AppSettings
@@ -10006,8 +10517,8 @@ private struct PickForMeOptionButton: View {
             let response: TMDbDetailResponse = try await fetch(path: "/\(item.kind.tmdbPath)/\(item.id)", query: [URLQueryItem(
                 name: "append_to_response",
                 value: item.kind == .movie
-                ? "credits,similar,recommendations,keywords,watch/providers,release_dates"
-                : "credits,similar,recommendations,keywords,watch/providers,content_ratings"
+                ? "credits,similar,recommendations,keywords,watch/providers,release_dates,videos,external_ids"
+                : "credits,similar,recommendations,keywords,watch/providers,content_ratings,videos,external_ids"
             )])
             
             guard item.kind == .tv else {
@@ -10131,6 +10642,72 @@ private struct PickForMeOptionButton: View {
     private struct TasteDiveSimilarResponse: Decodable {
         let ok: Bool
         let results: [String]
+    }
+
+    private struct RelatedMediaService {
+        private let endpoint = URL(string: "https://query.wikidata.org/sparql")!
+
+        func sections(imdbID: String) async throws -> [RelatedMediaSection] {
+            let cleanedID = imdbID.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard cleanedID.hasPrefix("tt") else { return [] }
+
+            var components = URLComponents(url: endpoint, resolvingAgainstBaseURL: false)!
+            components.queryItems = [
+                URLQueryItem(name: "query", value: sparqlQuery(imdbID: cleanedID)),
+                URLQueryItem(name: "format", value: "json")
+            ]
+
+            guard let url = components.url else { throw URLError(.badURL) }
+            var request = URLRequest(url: url)
+            request.setValue("application/sparql-results+json", forHTTPHeaderField: "Accept")
+
+            let (data, response) = try await URLSession.shared.data(for: request)
+            if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+                throw URLError(.badServerResponse)
+            }
+
+            let decoded = try JSONDecoder().decode(WikidataSPARQLResponse.self, from: data)
+            let items = decoded.results.bindings.compactMap(RelatedMediaItem.init(binding:))
+            return RelatedMediaSection.sections(from: items)
+        }
+
+        private func sparqlQuery(imdbID: String) -> String {
+            """
+            SELECT ?relation ?item ?itemLabel ?itemDescription ?image ?article WHERE {
+              ?work wdt:P345 "\(imdbID)" .
+              ?work wdt:P144 ?item .
+              BIND("original" AS ?relation)
+              OPTIONAL { ?item wdt:P18 ?image . }
+              OPTIONAL {
+                ?article schema:about ?item ;
+                         schema:isPartOf <https://en.wikipedia.org/> .
+              }
+              SERVICE wikibase:label { bd:serviceParam wikibase:language "en". }
+            }
+            LIMIT 30
+            """
+        }
+    }
+
+    private struct WikidataSPARQLResponse: Decodable {
+        let results: WikidataSPARQLResults
+    }
+
+    private struct WikidataSPARQLResults: Decodable {
+        let bindings: [WikidataRelatedMediaBinding]
+    }
+
+    private struct WikidataRelatedMediaBinding: Decodable {
+        let relation: WikidataSPARQLValue
+        let item: WikidataSPARQLValue
+        let itemLabel: WikidataSPARQLValue
+        let itemDescription: WikidataSPARQLValue?
+        let image: WikidataSPARQLValue?
+        let article: WikidataSPARQLValue?
+    }
+
+    private struct WikidataSPARQLValue: Decodable {
+        let value: String
     }
 
     private struct StreamingAvailabilityService {
@@ -10274,6 +10851,9 @@ private struct PickForMeOptionButton: View {
         let contentRatings: TMDbContentRatingsResponse?
         let belongsToCollection: TMDbCollectionReference?
         let keywords: TMDbKeywordsResponse?
+        let videos: TMDbVideosResponse?
+        let externalIDs: TMDbExternalIDsResponse?
+        let watchProviders: TMDbWatchProvidersResponse?
         
         enum CodingKeys: String, CodingKey {
             case runtime
@@ -10291,6 +10871,9 @@ private struct PickForMeOptionButton: View {
             case contentRatings = "content_ratings"
             case belongsToCollection = "belongs_to_collection"
             case keywords
+            case videos
+            case externalIDs = "external_ids"
+            case watchProviders = "watch/providers"
         }
         
         init(
@@ -10308,7 +10891,10 @@ private struct PickForMeOptionButton: View {
             releaseDates: TMDbReleaseDatesResponse?,
             contentRatings: TMDbContentRatingsResponse?,
             belongsToCollection: TMDbCollectionReference?,
-            keywords: TMDbKeywordsResponse?
+            keywords: TMDbKeywordsResponse?,
+            videos: TMDbVideosResponse?,
+            externalIDs: TMDbExternalIDsResponse?,
+            watchProviders: TMDbWatchProvidersResponse?
         ) {
             self.runtime = runtime
             self.numberOfSeasons = numberOfSeasons
@@ -10325,6 +10911,9 @@ private struct PickForMeOptionButton: View {
             self.contentRatings = contentRatings
             self.belongsToCollection = belongsToCollection
             self.keywords = keywords
+            self.videos = videos
+            self.externalIDs = externalIDs
+            self.watchProviders = watchProviders
         }
         
         func replacingSeasons(_ hydratedSeasons: [SeasonDTO]) -> TMDbDetailResponse {
@@ -10343,7 +10932,10 @@ private struct PickForMeOptionButton: View {
                 releaseDates: releaseDates,
                 contentRatings: contentRatings,
                 belongsToCollection: belongsToCollection,
-                keywords: keywords
+                keywords: keywords,
+                videos: videos,
+                externalIDs: externalIDs,
+                watchProviders: watchProviders
             )
         }
         
@@ -10380,6 +10972,76 @@ private struct PickForMeOptionButton: View {
     private struct TMDbKeyword: Decodable, Hashable {
         let id: Int
         let name: String
+    }
+
+    private struct TMDbVideosResponse: Decodable {
+        let results: [TMDbVideoDTO]
+    }
+
+    private struct TMDbVideoDTO: Decodable, Hashable {
+        let id: String
+        let key: String
+        let name: String
+        let site: String
+        let type: String
+        let official: Bool?
+        let publishedAt: String?
+
+        enum CodingKeys: String, CodingKey {
+            case id, key, name, site, type, official
+            case publishedAt = "published_at"
+        }
+    }
+
+    private struct TMDbExternalIDsResponse: Decodable, Hashable {
+        let imdbID: String?
+
+        enum CodingKeys: String, CodingKey {
+            case imdbID = "imdb_id"
+        }
+    }
+
+    private struct TMDbWatchProvidersResponse: Decodable, Hashable {
+        let results: [String: TMDbWatchProviderRegion]
+
+        var usStreamingOptions: [StreamingOption] {
+            guard let region = results["US"] ?? results["us"] else { return [] }
+
+            let groups: [(type: String, price: String, providers: [TMDbWatchProvider])] = [
+                ("subscription", "Included", region.flatrate ?? []),
+                ("free", "Free", region.free ?? []),
+                ("rent", "", region.rent ?? []),
+                ("buy", "", region.buy ?? [])
+            ]
+
+            return groups.flatMap { group in
+                group.providers.map { provider in
+                    StreamingOption(
+                        serviceName: provider.providerName,
+                        type: group.type,
+                        priceText: group.price,
+                        qualityText: "",
+                        openURL: region.link
+                    )
+                }
+            }
+        }
+    }
+
+    private struct TMDbWatchProviderRegion: Decodable, Hashable {
+        let link: String?
+        let flatrate: [TMDbWatchProvider]?
+        let free: [TMDbWatchProvider]?
+        let rent: [TMDbWatchProvider]?
+        let buy: [TMDbWatchProvider]?
+    }
+
+    private struct TMDbWatchProvider: Decodable, Hashable {
+        let providerName: String
+
+        enum CodingKeys: String, CodingKey {
+            case providerName = "provider_name"
+        }
     }
 
     private struct TMDbReleaseDatesResponse: Decodable {
@@ -11210,6 +11872,174 @@ private struct PickForMeOptionButton: View {
     }
     
     private enum MediaKind: String, Codable, Hashable { case movie, tv, person }
+
+    private struct TrailerVideo: Identifiable, Hashable {
+        let id: String
+        let key: String
+        let name: String
+        let site: String
+        let type: String
+        let official: Bool
+        let publishedAt: String?
+
+        var displayTitle: String {
+            name.isEmpty ? "Play trailer" : name
+        }
+
+        private nonisolated var rank: Int {
+            var score = 0
+            if official { score += 30 }
+            if type.localizedCaseInsensitiveCompare("Trailer") == .orderedSame { score += 20 }
+            if name.localizedCaseInsensitiveContains("official") { score += 8 }
+            if name.localizedCaseInsensitiveContains("trailer") { score += 6 }
+            if name.localizedCaseInsensitiveContains("teaser") { score += 2 }
+            return score
+        }
+
+        nonisolated init?(_ dto: TMDbVideoDTO) {
+            let trimmedKey = dto.key.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmedKey.isEmpty else { return nil }
+            guard dto.site.localizedCaseInsensitiveCompare("YouTube") == .orderedSame else { return nil }
+            guard ["Trailer", "Teaser"].contains(where: { dto.type.localizedCaseInsensitiveCompare($0) == .orderedSame }) else {
+                return nil
+            }
+
+            id = dto.id
+            key = trimmedKey
+            name = dto.name
+            site = dto.site
+            type = dto.type
+            official = dto.official ?? false
+            publishedAt = dto.publishedAt
+        }
+
+        nonisolated static func ranked(from videos: [TMDbVideoDTO]) -> [TrailerVideo] {
+            videos
+                .compactMap(TrailerVideo.init)
+                .sorted { lhs, rhs in
+                    if lhs.rank != rhs.rank {
+                        return lhs.rank > rhs.rank
+                    }
+
+                    return (lhs.publishedAt ?? "") > (rhs.publishedAt ?? "")
+                }
+        }
+    }
+
+    private struct RelatedMediaSection: Identifiable, Hashable {
+        let kind: RelatedMediaKind
+        let items: [RelatedMediaItem]
+
+        var id: String { kind.rawValue }
+        var title: String { kind.title }
+
+        static func sections(from items: [RelatedMediaItem]) -> [RelatedMediaSection] {
+            RelatedMediaKind.allCases.compactMap { kind in
+                let sectionItems = uniqueItems(items.filter { $0.kind == kind })
+
+                guard !sectionItems.isEmpty else { return nil }
+                return RelatedMediaSection(kind: kind, items: Array(sectionItems.prefix(12)))
+            }
+        }
+
+        private static func uniqueItems(_ items: [RelatedMediaItem]) -> [RelatedMediaItem] {
+            var seenIDs: Set<String> = []
+            return items.filter { item in
+                seenIDs.insert(item.id).inserted
+            }
+        }
+    }
+
+    private enum RelatedMediaKind: String, CaseIterable, Hashable {
+        case original
+
+        var title: String {
+            switch self {
+            case .original:
+                return "Original media"
+            }
+        }
+    }
+
+    private struct RelatedMediaItem: Identifiable, Hashable {
+        let id: String
+        let kind: RelatedMediaKind
+        let title: String
+        let description: String
+        let imageURL: String?
+        let linkURL: URL
+
+        var imageURLValue: URL? {
+            guard var value = imageURL?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else {
+                return nil
+            }
+
+            if value.hasPrefix("http://") {
+                value = "https://" + value.dropFirst("http://".count)
+            }
+
+            if let commonsURL = Self.commonsThumbnailURL(from: value) {
+                return commonsURL
+            }
+
+            if let url = URL(string: value) {
+                return url
+            }
+
+            var allowedCharacters = CharacterSet.urlQueryAllowed
+            allowedCharacters.insert(charactersIn: ":/")
+            return value
+                .addingPercentEncoding(withAllowedCharacters: allowedCharacters)
+                .flatMap(URL.init(string:))
+        }
+
+        private static func commonsThumbnailURL(from value: String) -> URL? {
+            let markers = [
+                "/wiki/Special:FilePath/",
+                "/wiki/Special:Redirect/file/"
+            ]
+
+            guard let marker = markers.first(where: { value.contains($0) }),
+                  let range = value.range(of: marker) else {
+                return nil
+            }
+
+            let rawFilename = value[range.upperBound...]
+                .split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false)
+                .first
+                .map(String.init) ?? ""
+            let decodedFilename = rawFilename.removingPercentEncoding ?? rawFilename
+            guard !decodedFilename.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                return nil
+            }
+
+            var components = URLComponents()
+            components.scheme = "https"
+            components.host = "commons.wikimedia.org"
+            components.path = "/wiki/Special:Redirect/file/\(decodedFilename)"
+            components.queryItems = [
+                URLQueryItem(name: "width", value: "264")
+            ]
+            return components.url
+        }
+
+        init?(binding: WikidataRelatedMediaBinding) {
+            guard let kind = RelatedMediaKind(rawValue: binding.relation.value) else { return nil }
+
+            let title = binding.itemLabel.value.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !title.isEmpty, !title.hasPrefix("Q") else { return nil }
+
+            let linkString = binding.article?.value ?? binding.item.value
+            guard let linkURL = URL(string: linkString) else { return nil }
+
+            self.id = "\(kind.rawValue)-\(binding.item.value)"
+            self.kind = kind
+            self.title = title
+            self.description = binding.itemDescription?.value.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            self.imageURL = binding.image?.value
+            self.linkURL = linkURL
+        }
+    }
     
     private extension MediaKind {
         var label: String { self == .movie ? "Movie" : (self == .tv ? "Series" : "Person") }
@@ -11223,7 +12053,7 @@ private struct PickForMeOptionButton: View {
             return label
         }
     }
-    
+
     private struct MediaDetail: Hashable {
         let director: PersonSummary?
         let creator: PersonSummary?
@@ -11238,6 +12068,9 @@ private struct PickForMeOptionButton: View {
         let ageRating: String?
         let tmdbCollectionID: Int?
         let keywordIDs: [Int]
+        let trailers: [TrailerVideo]
+        let imdbID: String?
+        let tmdbProviders: [StreamingOption]
         
         init(response: TMDbDetailResponse, fallback: MediaItem) {
             let crewList: [PersonDTO] = response.credits?.crew ?? []
@@ -11249,6 +12082,9 @@ private struct PickForMeOptionButton: View {
             runtime = response.runtime
             ageRating = response.usAgeRating
             keywordIDs = response.keywords?.keywordIDs ?? []
+            trailers = TrailerVideo.ranked(from: response.videos?.results ?? [])
+            imdbID = response.externalIDs?.imdbID
+            tmdbProviders = response.watchProviders?.usStreamingOptions ?? []
             
             let directorDTO = crewList.first { dto in
                 dto.job == "Director"
@@ -11351,11 +12187,18 @@ private struct PickForMeOptionButton: View {
                 runtime: runtime,
                 ageRating: ageRating,
                 tmdbCollectionID: tmdbCollectionID,
-                keywordIDs: keywordIDs
+                keywordIDs: keywordIDs,
+                trailers: trailers,
+                imdbID: imdbID,
+                tmdbProviders: tmdbProviders
             )
         }
 
-        private init(director: PersonSummary?, creator: PersonSummary?, cast: [PersonSummary], castAndKeyCrew: [PersonSummary], seasons: [SeasonInfo], similar: [MediaItem], firstAirDate: String?, lastAirDate: String?, status: String?, runtime: Int?, ageRating: String?, tmdbCollectionID: Int?, keywordIDs: [Int]) {
+        var primaryTrailer: TrailerVideo? {
+            trailers.first
+        }
+
+        private init(director: PersonSummary?, creator: PersonSummary?, cast: [PersonSummary], castAndKeyCrew: [PersonSummary], seasons: [SeasonInfo], similar: [MediaItem], firstAirDate: String?, lastAirDate: String?, status: String?, runtime: Int?, ageRating: String?, tmdbCollectionID: Int?, keywordIDs: [Int], trailers: [TrailerVideo], imdbID: String?, tmdbProviders: [StreamingOption]) {
             self.director = director
             self.creator = creator
             self.cast = cast
@@ -11369,6 +12212,9 @@ private struct PickForMeOptionButton: View {
             self.ageRating = ageRating
             self.tmdbCollectionID = tmdbCollectionID
             self.keywordIDs = keywordIDs
+            self.trailers = trailers
+            self.imdbID = imdbID
+            self.tmdbProviders = tmdbProviders
         }
 
         private static func rankedSimilarItems(_ items: [MediaItem], source: MediaItem, cast: [PersonSummary], keyCrew: [PersonSummary], runtime: Int?, sourceBoosts: [MediaKey: Double]) -> [MediaItem] {
