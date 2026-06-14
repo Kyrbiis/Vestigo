@@ -112,8 +112,32 @@ private let pickForMeWarDealBreakerSignals: [String] = [
     "paratrooper"
 ]
 
+private let pickForMeEpicSpectacleSignals: [String] = pipeSeparatedStrings(
+    "epic|space|disaster|war|planet|galaxy|future|battle|large-scale|world|worlds|kingdom|empire|invasion|apocalypse|catastrophe|quest|adventure|survival|civilization|high stakes|save the world|global"
+)
+
 private let pickForMeHistoricalGenreIDs: Set<Int> = [36]
 private let pickForMeWarGenreIDs: Set<Int> = [10752, 10768]
+
+private let moreLikeThisBroadSimilarityTokens: Set<String> = Set(pipeSeparatedStrings(
+    "movie|film|series|story|life|world|young|find|must|when|after|about|into|from|their|with|love|family|friend|friends|man|woman|girl|boy|new|old|home|city|time|years|year"
+))
+
+private let moreLikeThisWeakSimilarityGenreIDs: Set<Int> = [18, 35, 28, 10749, 53, 878, 12]
+
+private let moreLikeThisSubjectSimilarityClusters: [[String]] = pipeSeparatedStrings(
+    "fashion,designer,runway,magazine,editor,assistant,luxury,new york,career,workplace,media,journalist,publisher|lawyer,attorney,court,trial,legal,judge|doctor,hospital,medical,surgeon|chef,restaurant,kitchen,food|music,musician,band,singer,concert|space,planet,astronaut,mars,galaxy|war,soldier,military,battle,army|spy,espionage,agent,cia,mi6|crime,detective,murder,police,investigation|school,teacher,student,college,university|royal,king,queen,kingdom,empire|vampire,werewolf,witch,supernatural|robot,artificial intelligence,android,technology|sports,football,basketball,baseball,boxing|family,marriage,divorce,parent,child"
+).map { cluster in
+    commaSeparatedStrings(cluster)
+}
+
+private func pipeSeparatedStrings(_ value: String) -> [String] {
+    value.split(separator: "|").map(String.init)
+}
+
+private func commaSeparatedStrings(_ value: String) -> [String] {
+    value.split(separator: ",").map(String.init)
+}
 
 @MainActor
 private final class RemoteImageMemoryCache {
@@ -664,10 +688,11 @@ private final class VestigoModel: ObservableObject {
     private let streaming = StreamingAvailabilityService()
     private let relatedMedia = RelatedMediaService()
     private let backend = VestigoBackendClient()
-    private let externalRatingBatchLimit = 24
-    private let externalRatingSessionLimit = 200
+    private let externalRatingBatchLimit = 8
+    private let externalRatingSessionLimit = 75
     private var externalRatingRequestCount = 0
     private var externalRatingEmptyRefreshes: Set<MediaKey> = []
+    private var externalRatingInFlight: Set<MediaKey> = []
     private var searchTask: Task<Void, Never>?
     private var saveTask: Task<Void, Never>?
     private var searchRequestID = UUID()
@@ -986,8 +1011,6 @@ private final class VestigoModel: ObservableObject {
             } catch { }
         }
         
-        await loadExternalRatings(for: scoredRecommendations.values.map(\.item), limit: 120)
-
         let sortedRecommendations = scoredRecommendations.values
             .filter { $0.score > 0 }
             .sorted { lhs, rhs in
@@ -1089,8 +1112,6 @@ private final class VestigoModel: ObservableObject {
                     (settings.prioritiseEnglish ? ((item.originalLanguage ?? "en") == "en") : true)
                 }
 
-        await loadExternalRatings(for: trySomethingNewPool, limit: 80)
-
         let preparedTrySomethingNew = preparedResults(
             trySomethingNewPool
                 .sorted { lhs, rhs in
@@ -1174,7 +1195,6 @@ private final class VestigoModel: ObservableObject {
         }
 
         let uniqueCandidates = candidates.uniqued()
-        await loadExternalRatings(for: uniqueCandidates, limit: 160)
         await loadPickForMeStrictFilterDetails(for: uniqueCandidates, answers: answers)
 
         let filtered = uniqueCandidates
@@ -1196,10 +1216,6 @@ private final class VestigoModel: ObservableObject {
                     return false
                 }
 
-                if !pickForMeSourceMaterialAllows(item, sourceMaterial: answers.sourceMaterial, sourceMaterialCandidateKeys: sourceMaterialCandidateKeys) {
-                    return false
-                }
-
                 if !pickForMeRealismAllows(item, answers: answers) {
                     return false
                 }
@@ -1216,7 +1232,11 @@ private final class VestigoModel: ObservableObject {
                     }
                 }
 
-                if answers.dealBreakers.contains(where: { pickForMeDealBreakerMatches(item: item, dealBreaker: $0) }) {
+                if answers.dealBreakers.contains(where: { pickForMeFastDealBreakerMatches(item: item, dealBreaker: $0) }) {
+                    return false
+                }
+
+                if !pickForMePrimaryArchetypeAllows(item, answers: answers) {
                     return false
                 }
 
@@ -1230,8 +1250,8 @@ private final class VestigoModel: ObservableObject {
 
         let sorted = visible
             .sorted { lhs, rhs in
-                let lhsScore = pickForMeScore(lhs, answers: answers)
-                let rhsScore = pickForMeScore(rhs, answers: answers)
+                let lhsScore = pickForMeScore(lhs, answers: answers, sourceMaterialCandidateKeys: sourceMaterialCandidateKeys)
+                let rhsScore = pickForMeScore(rhs, answers: answers, sourceMaterialCandidateKeys: sourceMaterialCandidateKeys)
 
                 if lhsScore != rhsScore {
                     return lhsScore > rhsScore
@@ -1246,7 +1266,9 @@ private final class VestigoModel: ObservableObject {
                 return lhs.title.localizedCaseInsensitiveCompare(rhs.title) == .orderedAscending
             }
 
-        return balancedPickForMeResults(sorted, filter: effectiveFilter, limit: 120)
+        let lateFiltered = pickForMeApplyLateContentDealBreakers(to: sorted, answers: answers)
+
+        return balancedPickForMeResults(lateFiltered, filter: effectiveFilter, limit: 120)
     }
 
     private func pickForMeDiscoveryGenreIDs(for answers: PickForMeAnswers) -> Set<Int> {
@@ -1415,7 +1437,19 @@ private final class VestigoModel: ObservableObject {
         if sourceMaterialCandidateKeys.contains(item.key) { return true }
 
         let text = pickForMeSearchableText(for: item)
+        return pickForMeSourceMaterialTextMatches(text, sourceMaterial: sourceMaterial)
+    }
 
+    private func pickForMeSourceMaterialScore(item: MediaItem, text: String, sourceMaterial: PickForMeSourceMaterial, sourceMaterialCandidateKeys: Set<MediaKey>) -> Double {
+        guard sourceMaterial != .noPreference else { return 0 }
+        if sourceMaterialCandidateKeys.contains(item.key) || pickForMeSourceMaterialTextMatches(text, sourceMaterial: sourceMaterial) {
+            return 18.0
+        }
+
+        return -1.5
+    }
+
+    private func pickForMeSourceMaterialTextMatches(_ text: String, sourceMaterial: PickForMeSourceMaterial) -> Bool {
         switch sourceMaterial {
         case .trueStory:
             return text.containsAny(["based on true", "based on actual", "true story", "true events", "real events", "real-life", "real life"])
@@ -1447,14 +1481,17 @@ private final class VestigoModel: ObservableObject {
         return historicalScore > 0
     }
 
-    private func pickForMeScore(_ item: MediaItem, answers: PickForMeAnswers) -> Double {
-        var score = max(ratingSortValue(for: item), 0) * 0.75
+    private func pickForMeScore(_ item: MediaItem, answers: PickForMeAnswers, sourceMaterialCandidateKeys: Set<MediaKey>) -> Double {
+        let primaryAlignment = pickForMePrimaryArchetypeAlignmentScore(item, answers: answers)
+        var score = primaryAlignment * 13.0
         let genreIDs = Set(item.genreIDs)
         let text = pickForMeSearchableText(for: item)
 
         if library.isNeverShowAgain(item.key) {
             score -= 250.0
         }
+
+        score += pickForMePrimaryArchetypeSoftGateAdjustment(primaryAlignment, answers: answers)
 
         let primaryArchetypeScores = answers.archetypes.map { archetype in
             pickForMeArchetypeScore(item: item, archetype: archetype)
@@ -1474,20 +1511,20 @@ private final class VestigoModel: ObservableObject {
             score += pickForMeGenrePreferenceScore(genres: genreIDs, text: text, genrePreference: genrePreference)
         }
 
-        if let seriousness = answers.seriousness {
-            score += pickForMeSeriousnessScore(genres: genreIDs, text: text, seriousness: seriousness)
+        if let sourceMaterial = answers.sourceMaterial {
+            score += pickForMeSourceMaterialScore(item: item, text: text, sourceMaterial: sourceMaterial, sourceMaterialCandidateKeys: sourceMaterialCandidateKeys)
         }
+
+        score += pickForMeAnswerFulfillmentScore(
+            item: item,
+            genres: genreIDs,
+            text: text,
+            answers: answers,
+            sourceMaterialCandidateKeys: sourceMaterialCandidateKeys
+        )
 
         if let realism = answers.realism {
             score += pickForMeRealismScore(genres: genreIDs, text: text, realism: realism)
-        }
-
-        for actionLevel in answers.actionLevels where !actionLevel.isAnyOption {
-            score += pickForMeActionScore(genres: genreIDs, actionLevel: actionLevel)
-        }
-
-        if let engagement = answers.engagement {
-            score += pickForMeEngagementScore(genres: genreIDs, text: text, engagement: engagement)
         }
 
         if let recommendationType = answers.recommendationType {
@@ -1502,6 +1539,9 @@ private final class VestigoModel: ObservableObject {
             score -= pickForMeDocumentaryDownweight(for: answers)
         }
 
+        score += pickForMeAnimationAdultThemeAdjustment(genres: genreIDs, answers: answers)
+        score += pickForMeChildAnimationSettingsAdjustment(item: item, genres: genreIDs, answers: answers)
+
         score -= pickForMeArchetypeMismatchPenalty(genres: genreIDs, text: text, answers: answers)
 
         if answers.wantsHistorical && !genreIDs.intersection(pickForMeWarGenreIDs).isEmpty && !answers.wantsWar {
@@ -1512,25 +1552,107 @@ private final class VestigoModel: ObservableObject {
             score -= 1.5
         }
 
-        if let goreLevel = answers.goreLevel {
-            score += pickForMeGoreScore(genres: genreIDs, text: text, goreLevel: goreLevel)
-        }
-
-        if let sexLevel = answers.sexLevel {
-            score += pickForMeSexScore(text: text, sexLevel: sexLevel)
-        }
+        score += max(ratingSortValue(for: item), 0) * 0.25
 
         if library.isInWatchlist(item.key) {
-            score += 5.0
+            score += 0.5
         }
 
         if recommendations.contains(where: { $0.key == item.key }) ||
             moreLikeLastWatched.contains(where: { $0.key == item.key }) ||
             moreLikeFavourite.contains(where: { $0.key == item.key }) {
-            score += 2.5
+            score += 0.3
         }
 
-        score += pickForMePersonalizationScore(for: item)
+        score += pickForMePersonalizationScore(for: item) * 0.18
+
+        return score
+    }
+
+    private func pickForMePrimaryArchetypeAllows(_ item: MediaItem, answers: PickForMeAnswers) -> Bool {
+        guard pickForMeHasDominantPrimaryArchetype(answers) else { return true }
+        return pickForMePrimaryArchetypeAlignmentScore(item, answers: answers) >= 3.2
+    }
+
+    private func pickForMePrimaryArchetypeSoftGateAdjustment(_ alignment: Double, answers: PickForMeAnswers) -> Double {
+        guard pickForMeHasDominantPrimaryArchetype(answers) else { return 0 }
+
+        if alignment >= 6.5 {
+            return 14.0
+        }
+
+        if alignment >= 4.5 {
+            return 6.0
+        }
+
+        if alignment >= 3.2 {
+            return -14.0
+        }
+
+        return -240.0
+    }
+
+    private func pickForMePrimaryArchetypeAlignmentScore(_ item: MediaItem, answers: PickForMeAnswers) -> Double {
+        let primaryArchetypes = answers.archetypes.filter { archetype in
+            !archetype.isAnyOption && archetype != .surprise
+        }
+
+        guard !primaryArchetypes.isEmpty else { return 0 }
+        return primaryArchetypes.map { pickForMeArchetypeScore(item: item, archetype: $0) }.max() ?? 0
+    }
+
+    private func pickForMeHasDominantPrimaryArchetype(_ answers: PickForMeAnswers) -> Bool {
+        answers.archetypes.contains { archetype in
+            !archetype.isAnyOption && archetype != .surprise
+        }
+    }
+
+    private func pickForMeAnswerFulfillmentScore(item: MediaItem, genres: Set<Int>, text: String, answers: PickForMeAnswers, sourceMaterialCandidateKeys: Set<MediaKey>) -> Double {
+        var score = 0.0
+
+        for secondaryArchetype in answers.secondaryArchetypes where !secondaryArchetype.isAnyOption {
+            let match = pickForMeArchetypeScore(item: item, archetype: secondaryArchetype)
+            if match >= 4.0 {
+                score += 4.0
+            } else if match >= 2.0 {
+                score += 1.5
+            }
+        }
+
+        for genrePreference in answers.genrePreferences where !genrePreference.isAnyOption {
+            if pickForMeGenrePreferenceScore(genres: genres, text: text, genrePreference: genrePreference) > 0 {
+                score += 2.5
+            }
+        }
+
+        if let sourceMaterial = answers.sourceMaterial, sourceMaterial != .noPreference {
+            if sourceMaterialCandidateKeys.contains(item.key) || pickForMeSourceMaterialTextMatches(text, sourceMaterial: sourceMaterial) {
+                score += 5.0
+            }
+        }
+
+        if let realism = answers.realism, realism != .anything {
+            let realismScore = pickForMeRealismScore(genres: genres, text: text, realism: realism)
+            if realismScore > 0 {
+                score += 2.5
+            }
+        }
+
+        if let minimumRating = answers.minimumRating, let minimum = minimumRating.minimumRating, ratingSortValue(for: item) >= minimum {
+            score += 2.0
+        }
+
+        if !answers.contentRatings.isEmpty && !answers.contentRatings.contains(.any) {
+            score += 1.0
+        }
+
+        if answers.runtime != nil && answers.runtime != .any {
+            score += 1.0
+        }
+
+        if answers.releaseAge != nil && answers.releaseAge != .noPreference {
+            score += 1.0
+        }
 
         return score
     }
@@ -1584,8 +1706,17 @@ private final class VestigoModel: ObservableObject {
             return pickForMeKeywordScore(text, pickForMeWarDealBreakerSignals) * 2.1 +
                 (genres.intersection(pickForMeWarGenreIDs).isEmpty ? 0 : 6.0)
         case .epicSpectacle:
-            return pickForMeKeywordScore(text, ["epic", "space", "disaster", "war", "planet", "future", "battle", "large-scale", "world"]) * 1.9 +
-                (genres.intersection([878, 28, 12, 10752]).isEmpty ? 0 : 4.8)
+            var score = pickForMeKeywordScore(text, pickForMeEpicSpectacleSignals) * 2.4
+            if genres.contains(878) || genres.contains(10752) || genres.contains(10768) {
+                score += 4.8
+            }
+            if genres.contains(12) || genres.contains(14) {
+                score += 3.4
+            }
+            if genres.contains(28) {
+                score += text.containsAny(pickForMeEpicSpectacleSignals) ? 2.4 : 0.8
+            }
+            return score
         case .mindBending:
             return pickForMeKeywordScore(text, ["memory", "nonlinear", "alternate reality", "twist", "puzzle", "mind-bending", "reality", "dream"]) * 2.1 +
                 (genres.intersection([9648, 878, 53]).isEmpty ? 0 : 4.0)
@@ -1708,45 +1839,41 @@ private final class VestigoModel: ObservableObject {
         }
     }
 
-    private func pickForMeGoreScore(genres: Set<Int>, text: String, goreLevel: PickForMeGoreLevel) -> Double {
-        let likelyGory = genres.contains(27) || text.containsAny(["gore", "bloody", "blood", "slasher", "violent", "brutal"])
-        switch goreLevel {
-        case .low:
-            return likelyGory ? -3.2 : 1.1
-        case .some:
-            return likelyGory ? 2.1 : -0.4
-        case .high:
-            return likelyGory ? 3.4 : -0.8
-        case .noPreference:
-            return 0
-        }
-    }
-
-    private func pickForMeSexScore(text: String, sexLevel: PickForMeSexLevel) -> Double {
-        let likelySexual = text.containsAny(["sexual", "sex", "erotic", "affair", "seduction", "stripper", "prostitute", "brothel", "nude", "nudity"])
-        switch sexLevel {
-        case .low:
-            return likelySexual ? -3.0 : 1.0
-        case .some:
-            return likelySexual ? 2.0 : -0.4
-        case .high:
-            return likelySexual ? 3.2 : -0.8
-        case .noPreference:
-            return 0
-        }
-    }
-
     private func pickForMeRecommendationTypeScore(for item: MediaItem, recommendationType: PickForMeRecommendationType) -> Double {
         let rating = ratingSortValue(for: item)
+        let externalRatings = externalRatingsCache[item.key]
+        let rottenTomatoesRating = externalRatings?.rottenTomatoesRating
+        let imdbVoteCount = externalRatings?.imdbVoteCountValue
+        let hasStrongCriticScore = rottenTomatoesRating.map { $0 >= 85 } ?? false
+        let hasGoodCriticScore = rottenTomatoesRating.map { $0 >= 75 } ?? false
         let isFromMainstreamLists = popular.contains(where: { $0.key == item.key }) || trending.contains(where: { $0.key == item.key }) || newReleases.contains(where: { $0.key == item.key })
+        let isPopularEnough = isFromMainstreamLists || (imdbVoteCount ?? 0) >= 100_000
+        let isNicheEnough = !isFromMainstreamLists && (imdbVoteCount.map { $0 < 35_000 } ?? true)
 
         switch recommendationType {
         case .crowdPleaser:
-            return isFromMainstreamLists ? 1.4 : 0.2
+            var score = 0.0
+            score += isPopularEnough ? 1.2 : -0.2
+            score += rating >= 7.2 ? 0.6 : rating >= 6.5 ? 0.25 : -0.3
+            if let rottenTomatoesRating {
+                score += rottenTomatoesRating >= 70 ? 0.4 : -0.2
+            }
+            return score
         case .acclaimed:
-            return rating >= 8 ? 3.6 : rating >= 7 ? 2.0 : -0.6
+            if hasStrongCriticScore {
+                return 1.8
+            }
+            if hasGoodCriticScore {
+                return 1.2
+            }
+            return rating >= 8 ? 1.1 : rating >= 7.3 ? 0.6 : -0.25
         case .hiddenGem:
-            return !isFromMainstreamLists && rating >= 6.5 ? 3.0 : -0.4
+            var score = isNicheEnough ? 1.2 : -0.45
+            score += rating >= 7.2 ? 0.7 : rating >= 6.6 ? 0.3 : -0.3
+            if let rottenTomatoesRating {
+                score += rottenTomatoesRating >= 75 ? 0.45 : rottenTomatoesRating < 55 ? -0.25 : 0
+            }
+            return score
         case .noPreference:
             return 0
         }
@@ -1805,6 +1932,25 @@ private final class VestigoModel: ObservableObject {
         return 14.0
     }
 
+    private func pickForMeAnimationAdultThemeAdjustment(genres: Set<Int>, answers: PickForMeAnswers) -> Double {
+        guard genres.contains(16), answers.prefersAdultLeaningMood, !answers.genrePreferences.contains(.animation) else {
+            return 0
+        }
+
+        return -2.0
+    }
+
+    private func pickForMeChildAnimationSettingsAdjustment(item: MediaItem, genres: Set<Int>, answers: PickForMeAnswers) -> Double {
+        guard settings.hideLowestAgeRatings, genres.contains(16), !answers.genrePreferences.contains(.animation) else {
+            return 0
+        }
+
+        let hasFamilyGenre = genres.contains(10751) || genres.contains(10762)
+        let hasLowestAgeRating = detailsCache[item.key]?.ageRating.map(Self.isLowestAgeRating) ?? false
+
+        return hasFamilyGenre || hasLowestAgeRating ? -3.0 : 0
+    }
+
     private func pickForMeArchetypeMismatchPenalty(genres: Set<Int>, text: String, answers: PickForMeAnswers) -> Double {
         var penalty = 0.0
 
@@ -1855,6 +2001,40 @@ private final class VestigoModel: ObservableObject {
         return min(Double(overlapCount) * weight, cap)
     }
 
+    private func pickForMeFastDealBreakerMatches(item: MediaItem, dealBreaker: PickForMeDealBreaker) -> Bool {
+        guard !dealBreaker.requiresLateDescriptionPass else { return false }
+        return pickForMeDealBreakerMatches(item: item, dealBreaker: dealBreaker)
+    }
+
+    private func pickForMeApplyLateContentDealBreakers(to items: [MediaItem], answers: PickForMeAnswers) -> [MediaItem] {
+        let lateDealBreakers = answers.dealBreakers.filter(\.requiresLateDescriptionPass)
+        guard !lateDealBreakers.isEmpty else { return items }
+
+        return items.filter { item in
+            !lateDealBreakers.contains { dealBreaker in
+                pickForMeLateContentDealBreakerMatches(item: item, dealBreaker: dealBreaker)
+            }
+        }
+    }
+
+    private func pickForMeLateContentDealBreakerMatches(item: MediaItem, dealBreaker: PickForMeDealBreaker) -> Bool {
+        let description = item.overview.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !description.isEmpty else { return false }
+
+        switch dealBreaker {
+        case .graphicViolence:
+            let strongGraphicSignals = ["gore", "gory", "blood-soaked", "gruesome", "massacre", "torture", "dismember", "slasher"]
+            let violenceSignals = ["bloody", "brutal", "violent", "violence", "killing", "killings", "murder spree"]
+            return description.containsAny(strongGraphicSignals) || pickForMeKeywordScore(description, violenceSignals) >= 2
+        case .sexualContent:
+            let explicitSexualSignals = ["erotic", "sex worker", "prostitute", "brothel", "stripper", "nude", "nudity", "pornographic"]
+            let sexualSignals = ["sexual", "sex", "seduction", "seduces", "affair", "lust"]
+            return description.containsAny(explicitSexualSignals) || pickForMeKeywordScore(description, sexualSignals) >= 2
+        default:
+            return false
+        }
+    }
+
     private func pickForMeDealBreakerMatches(item: MediaItem, dealBreaker: PickForMeDealBreaker) -> Bool {
         guard dealBreaker != .none else { return false }
 
@@ -1874,6 +2054,10 @@ private final class VestigoModel: ObservableObject {
                 (genres.contains(10402) && text.containsAny(["live", "tour", "concert", "performance"]))
         case .war:
             return !genres.intersection(pickForMeWarGenreIDs).isEmpty || text.containsAny(pickForMeWarDealBreakerSignals)
+        case .sciFiFantasy:
+            return pickForMeIsSpeculative(genres: genres, text: text)
+        case .graphicViolence, .sexualContent:
+            return false
         case .superhero:
             return text.containsAny(["superhero", "super hero", "marvel", "dc comics", "batman", "superman", "spider-man", "spider man", "avengers", "x-men", "comic book"])
         case .verySad:
@@ -2563,37 +2747,30 @@ private final class VestigoModel: ObservableObject {
 
     func loadExternalRatings(_ item: MediaItem, priority: Bool = false) async {
         guard item.kind == .movie || item.kind == .tv else { return }
-        if let cachedRatings = externalRatingsCache[item.key] {
-            if cachedRatings.imdbRating != nil {
-                return
-            }
-
-            if !priority && externalRatingEmptyRefreshes.contains(item.key) {
-                return
-            }
-        }
+        guard externalRatingsCache[item.key] == nil else { return }
+        guard !externalRatingInFlight.contains(item.key) else { return }
 
         if !priority && externalRatingRequestCount >= externalRatingSessionLimit {
             externalRatingsCache[item.key] = .empty
+            saveLocalSoon()
             return
         }
 
-        if externalRatingsCache[item.key] != nil {
-            externalRatingEmptyRefreshes.insert(item.key)
-        }
-
+        externalRatingInFlight.insert(item.key)
         externalRatingRequestCount += 1
+        defer { externalRatingInFlight.remove(item.key) }
 
         do {
             if let ratings = try await backend.ratings(for: item), ratings.hasAnyRating {
                 externalRatingsCache[item.key] = ratings
-                externalRatingEmptyRefreshes.remove(item.key)
             } else {
                 externalRatingsCache[item.key] = .empty
             }
+            saveLocalSoon()
         } catch {
             print("IMDb ratings failed for \(item.title): \(error.localizedDescription)")
-            externalRatingsCache[item.key] = nil
+            externalRatingsCache[item.key] = .empty
+            saveLocalSoon()
         }
     }
 
@@ -2803,8 +2980,6 @@ private final class VestigoModel: ObservableObject {
                 (settings.prioritiseEnglish ? ((item.originalLanguage ?? "en") == "en") : true) &&
                 (!collection.isDynamic || DynamicCollections.item(item, belongsToCollectionNamed: collection.name))
             }
-
-        await loadExternalRatings(for: filteredCandidates, limit: 120)
 
         let filtered = filteredCandidates
             .sorted { lhs, rhs in
@@ -3119,6 +3294,7 @@ private final class VestigoModel: ObservableObject {
     private func loadLocal() {
         library = Storage.load(UserLibrary.self, key: "Vestigo.library") ?? UserLibrary()
         settings = Storage.load(AppSettings.self, key: "Vestigo.settings") ?? AppSettings()
+        externalRatingsCache = Storage.load([MediaKey: ExternalRatings].self, key: "Vestigo.externalRatings") ?? [:]
         settings.preferredRatingSource = .imdb
         searchFilter = settings.defaultSearchFilter
         mediaFilter = settings.defaultHomeFilter
@@ -3135,6 +3311,7 @@ private final class VestigoModel: ObservableObject {
     private func saveLocal() {
         Storage.save(library, key: "Vestigo.library")
         Storage.save(settings, key: "Vestigo.settings")
+        Storage.save(externalRatingsCache, key: "Vestigo.externalRatings")
     }
 }
 
@@ -4035,6 +4212,8 @@ private struct PickForMeView: View {
     @State private var isLoading = false
     @State private var errorText: String?
     @State private var fallbackText: String?
+    @State private var isReviewingAnswers = false
+    @State private var isEditingAnswerFromReview = false
 
     private var steps: [PickForMeStep] {
         PickForMeStep.steps(for: answers)
@@ -4060,7 +4239,9 @@ private struct PickForMeView: View {
                     VStack(alignment: .leading, spacing: 24) {
                         header
 
-                        if results.isEmpty {
+                        if isReviewingAnswers && !isEditingAnswerFromReview {
+                            answerReviewContent
+                        } else if results.isEmpty || isEditingAnswerFromReview {
                             questionContent
                         } else {
                             resultContent
@@ -4088,7 +4269,7 @@ private struct PickForMeView: View {
         .toolbar {
             ToolbarItem(placement: .topBarLeading) {
                 Button {
-                    dismiss()
+                    handleToolbarBack()
                 } label: {
                     Label("Back", systemImage: "chevron.left")
                 }
@@ -4111,6 +4292,15 @@ private struct PickForMeView: View {
             if newValue.contains(.war) {
                 answers.dealBreakers.remove(.war)
             }
+            if answers.wantsSpeculative {
+                answers.dealBreakers.remove(.sciFiFantasy)
+            }
+            if !answers.shouldAskRealismQuestion {
+                answers.realism = nil
+            }
+            if step >= steps.count {
+                step = max(steps.count - 1, 0)
+            }
         }
         .onChange(of: answers.secondaryArchetypes) { _, newValue in
             if newValue.contains(.documentary) {
@@ -4119,13 +4309,22 @@ private struct PickForMeView: View {
             if newValue.contains(.war) {
                 answers.dealBreakers.remove(.war)
             }
+            if answers.wantsSpeculative {
+                answers.dealBreakers.remove(.sciFiFantasy)
+            }
+            if !answers.shouldAskRealismQuestion {
+                answers.realism = nil
+            }
+            if step >= steps.count {
+                step = max(steps.count - 1, 0)
+            }
+        }
+        .onChange(of: answers.genrePreferences) { _, _ in
+            if answers.wantsSpeculative {
+                answers.dealBreakers.remove(.sciFiFantasy)
+            }
         }
         .onChange(of: answers.contentRatings) { _, _ in
-            if !answers.shouldAskGoreQuestion {
-                answers.goreLevel = nil
-                answers.sexLevel = nil
-            }
-
             if step >= steps.count {
                 step = max(steps.count - 1, 0)
             }
@@ -4137,7 +4336,11 @@ private struct PickForMeView: View {
             Text("Pick for me")
                 .font(.largeTitle.bold())
 
-            if results.isEmpty {
+            if isReviewingAnswers && !isEditingAnswerFromReview {
+                Text("Review your answers, edit a specific question, or regenerate.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            } else if results.isEmpty || isEditingAnswerFromReview {
                 Text("Answer each question. Use no preference when you do not care.")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
@@ -4188,7 +4391,7 @@ private struct PickForMeView: View {
                 Button {
                     advance()
                 } label: {
-                    Label(step == steps.count - 1 ? "Check Results" : "Next", systemImage: step == steps.count - 1 ? "sparkles" : "chevron.right")
+                    Label(nextButtonTitle, systemImage: nextButtonIcon)
                     .font(.headline.bold())
                     .frame(maxWidth: .infinity)
                     .frame(height: 52)
@@ -4230,6 +4433,22 @@ private struct PickForMeView: View {
         }
     }
 
+    private var nextButtonTitle: String {
+        if isEditingAnswerFromReview {
+            return "Done"
+        }
+
+        return step == steps.count - 1 ? "Check Results" : "Next"
+    }
+
+    private var nextButtonIcon: String {
+        if isEditingAnswerFromReview {
+            return "checkmark"
+        }
+
+        return step == steps.count - 1 ? "sparkles" : "chevron.right"
+    }
+
     @ViewBuilder private var answerOptions: some View {
         switch currentStep {
         case .format:
@@ -4258,10 +4477,6 @@ private struct PickForMeView: View {
             singleChoiceList(PickForMeReleaseAge.allCases, selection: $answers.releaseAge)
         case .ageRating:
             multiChoiceList(PickForMeContentRating.allCases, selection: $answers.contentRatings)
-        case .gore:
-            singleChoiceList(PickForMeGoreLevel.allCases, selection: $answers.goreLevel)
-        case .sex:
-            singleChoiceList(PickForMeSexLevel.allCases, selection: $answers.sexLevel)
         case .minimumRating:
             singleChoiceList(PickForMeMinimumRating.allCases, selection: $answers.minimumRating)
         case .dealBreakers:
@@ -4354,7 +4569,7 @@ private struct PickForMeView: View {
             Button {
                 editAnswers()
             } label: {
-                Label("Edit answers and regenerate", systemImage: "slider.horizontal.3")
+                Label("Review answers", systemImage: "list.bullet.rectangle")
                     .font(.headline.bold())
                     .frame(maxWidth: .infinity)
                     .frame(height: 48)
@@ -4393,6 +4608,75 @@ private struct PickForMeView: View {
         }
     }
 
+    private var answerReviewContent: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Your answers")
+                .font(.title2.bold())
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            VStack(spacing: 10) {
+                ForEach(Array(steps.enumerated()), id: \.element) { index, reviewStep in
+                    Button {
+                        step = index
+                        isEditingAnswerFromReview = true
+                        errorText = nil
+                    } label: {
+                        HStack(alignment: .center, spacing: 12) {
+                            VStack(alignment: .leading, spacing: 5) {
+                                Text(reviewStep.title)
+                                    .font(.subheadline.bold())
+                                    .foregroundStyle(.primary)
+                                    .lineLimit(2)
+
+                                Text(answerSummary(for: reviewStep))
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(3)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+
+                            Image(systemName: "chevron.right")
+                                .font(.caption.bold())
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 13)
+                        .frame(maxWidth: .infinity, minHeight: 58, alignment: .leading)
+                        .liquidGlass(cornerRadius: 24)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+
+            Button {
+                Task { await loadResults() }
+            } label: {
+                Label("Regenerate", systemImage: "arrow.clockwise")
+                    .font(.headline.bold())
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 52)
+                    .liquidGlass(cornerRadius: 26)
+            }
+            .buttonStyle(.plain)
+            .disabled(isLoading)
+            .opacity(isLoading ? 0.55 : 1)
+
+            if isLoading {
+                HStack(spacing: 10) {
+                    ProgressView()
+                    Text("Finding a good fit...")
+                        .font(.subheadline.bold())
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            if let errorText {
+                StatusBubble(title: "No results", text: errorText)
+            }
+        }
+    }
+
     private var currentStep: PickForMeStep {
         steps[min(step, max(steps.count - 1, 0))]
     }
@@ -4410,6 +4694,8 @@ private struct PickForMeView: View {
                 return !answers.wantsDocumentary
             case .war:
                 return !answers.wantsWar
+            case .sciFiFantasy:
+                return !answers.wantsSpeculative
             default:
                 return true
             }
@@ -4540,6 +4826,13 @@ private struct PickForMeView: View {
             return
         }
 
+        if isEditingAnswerFromReview {
+            isEditingAnswerFromReview = false
+            isReviewingAnswers = true
+            errorText = nil
+            return
+        }
+
         if step < steps.count - 1 {
             step += 1
         } else {
@@ -4576,12 +4869,6 @@ private struct PickForMeView: View {
             answers.releaseAge = nil
         case .ageRating:
             answers.contentRatings = []
-            answers.goreLevel = nil
-            answers.sexLevel = nil
-        case .gore:
-            answers.goreLevel = nil
-        case .sex:
-            answers.sexLevel = nil
         case .minimumRating:
             answers.minimumRating = nil
         case .dealBreakers:
@@ -4595,12 +4882,32 @@ private struct PickForMeView: View {
     }
 
     private func goBack() {
+        if isEditingAnswerFromReview {
+            isEditingAnswerFromReview = false
+            isReviewingAnswers = true
+            errorText = nil
+            return
+        }
+
+        if isReviewingAnswers {
+            isReviewingAnswers = false
+            errorText = nil
+            return
+        }
+
         if !results.isEmpty {
-            results = []
-            resultIndex = 0
-            step = steps.count - 1
+            isReviewingAnswers = true
+            isEditingAnswerFromReview = false
         } else if step > 0 {
             step -= 1
+        } else {
+            dismiss()
+        }
+    }
+
+    private func handleToolbarBack() {
+        if isEditingAnswerFromReview || isReviewingAnswers {
+            goBack()
         } else {
             dismiss()
         }
@@ -4618,6 +4925,8 @@ private struct PickForMeView: View {
         if picked.isEmpty {
             errorText = "Please repeat the quiz and try different answer combinations."
         } else {
+            isReviewingAnswers = false
+            isEditingAnswerFromReview = false
             results = picked
             resultIndex = 0
         }
@@ -4633,6 +4942,49 @@ private struct PickForMeView: View {
 
         parts.append(model.ratingDisplayText(for: item))
         return parts.joined(separator: " • ")
+    }
+
+    private func answerSummary(for reviewStep: PickForMeStep) -> String {
+        switch reviewStep {
+        case .format:
+            return answers.mediaFormat?.title ?? "Not answered"
+        case .archetype:
+            return optionTitles(answers.archetypes)
+        case .secondaryArchetypes:
+            return optionTitles(answers.secondaryArchetypes)
+        case .genrePreferences:
+            return optionTitles(answers.genrePreferences)
+        case .seriousness:
+            return answers.seriousness?.title ?? "Not answered"
+        case .realism:
+            return answers.realism?.title ?? "Not answered"
+        case .sourceMaterial:
+            return answers.sourceMaterial?.title ?? "Not answered"
+        case .action:
+            return optionTitles(answers.actionLevels)
+        case .engagement:
+            return answers.engagement?.title ?? "Not answered"
+        case .recommendationType:
+            return answers.recommendationType?.title ?? "Not answered"
+        case .runtime:
+            return answers.runtime?.title ?? "Not answered"
+        case .releaseAge:
+            return answers.releaseAge?.title ?? "Not answered"
+        case .ageRating:
+            return optionTitles(answers.contentRatings)
+        case .minimumRating:
+            return answers.minimumRating?.title ?? "Not answered"
+        case .dealBreakers:
+            return optionTitles(answers.dealBreakers)
+        }
+    }
+
+    private func optionTitles<Option: PickForMeOption>(_ options: Set<Option>) -> String {
+        guard !options.isEmpty else { return "Not answered" }
+        return options
+            .map(\.title)
+            .sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+            .joined(separator: ", ")
     }
 
     private func showPreviousResult() {
@@ -4665,10 +5017,9 @@ private struct PickForMeView: View {
     }
 
     private func editAnswers() {
-        results = []
-        resultIndex = 0
+        isReviewingAnswers = true
+        isEditingAnswerFromReview = false
         fallbackText = nil
-        step = 0
         errorText = nil
     }
 
@@ -4700,10 +5051,6 @@ private struct PickForMeView: View {
             return answers.releaseAge != nil
         case .ageRating:
             return !answers.contentRatings.isEmpty
-        case .gore:
-            return answers.goreLevel != nil
-        case .sex:
-            return answers.sexLevel != nil
         case .minimumRating:
             return answers.minimumRating != nil
         case .dealBreakers:
@@ -5110,6 +5457,12 @@ private struct PickForMeOptionButton: View {
 
         var hasAnyRating: Bool {
             imdbRating != nil || rottenTomatoesRating != nil || rottenTomatoesText != nil
+        }
+
+        var imdbVoteCountValue: Int? {
+            guard let imdbVotes else { return nil }
+            let digitsOnly = imdbVotes.filter(\.isNumber)
+            return Int(digitsOnly)
         }
 
         var rottenTomatoesDisplayText: String? {
@@ -6526,11 +6879,11 @@ private struct PickForMeOptionButton: View {
                         }
 
                         VStack(alignment: .leading, spacing: 6) {
-                            Toggle("Hide lowest age ratings", isOn: $model.settings.hideLowestAgeRatings)
+                            Toggle("Reduce child-focused results", isOn: $model.settings.hideLowestAgeRatings)
                                 .font(.headline.bold())
                                 .tint(model.settings.accentColor)
 
-                            Text("When this is on, Vestigo hides titles rated for the youngest audiences, including G, U, TV-Y, TV-Y7, and TV-G, where certification data is available.")
+                            Text("When this is on, Vestigo hides known youngest-audience ratings where certification data is available, and downweights likely child-focused animation in recommendations.")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
@@ -6760,7 +7113,7 @@ private struct PickForMeOptionButton: View {
                     
                     VStack(alignment: .leading, spacing: 10) {
                         VStack(alignment: .leading, spacing: 8) {
-                            Text("Import watched titles as title, star rating, optional f for favourite, and m for movie or s for series. .txt can use one item per line or commas; .csv uses commas only.")
+                            Text("Import watched titles as title, star rating, optional f for favourite, and m for movie or s for series. Type in the text field with the format or import files. .txt can use one item per line or commas; .csv uses commas only.")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
 
@@ -12225,28 +12578,47 @@ private struct PickForMeOptionButton: View {
             let crewNames = Set(keyCrew.prefix(6).map { normalizedSimilarityText($0.name) })
 
             return items
-                .map { item -> (item: MediaItem, score: Double) in
+                .compactMap { item -> (item: MediaItem, score: Double)? in
                     let itemGenres = Set(item.genreIDs)
                     let itemText = normalizedSimilarityText("\(item.title) \(item.overview)")
                     let itemTokens = Set(itemText.split(separator: " ").map(String.init).filter { $0.count >= 4 })
-                    let sharedSpecificTokens = sourceTokens.intersection(itemTokens).filter { !broadSimilarityTokens.contains($0) }
+                    let sharedSpecificTokens = sourceTokens.intersection(itemTokens).filter { !moreLikeThisBroadSimilarityTokens.contains($0) }
+                    let titleScore = titleRelationshipScore(sourceTitle: source.title, itemTitle: item.title)
+                    let evidence = similarityEvidenceScore(
+                        source: source,
+                        item: item,
+                        sourceText: sourceText,
+                        itemText: itemText,
+                        sharedSpecificTokens: sharedSpecificTokens,
+                        sourceGenres: sourceGenres,
+                        itemGenres: itemGenres,
+                        castNames: castNames,
+                        crewNames: crewNames
+                    )
+
+                    guard titleScore >= 18 || evidence.passesGate else {
+                        return nil
+                    }
+
                     var score = 0.0
 
-                    score += titleRelationshipScore(sourceTitle: source.title, itemTitle: item.title)
+                    score += titleScore
+                    score += evidence.score
 
                     score += Double(sharedSpecificTokens.count) * 4.0
-                    score += Double(sourceGenres.intersection(itemGenres).count) * 1.4
+                    score += Double(sourceGenres.intersection(itemGenres).filter { !moreLikeThisWeakSimilarityGenreIDs.contains($0) }.count) * 1.2
+                    score += Double(sourceGenres.intersection(itemGenres).filter { moreLikeThisWeakSimilarityGenreIDs.contains($0) }.count) * 0.25
 
                     if item.originalLanguage == source.originalLanguage {
-                        score += 2.0
+                        score += 0.4
                     }
 
                     if let sourceYear = source.releaseYearNumber, let itemYear = item.releaseYearNumber {
                         let distance = abs(sourceYear - itemYear)
                         if distance <= 3 {
-                            score += 2.0
-                        } else if distance <= 8 {
                             score += 0.8
+                        } else if distance <= 8 {
+                            score += 0.25
                         }
                     }
 
@@ -12267,7 +12639,7 @@ private struct PickForMeOptionButton: View {
                         score += 4.0
                     }
 
-                    score += sourceBoosts[item.key] ?? 0
+                    score += min(sourceBoosts[item.key] ?? 0, 2.5)
                     score += min(item.voteAverage, 10) * 0.25
 
                     return (item, score)
@@ -12279,9 +12651,86 @@ private struct PickForMeOptionButton: View {
                 .map(\.item)
         }
 
-        private static let broadSimilarityTokens: Set<String> = [
-            "movie", "film", "series", "story", "life", "world", "young", "find", "must", "when", "after", "about", "into", "from", "their", "with"
-        ]
+        private struct SimilarityEvidence {
+            let score: Double
+            let strongSignalCount: Int
+            let mediumSignalCount: Int
+
+            var passesGate: Bool {
+                strongSignalCount >= 1 || mediumSignalCount >= 3 || score >= 9.0
+            }
+        }
+
+        private static func similarityEvidenceScore(
+            source: MediaItem,
+            item: MediaItem,
+            sourceText: String,
+            itemText: String,
+            sharedSpecificTokens: Set<String>,
+            sourceGenres: Set<Int>,
+            itemGenres: Set<Int>,
+            castNames: Set<String>,
+            crewNames: Set<String>
+        ) -> SimilarityEvidence {
+            var score = 0.0
+            var strong = 0
+            var medium = 0
+
+            let titleScore = titleRelationshipScore(sourceTitle: source.title, itemTitle: item.title)
+            if titleScore >= 36 {
+                score += titleScore
+                strong += 1
+            } else if titleScore >= 18 {
+                score += titleScore
+                medium += 1
+            }
+
+            if sharedSpecificTokens.count >= 3 {
+                score += Double(sharedSpecificTokens.count) * 4.0
+                strong += 1
+            } else if sharedSpecificTokens.count >= 1 {
+                score += Double(sharedSpecificTokens.count) * 2.2
+                medium += 1
+            }
+
+            let sharedSubjectClusters = subjectClusterMatches(sourceText: sourceText, itemText: itemText)
+            if sharedSubjectClusters >= 2 {
+                score += Double(sharedSubjectClusters) * 5.0
+                strong += 1
+            } else if sharedSubjectClusters == 1 {
+                score += 3.4
+                medium += 1
+            }
+
+            if itemText.containsAny(Array(crewNames)) {
+                score += 7.0
+                strong += 1
+            }
+
+            if itemText.containsAny(Array(castNames)) {
+                score += 5.0
+                medium += 1
+            }
+
+            let strongGenreOverlap = sourceGenres.intersection(itemGenres).filter { !moreLikeThisWeakSimilarityGenreIDs.contains($0) }.count
+            if strongGenreOverlap >= 1 {
+                score += Double(strongGenreOverlap) * 2.6
+                medium += 1
+            }
+
+            let weakGenreOverlap = sourceGenres.intersection(itemGenres).filter { moreLikeThisWeakSimilarityGenreIDs.contains($0) }.count
+            if weakGenreOverlap >= 2, medium >= 1 || strong >= 1 {
+                score += min(Double(weakGenreOverlap) * 0.8, 1.6)
+            }
+
+            return SimilarityEvidence(score: score, strongSignalCount: strong, mediumSignalCount: medium)
+        }
+
+        private static func subjectClusterMatches(sourceText: String, itemText: String) -> Int {
+            moreLikeThisSubjectSimilarityClusters.filter { cluster in
+                sourceText.containsAny(cluster) && itemText.containsAny(cluster)
+            }.count
+        }
 
         private static func normalizedSimilarityText(_ value: String) -> String {
             value
@@ -13571,8 +14020,6 @@ private struct PickForMeOptionButton: View {
         var runtime: PickForMeRuntime?
         var releaseAge: PickForMeReleaseAge?
         var contentRatings: Set<PickForMeContentRating> = []
-        var goreLevel: PickForMeGoreLevel?
-        var sexLevel: PickForMeSexLevel?
         var minimumRating: PickForMeMinimumRating?
         var dealBreakers: Set<PickForMeDealBreaker> = []
 
@@ -13582,17 +14029,12 @@ private struct PickForMeOptionButton: View {
             if !archetypes.isEmpty { count += 1 }
             if !secondaryArchetypes.isEmpty { count += 1 }
             if !genrePreferences.isEmpty { count += 1 }
-            if seriousness != nil { count += 1 }
             if realism != nil { count += 1 }
             if sourceMaterial != nil { count += 1 }
-            if !actionLevels.isEmpty { count += 1 }
-            if engagement != nil { count += 1 }
             if recommendationType != nil { count += 1 }
             if runtime != nil { count += 1 }
             if releaseAge != nil { count += 1 }
             if !contentRatings.isEmpty { count += 1 }
-            if goreLevel != nil { count += 1 }
-            if sexLevel != nil { count += 1 }
             if minimumRating != nil { count += 1 }
             if !dealBreakers.isEmpty { count += 1 }
             return count
@@ -13604,17 +14046,12 @@ private struct PickForMeOptionButton: View {
             if !archetypes.isEmpty && !archetypes.contains(.surprise) { count += 1 }
             if !secondaryArchetypes.isEmpty && !secondaryArchetypes.contains(where: \.isAnyOption) { count += 1 }
             if !genrePreferences.isEmpty && !genrePreferences.contains(.noPreference) { count += 1 }
-            if let seriousness, seriousness != .noPreference { count += 1 }
             if let realism, realism != .anything { count += 1 }
             if let sourceMaterial, sourceMaterial != .noPreference { count += 1 }
-            if !actionLevels.isEmpty && !actionLevels.contains(.noPreference) { count += 1 }
-            if let engagement, engagement != .noPreference { count += 1 }
             if let recommendationType, recommendationType != .noPreference { count += 1 }
             if !isSeriesOnly, let runtime, runtime != .any { count += 1 }
             if let releaseAge, releaseAge != .noPreference { count += 1 }
             if !contentRatings.isEmpty && !contentRatings.contains(.any) { count += 1 }
-            if let goreLevel, goreLevel != .noPreference { count += 1 }
-            if let sexLevel, sexLevel != .noPreference { count += 1 }
             if let minimumRating, minimumRating != .any { count += 1 }
             if !dealBreakers.isEmpty && !dealBreakers.contains(.none) { count += 1 }
             return count
@@ -13626,10 +14063,6 @@ private struct PickForMeOptionButton: View {
 
         var isSeriesOnly: Bool {
             mediaFormat == .series
-        }
-
-        var shouldAskGoreQuestion: Bool {
-            PickForMeContentRating.selectionAllowsGoreQuestion(contentRatings)
         }
 
         var wantsDocumentary: Bool {
@@ -13658,10 +14091,40 @@ private struct PickForMeOptionButton: View {
             secondaryArchetypes.contains(.war) ||
             genrePreferences.contains(.war)
         }
+
+        var wantsSpeculative: Bool {
+            archetypes.contains(.thoughtfulSciFi) ||
+            archetypes.contains(.mindBending) ||
+            secondaryArchetypes.contains(.thoughtfulSciFi) ||
+            secondaryArchetypes.contains(.mindBending) ||
+            genrePreferences.contains(.sciFi) ||
+            genrePreferences.contains(.fantasy) ||
+            genrePreferences.contains(.space)
+        }
+
+        var prefersAdultLeaningMood: Bool {
+            contentRatings.contains(.r) ||
+            contentRatings.contains(.nc17) ||
+            archetypes.contains(.horror) ||
+            archetypes.contains(.thriller) ||
+            archetypes.contains(.war) ||
+            archetypes.contains(.mindBending) ||
+            archetypes.contains(.smartProblems) ||
+            secondaryArchetypes.contains(.horror) ||
+            secondaryArchetypes.contains(.thriller) ||
+            secondaryArchetypes.contains(.war) ||
+            secondaryArchetypes.contains(.mindBending) ||
+            secondaryArchetypes.contains(.smartProblems)
+        }
+
+        var shouldAskRealismQuestion: Bool {
+            !archetypes.contains(.thoughtfulSciFi) &&
+            !secondaryArchetypes.contains(.thoughtfulSciFi)
+        }
     }
 
     private enum PickForMeStep: CaseIterable {
-        case format, archetype, secondaryArchetypes, genrePreferences, seriousness, realism, sourceMaterial, action, engagement, recommendationType, runtime, releaseAge, ageRating, gore, sex, minimumRating, dealBreakers
+        case format, archetype, secondaryArchetypes, genrePreferences, seriousness, realism, sourceMaterial, action, engagement, recommendationType, runtime, releaseAge, ageRating, minimumRating, dealBreakers
 
         static func steps(for answers: PickForMeAnswers) -> [PickForMeStep] {
             var steps: [PickForMeStep] = [
@@ -13674,12 +14137,15 @@ private struct PickForMeOptionButton: View {
             }
 
             steps.append(contentsOf: [
-                .genrePreferences,
-                .seriousness,
-                .realism,
+                .genrePreferences
+            ])
+
+            if answers.shouldAskRealismQuestion {
+                steps.append(.realism)
+            }
+
+            steps.append(contentsOf: [
                 .sourceMaterial,
-                .action,
-                .engagement,
                 .recommendationType
             ])
 
@@ -13691,11 +14157,6 @@ private struct PickForMeOptionButton: View {
                 .releaseAge,
                 .ageRating
             ])
-
-            if answers.shouldAskGoreQuestion {
-                steps.append(.gore)
-                steps.append(.sex)
-            }
 
             steps.append(contentsOf: [
                 .minimumRating,
@@ -13720,8 +14181,6 @@ private struct PickForMeOptionButton: View {
             case .runtime: return "How much time do you have?"
             case .releaseAge: return "How recent should it be?"
             case .ageRating: return "What content rating are you comfortable with?"
-            case .gore: return "How much gore do you want?"
-            case .sex: return "How much sexual content do you want?"
             case .minimumRating: return "How highly rated should it be?"
             case .dealBreakers: return "Any deal breakers?"
             }
@@ -13742,8 +14201,6 @@ private struct PickForMeOptionButton: View {
             case .runtime: return "Runtime filters out movies outside the time window you choose."
             case .releaseAge: return "Release age is a strict filter, not a ranking boost."
             case .ageRating: return "This is a maximum rating filter when data is available. Missing data is penalized."
-            case .gore: return "This is a ranking preference, not a strict filter."
-            case .sex: return "This is a ranking preference, not a strict filter."
             case .minimumRating: return "Strong rating preference. Uses IMDb when available."
             case .dealBreakers: return "Strict filters. Choose none if nothing applies."
             }
@@ -13937,34 +14394,6 @@ private struct PickForMeOptionButton: View {
         var isAnyOption: Bool { self == .noPreference }
     }
 
-    private enum PickForMeGoreLevel: String, CaseIterable, PickForMeOption {
-        case low, some, high, noPreference
-        var id: String { rawValue }
-        var title: String {
-            switch self {
-            case .low: return "Low gore"
-            case .some: return "Some gore"
-            case .high: return "A lot of gore"
-            case .noPreference: return "No preference"
-            }
-        }
-        var isAnyOption: Bool { self == .noPreference }
-    }
-
-    private enum PickForMeSexLevel: String, CaseIterable, PickForMeOption {
-        case low, some, high, noPreference
-        var id: String { rawValue }
-        var title: String {
-            switch self {
-            case .low: return "Low sexual content"
-            case .some: return "Some sexual content"
-            case .high: return "A lot of sexual content"
-            case .noPreference: return "No preference"
-            }
-        }
-        var isAnyOption: Bool { self == .noPreference }
-    }
-
     private enum PickForMeRecommendationType: String, CaseIterable, PickForMeOption {
         case crowdPleaser, acclaimed, hiddenGem, noPreference
         var id: String { rawValue }
@@ -13974,6 +14403,14 @@ private struct PickForMeOptionButton: View {
             case .acclaimed: return "Critically acclaimed"
             case .hiddenGem: return "Hidden gem"
             case .noPreference: return "No preference"
+            }
+        }
+        var subtitle: String? {
+            switch self {
+            case .crowdPleaser: return "Popular, widely watched, and broadly liked."
+            case .acclaimed: return "Prioritises Rotten Tomatoes when available, then strong IMDb/TMDb ratings."
+            case .hiddenGem: return "Less mainstream, but still well-rated."
+            case .noPreference: return nil
             }
         }
         var isAnyOption: Bool { self == .noPreference }
@@ -14007,7 +14444,7 @@ private struct PickForMeOptionButton: View {
     }
 
     private enum PickForMeReleaseAge: String, CaseIterable, PickForMeOption {
-        case newReleases, lastFiveYears, olderThanFiveYears, lastTenYears, olderThanTenYears, lastTwentyFiveYears, olderThanTwentyFiveYears, noPreference
+        case newReleases, lastFiveYears, olderThanFiveYears, lastTenYears, olderThanTenYears, lastFifteenYears, olderThanFifteenYears, lastTwentyFiveYears, olderThanTwentyFiveYears, noPreference
         var id: String { rawValue }
         var title: String {
             switch self {
@@ -14016,6 +14453,8 @@ private struct PickForMeOptionButton: View {
             case .olderThanFiveYears: return "Older than 5 years"
             case .lastTenYears: return "Last 10 years"
             case .olderThanTenYears: return "Older than 10 years"
+            case .lastFifteenYears: return "Last 15 years"
+            case .olderThanFifteenYears: return "Older than 15 years"
             case .lastTwentyFiveYears: return "Last 25 years"
             case .olderThanTwentyFiveYears: return "Older than 25 years"
             case .noPreference: return "No preference"
@@ -14026,16 +14465,18 @@ private struct PickForMeOptionButton: View {
             switch self {
             case .olderThanFiveYears: return 5
             case .olderThanTenYears: return 10
+            case .olderThanFifteenYears: return 15
             case .olderThanTwentyFiveYears: return 25
-            case .newReleases, .lastFiveYears, .lastTenYears, .lastTwentyFiveYears, .noPreference: return nil
+            case .newReleases, .lastFiveYears, .lastTenYears, .lastFifteenYears, .lastTwentyFiveYears, .noPreference: return nil
             }
         }
         var maximumYearsOld: Int? {
             switch self {
             case .lastFiveYears: return 5
             case .lastTenYears: return 10
+            case .lastFifteenYears: return 15
             case .lastTwentyFiveYears: return 25
-            case .newReleases, .olderThanFiveYears, .olderThanTenYears, .olderThanTwentyFiveYears, .noPreference: return nil
+            case .newReleases, .olderThanFiveYears, .olderThanTenYears, .olderThanFifteenYears, .olderThanTwentyFiveYears, .noPreference: return nil
             }
         }
     }
@@ -14118,7 +14559,7 @@ private struct PickForMeOptionButton: View {
     }
 
     private enum PickForMeDealBreaker: String, CaseIterable, PickForMeOption {
-        case horror, romanceHeavy, animation, documentary, war, superhero, verySad, foreignLanguage, longRuntime, none
+        case horror, romanceHeavy, animation, documentary, war, sciFiFantasy, graphicViolence, sexualContent, superhero, verySad, foreignLanguage, longRuntime, none
         var id: String { rawValue }
         var title: String {
             switch self {
@@ -14127,12 +14568,18 @@ private struct PickForMeOptionButton: View {
             case .animation: return "Animation"
             case .documentary: return "Documentary"
             case .war: return "War"
+            case .sciFiFantasy: return "Sci-fi or fantasy"
+            case .graphicViolence: return "Graphic violence"
+            case .sexualContent: return "Sexual content"
             case .superhero: return "Superhero"
             case .verySad: return "Very sad"
             case .foreignLanguage: return "Foreign language (not English)"
             case .longRuntime: return "Long runtime (180+ minutes)"
             case .none: return "None"
             }
+        }
+        var requiresLateDescriptionPass: Bool {
+            self == .graphicViolence || self == .sexualContent
         }
         var isAnyOption: Bool { self == .none }
     }
