@@ -9,6 +9,15 @@ typealias PlatformImage = NSImage
 import Foundation
 import Combine
 import UniformTypeIdentifiers
+#if canImport(CloudKit)
+import CloudKit
+#endif
+#if canImport(EventKit)
+import EventKit
+#endif
+#if canImport(UserNotifications)
+import UserNotifications
+#endif
 #if canImport(WebKit)
 import WebKit
 #endif
@@ -60,9 +69,7 @@ private let pickForMeNonHistoricalDocumentarySignals: [String] = [
     "concert",
     "sports",
     "stand-up",
-    "comedy special",
-    "behind the scenes",
-    "making of"
+    "comedy special"
 ]
 
 private let pickForMeHumanTriumphSignals: [String] = [
@@ -119,24 +126,10 @@ private let pickForMeEpicSpectacleSignals: [String] = pipeSeparatedStrings(
 private let pickForMeHistoricalGenreIDs: Set<Int> = [36]
 private let pickForMeWarGenreIDs: Set<Int> = [10752, 10768]
 
-private let moreLikeThisBroadSimilarityTokens: Set<String> = Set(pipeSeparatedStrings(
-    "movie|film|series|story|life|world|young|find|must|when|after|about|into|from|their|with|love|family|friend|friends|man|woman|girl|boy|new|old|home|city|time|years|year"
-))
-
-private let moreLikeThisWeakSimilarityGenreIDs: Set<Int> = [18, 35, 28, 10749, 53, 878, 12]
-
-private let moreLikeThisSubjectSimilarityClusters: [[String]] = pipeSeparatedStrings(
-    "fashion,designer,runway,magazine,editor,assistant,luxury,new york,career,workplace,media,journalist,publisher|lawyer,attorney,court,trial,legal,judge|doctor,hospital,medical,surgeon|chef,restaurant,kitchen,food|music,musician,band,singer,concert|space,planet,astronaut,mars,galaxy|war,soldier,military,battle,army|spy,espionage,agent,cia,mi6|crime,detective,murder,police,investigation|school,teacher,student,college,university|royal,king,queen,kingdom,empire|vampire,werewolf,witch,supernatural|robot,artificial intelligence,android,technology|sports,football,basketball,baseball,boxing|family,marriage,divorce,parent,child"
-).map { cluster in
-    commaSeparatedStrings(cluster)
-}
+private let moreLikeThisWeakSimilarityGenreIDs: Set<Int> = [18, 35, 28]
 
 private func pipeSeparatedStrings(_ value: String) -> [String] {
     value.split(separator: "|").map(String.init)
-}
-
-private func commaSeparatedStrings(_ value: String) -> [String] {
-    value.split(separator: ",").map(String.init)
 }
 
 @MainActor
@@ -218,6 +211,17 @@ struct ContentView: View {
         }
         .sheet(item: $model.selectedPerson) { person in
             PersonDetailView(person: person, model: model)
+        }
+        .sheet(isPresented: $model.showNotificationOnboarding) {
+            NotificationPreferencesSheet(model: model, isOnboarding: true)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .vestigoDidRegisterForRemoteNotifications)) { notification in
+            guard let token = notification.object as? String else { return }
+            model.registerDeviceToken(token)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .vestigoDidOpenNotificationDeepLink)) { notification in
+            guard let deepLink = notification.object as? URL else { return }
+            model.openNotificationDeepLink(deepLink)
         }
         .favouriteReplacementOverlay(model: model)
         .ratingPromptOverlay(model: model)
@@ -682,12 +686,17 @@ private final class VestigoModel: ObservableObject {
     @Published var watchlistResetToken = UUID()
     @Published var collectionsResetToken = UUID()
     @Published var imageRefreshToken = 0
+    @Published var showNotificationOnboarding = false
     
     private let tmdb = TMDbService()
-    private let tasteDive = TasteDiveService()
+    // TasteDive is intentionally disabled because the current recommendation system no longer calls it.
+    // Keep this wiring nearby in case we decide to re-evaluate TasteDive as a future supplemental source.
+    // private let tasteDive = TasteDiveService()
     private let streaming = StreamingAvailabilityService()
     private let relatedMedia = RelatedMediaService()
     private let backend = VestigoBackendClient()
+    private let releaseCalendar = ReleaseCalendarService()
+    private let cloudSync = CloudLibrarySyncService()
     private let externalRatingBatchLimit = 8
     private let externalRatingSessionLimit = 75
     private var externalRatingRequestCount = 0
@@ -696,10 +705,14 @@ private final class VestigoModel: ObservableObject {
     private var searchTask: Task<Void, Never>?
     private var saveTask: Task<Void, Never>?
     private var searchRequestID = UUID()
+    private var isApplyingCloudSnapshot = false
+    private var localCloudSnapshotModifiedAt = Date.distantPast
     private var mediaSearchCache: [String: [MediaItem]] = [:]
     private var peopleSearchCache: [String: [PersonSummary]] = [:]
-    private var tasteDiveSimilarCache: [MediaKey: [MediaItem]] = [:]
+    // Disabled with TasteDiveService; no active path should credit or query TasteDive right now.
+    // private var tasteDiveSimilarCache: [MediaKey: [MediaItem]] = [:]
     private var tmdbExpandedSimilarCache: [MediaKey: [MediaItem]] = [:]
+    private var franchiseRecommendationCache: [MediaKey: [MediaItem]] = [:]
 
     func refreshImages() {
         imageRefreshToken &+= 1
@@ -805,6 +818,38 @@ private final class VestigoModel: ObservableObject {
         return Self.isLowestAgeRating(ageRating)
     }
 
+    func shouldHideAsSupplementalContent(_ item: MediaItem, enabled: Bool) -> Bool {
+        guard enabled else { return false }
+        guard item.kind == .movie else { return false }
+
+        let detail = detailsCache[item.key]
+        let runtime = detail?.runtime ?? item.runtime
+        let voteCount = item.voteCount ?? 0
+        let genres = Set(item.genreIDs)
+        let hasDocumentaryGenre = genres.contains(99)
+        let hasRegularFeatureRuntime = runtime.map { $0 >= 65 } ?? false
+        let hasStrongAudienceFootprint = voteCount >= 500 || item.voteAverage >= 7.8
+        let hasVisualCatalogMetadata = item.posterPath != nil && item.backdropPath != nil
+
+        if hasRegularFeatureRuntime || hasStrongAudienceFootprint {
+            return false
+        }
+
+        if hasDocumentaryGenre, let runtime, runtime > 0, runtime <= 60 {
+            return true
+        }
+
+        if let runtime, runtime > 0, runtime <= 25, voteCount < 150 {
+            return true
+        }
+
+        if hasDocumentaryGenre, voteCount < 75, !hasVisualCatalogMetadata {
+            return true
+        }
+
+        return false
+    }
+
     private static func isLowestAgeRating(_ rawRating: String) -> Bool {
         let normalized = rawRating
             .uppercased()
@@ -814,8 +859,8 @@ private final class VestigoModel: ObservableObject {
         return ["G", "U", "TV-Y", "TV-G", "TV-Y7", "TV-Y7-FV"].contains(normalized)
     }
 
-    func filteredShortFilmsIfNeeded(_ items: [MediaItem], enabled: Bool) async -> [MediaItem] {
-        guard enabled || settings.hideLowestAgeRatings else { return items }
+    func filteredContentCleanupIfNeeded(_ items: [MediaItem], hideShortFilms: Bool, hideExtrasAndPromos: Bool) async -> [MediaItem] {
+        guard hideShortFilms || hideExtrasAndPromos || settings.hideLowestAgeRatings else { return items }
 
         var filtered: [MediaItem] = []
 
@@ -824,7 +869,11 @@ private final class VestigoModel: ObservableObject {
                 await loadBasicDetailIfNeeded(item)
             }
 
-            if shouldHideAsShortFilm(item, enabled: enabled) {
+            if shouldHideAsShortFilm(item, enabled: hideShortFilms) {
+                continue
+            }
+
+            if shouldHideAsSupplementalContent(item, enabled: hideExtrasAndPromos) {
                 continue
             }
 
@@ -866,7 +915,70 @@ private final class VestigoModel: ObservableObject {
     
     func bootstrap() async {
         loadLocal()
+        await syncFromCloudOnLaunch()
+        offerNotificationOnboardingIfNeeded()
         await loadHome()
+    }
+
+    func markNotificationPromptSeen() {
+        settings.notificationPreferences.hasSeenPrompt = true
+        saveLocalSoon()
+    }
+
+    func setNotificationsEnabled(_ isEnabled: Bool) {
+        settings.notificationPreferences.isEnabled = isEnabled
+        settings.notificationPreferences.hasSeenPrompt = true
+        saveLocalSoon()
+
+        guard isEnabled else { return }
+        requestNotificationPermission()
+    }
+
+    func setNotificationKind(_ kind: NotificationKind, isEnabled: Bool) {
+        if isEnabled {
+            settings.notificationPreferences.enabledKinds.insert(kind)
+        } else {
+            settings.notificationPreferences.enabledKinds.remove(kind)
+        }
+        settings.notificationPreferences.hasSeenPrompt = true
+        saveLocalSoon()
+    }
+
+    func registerDeviceToken(_ token: String) {
+        settings.notificationPreferences.deviceToken = token
+        saveLocalSoon()
+    }
+
+    func addReleaseToCalendar(_ item: MediaItem) {
+        guard let releaseDate = item.releaseDateValue else {
+            errorText = "No release date is available for this title."
+            return
+        }
+
+        Task {
+            do {
+                try await releaseCalendar.addReleaseEvent(for: item, releaseDate: releaseDate)
+            } catch {
+                errorText = error.localizedDescription
+            }
+        }
+    }
+
+    func openNotificationDeepLink(_ deepLink: URL) {
+        guard deepLink.scheme == "vestigo" else { return }
+        let components = deepLink.pathComponents.filter { $0 != "/" }
+        guard components.count >= 2 else { return }
+
+        let kind: MediaKind = components[0] == "tv" ? .tv : .movie
+        guard let id = Int(components[1]) else { return }
+        let key = MediaKey(id: id, kind: kind)
+
+        if let cached = library.items[key] ?? trending.first(where: { $0.key == key }) ?? popular.first(where: { $0.key == key }) ?? newReleases.first(where: { $0.key == key }) ?? upcoming.first(where: { $0.key == key }) {
+            selectedItem = cached
+            return
+        }
+
+        errorText = "Open the item from Search or Watchlist to refresh this notification."
     }
     
     func loadHome() async {
@@ -889,10 +1001,10 @@ private final class VestigoModel: ObservableObject {
             let preparedNewReleases = preparedResults(try await now, hideWatched: settings.hideWatchedFromHome)
             let preparedUpcoming = preparedResults(realUpcoming, hideWatched: settings.hideWatchedFromHome)
 
-            let loadedTrending = await filteredShortFilmsIfNeeded(preparedTrending, enabled: settings.hideShortFilmsFromHome)
-            let loadedPopular = await filteredShortFilmsIfNeeded(preparedPopular, enabled: settings.hideShortFilmsFromHome)
-            let loadedNewReleases = await filteredShortFilmsIfNeeded(preparedNewReleases, enabled: settings.hideShortFilmsFromHome)
-            let loadedUpcoming = await filteredShortFilmsIfNeeded(preparedUpcoming, enabled: settings.hideShortFilmsFromHome)
+            let loadedTrending = await filteredContentCleanupIfNeeded(preparedTrending, hideShortFilms: settings.hideShortFilmsFromHome, hideExtrasAndPromos: settings.hideExtrasAndPromosFromHome)
+            let loadedPopular = await filteredContentCleanupIfNeeded(preparedPopular, hideShortFilms: settings.hideShortFilmsFromHome, hideExtrasAndPromos: settings.hideExtrasAndPromosFromHome)
+            let loadedNewReleases = await filteredContentCleanupIfNeeded(preparedNewReleases, hideShortFilms: settings.hideShortFilmsFromHome, hideExtrasAndPromos: settings.hideExtrasAndPromosFromHome)
+            let loadedUpcoming = await filteredContentCleanupIfNeeded(preparedUpcoming, hideShortFilms: settings.hideShortFilmsFromHome, hideExtrasAndPromos: settings.hideExtrasAndPromosFromHome)
 
             if !loadedTrending.isEmpty { trending = loadedTrending }
             if !loadedPopular.isEmpty { popular = loadedPopular }
@@ -942,22 +1054,6 @@ private final class VestigoModel: ObservableObject {
             } else {
                 return unratedWatchedWeight
             }
-        }
-        
-        func relatedResults(_ items: [MediaItem], seed: MediaItem) -> [MediaItem] {
-            var results = items
-                .uniqued()
-                .filter { item in
-                    !item.isUpcoming && !library.isWatched(item.key)
-                }
-            
-            if settings.prioritiseEnglish {
-                results = results.filter { item in
-                    (item.originalLanguage ?? "en") == "en"
-                }
-            }
-            
-            return results.sortedBySimilarity(to: seed)
         }
         
         func genreSimilarity(_ candidate: MediaItem, _ historyItem: MediaItem) -> Double {
@@ -1032,27 +1128,30 @@ private final class VestigoModel: ObservableObject {
             sortedRecommendations.filter { !library.isWatched($0.key) && !library.isNeverShowAgain($0.key) },
             hideWatched: true
         )
-        recommendations = await filteredShortFilmsIfNeeded(
+        recommendations = await filteredContentCleanupIfNeeded(
             visibleRecommendations,
-            enabled: settings.hideShortFilmsFromRecommended
+            hideShortFilms: settings.hideShortFilmsFromRecommended,
+            hideExtrasAndPromos: settings.hideExtrasAndPromosFromRecommended
         )
-        seriesNext = await filteredShortFilmsIfNeeded(
+        seriesNext = await filteredContentCleanupIfNeeded(
             preparedResults(nextItems.uniqued().filter { !library.isWatched($0.key) && !library.isNeverShowAgain($0.key) }, hideWatched: true),
-            enabled: settings.hideShortFilmsFromRecommended
+            hideShortFilms: settings.hideShortFilmsFromRecommended,
+            hideExtrasAndPromos: settings.hideExtrasAndPromosFromRecommended
         )
 
         if let lastWatched = library.lastWatchedItem {
-            do {
-                let prepared = preparedResults(
-                    relatedResults(try await tmdb.recommendations(for: lastWatched.key), seed: lastWatched),
-                    hideWatched: true
-                )
-                moreLikeLastWatched = await filteredShortFilmsIfNeeded(
-                    prepared,
-                    enabled: settings.hideShortFilmsFromRecommended
-                )
-            } catch {
+            let prepared = preparedResults(
+                await universalMoreLikeThis(for: lastWatched, hideWatched: true, limit: 80),
+                hideWatched: true
+            )
+            if prepared.isEmpty {
                 moreLikeLastWatched = []
+            } else {
+                moreLikeLastWatched = await filteredContentCleanupIfNeeded(
+                    prepared,
+                    hideShortFilms: settings.hideShortFilmsFromRecommended,
+                    hideExtrasAndPromos: settings.hideExtrasAndPromosFromRecommended
+                )
             }
         } else {
             moreLikeLastWatched = []
@@ -1067,20 +1166,19 @@ private final class VestigoModel: ObservableObject {
                 return lhs.title.localizedCaseInsensitiveCompare(rhs.title) == .orderedAscending
             }
 
-        for favourite in favouriteSeeds.prefix(8) {
-            do {
-                favouriteRecommendations.append(contentsOf: try await tmdb.recommendations(for: favourite.key))
-            } catch { }
+        for favourite in favouriteSeeds.prefix(6) {
+            favouriteRecommendations.append(contentsOf: await universalMoreLikeThis(for: favourite, hideWatched: true, limit: 35))
         }
 
-        if let primaryFavouriteSeed = favouriteSeeds.first {
+        if !favouriteSeeds.isEmpty {
             let prepared = preparedResults(
-                relatedResults(favouriteRecommendations, seed: primaryFavouriteSeed),
+                favouriteRecommendations.uniqued(),
                 hideWatched: true
             )
-            moreLikeFavourite = await filteredShortFilmsIfNeeded(
+            moreLikeFavourite = await filteredContentCleanupIfNeeded(
                 prepared,
-                enabled: settings.hideShortFilmsFromRecommended
+                hideShortFilms: settings.hideShortFilmsFromRecommended,
+                hideExtrasAndPromos: settings.hideExtrasAndPromosFromRecommended
             )
         } else {
             moreLikeFavourite = []
@@ -1093,9 +1191,10 @@ private final class VestigoModel: ObservableObject {
                 .filter { !library.isNeverShowAgain($0.key) }
                 .filter { settings.prioritiseEnglish ? (($0.originalLanguage ?? "en") == "en") : true }
 
-            fromTopGenre = await filteredShortFilmsIfNeeded(
+            fromTopGenre = await filteredContentCleanupIfNeeded(
                 preparedTopGenre,
-                enabled: settings.hideShortFilmsFromRecommended
+                hideShortFilms: settings.hideShortFilmsFromRecommended,
+                hideExtrasAndPromos: settings.hideExtrasAndPromosFromRecommended
             )
         } else {
             fromTopGenre = []
@@ -1126,9 +1225,10 @@ private final class VestigoModel: ObservableObject {
             hideWatched: true
         )
 
-        trySomethingNewRecommendations = await filteredShortFilmsIfNeeded(
+        trySomethingNewRecommendations = await filteredContentCleanupIfNeeded(
             preparedTrySomethingNew,
-            enabled: settings.hideShortFilmsFromRecommended
+            hideShortFilms: settings.hideShortFilmsFromRecommended,
+            hideExtrasAndPromos: settings.hideExtrasAndPromosFromRecommended
         )
     }
 
@@ -1245,7 +1345,15 @@ private final class VestigoModel: ObservableObject {
 
         let prepared = preparedResults(filtered, hideWatched: true)
         let visible = prepared.filter { item in
-            !settings.hideShortFilmsFromRecommended || !shouldHideAsShortFilm(item, enabled: true)
+            if shouldHideAsShortFilm(item, enabled: settings.hideShortFilmsFromRecommended) {
+                return false
+            }
+
+            if shouldHideAsSupplementalContent(item, enabled: settings.hideExtrasAndPromosFromRecommended) {
+                return false
+            }
+
+            return true
         }
 
         let sorted = visible
@@ -2275,9 +2383,10 @@ private final class VestigoModel: ObservableObject {
             enrichedResults = baseResults
         }
 
-        let visibleResults = await filteredShortFilmsIfNeeded(
+        let visibleResults = await filteredContentCleanupIfNeeded(
             enrichedResults,
-            enabled: settings.hideShortFilmsFromSearch
+            hideShortFilms: settings.hideShortFilmsFromSearch,
+            hideExtrasAndPromos: settings.hideExtrasAndPromosFromSearch
         )
 
         return finalizedSearchResults(visibleResults, query: query)
@@ -2454,9 +2563,8 @@ private final class VestigoModel: ObservableObject {
         let suffix = title.dropFirst(query.count).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !suffix.isEmpty else { return 0 }
         let firstToken = suffix.split(separator: " ").first.map(String.init) ?? ""
-        let sequelTokens: Set<String> = ["2", "3", "4", "5", "6", "7", "8", "9", "ii", "iii", "iv", "v", "vi", "vii", "viii", "ix"]
 
-        if sequelTokens.contains(firstToken) {
+        if isOrdinalContinuationToken(firstToken) {
             return 18_000
         }
 
@@ -2471,6 +2579,42 @@ private final class VestigoModel: ObservableObject {
         return 8_000
     }
 
+    private func isOrdinalContinuationToken(_ token: String) -> Bool {
+        if let number = Int(token), number > 1 {
+            return true
+        }
+
+        guard token.range(of: #"^[ivxlcdm]+$"#, options: .regularExpression) != nil else {
+            return false
+        }
+
+        var previous = 0
+        var total = 0
+
+        for character in token.reversed() {
+            let value: Int
+            switch character {
+            case "i": value = 1
+            case "v": value = 5
+            case "x": value = 10
+            case "l": value = 50
+            case "c": value = 100
+            case "d": value = 500
+            case "m": value = 1000
+            default: return false
+            }
+
+            if value < previous {
+                total -= value
+            } else {
+                total += value
+                previous = value
+            }
+        }
+
+        return total > 1
+    }
+
     private func normalizedSearchText(_ text: String) -> String {
         text
             .lowercased()
@@ -2481,7 +2625,7 @@ private final class VestigoModel: ObservableObject {
 
     private func normalizedSearchCacheKey(_ query: String, filter: SearchFilter) -> String {
         let minimumRatingKey = minimumTMDbRatingFilter.map { String($0.rawValue) } ?? "none"
-        return "\(filter.rawValue)|\(normalizedSearchText(query))|\(settings.prioritiseEnglish)|\(settings.hideAdultResults)|\(settings.hideWatchedFromSearch)|\(settings.hideLowestAgeRatings)|\(minimumRatingKey)|\(selectedRuntimeFilters.map(\.rawValue).sorted().joined(separator: ","))|\(settings.hideShortFilmsFromSearch)"
+        return "\(filter.rawValue)|\(normalizedSearchText(query))|\(settings.prioritiseEnglish)|\(settings.hideAdultResults)|\(settings.hideWatchedFromSearch)|\(settings.hideLowestAgeRatings)|\(minimumRatingKey)|\(selectedRuntimeFilters.map(\.rawValue).sorted().joined(separator: ","))|\(settings.hideShortFilmsFromSearch)|\(settings.hideExtrasAndPromosFromSearch)"
     }
 
     private func levenshteinDistance(_ a: String, _ b: String) -> Int {
@@ -2556,7 +2700,7 @@ private final class VestigoModel: ObservableObject {
             )
 
             let preparedItems = preparedResults(items, hideWatched: settings.hideWatchedFromSearch)
-            let visibleItems = await filteredShortFilmsIfNeeded(preparedItems, enabled: settings.hideShortFilmsFromSearch)
+            let visibleItems = await filteredContentCleanupIfNeeded(preparedItems, hideShortFilms: settings.hideShortFilmsFromSearch, hideExtrasAndPromos: settings.hideExtrasAndPromosFromSearch)
             let fastSortedItems = sort == .tmdbRating
                 ? visibleItems.sorted { lhs, rhs in
                     let lhsRating = lhs.voteAverage
@@ -2614,25 +2758,35 @@ private final class VestigoModel: ObservableObject {
         if detailsCache[item.key] == nil {
             do { detailsCache[item.key] = try await tmdb.detail(for: item) } catch { }
         }
-        if let detail = detailsCache[item.key], let collectionID = detail.tmdbCollectionID {
+        if item.kind == .movie, let detail = detailsCache[item.key], let collectionID = detail.tmdbCollectionID {
             do {
                 let collectionItems = try await backend.tmdbCollectionRecommendations(collectionID: collectionID)
-                detailsCache[item.key] = detail.addingSimilarCandidates(collectionItems, source: item)
-            } catch { }
-        }
-        if let detail = detailsCache[item.key] {
-            do {
-                let expandedTMDbItems = try await expandedTMDbSimilarCandidates(for: item, detail: detail)
-                detailsCache[item.key] = detail.addingSimilarCandidates(expandedTMDbItems, source: item)
-            } catch { }
-        }
-        if let detail = detailsCache[item.key] {
-            do {
-                let tasteDiveItems = try await tasteDiveCandidates(for: item)
                 detailsCache[item.key] = detail.addingSimilarCandidates(
-                    tasteDiveItems,
+                    collectionItems,
                     source: item,
-                    sourceBoosts: Dictionary(uniqueKeysWithValues: tasteDiveItems.map { ($0.key, 10.0) })
+                    sameFranchiseKeys: Set(collectionItems.map(\.key))
+                )
+            } catch { }
+        }
+        if let detail = detailsCache[item.key] {
+            do {
+                let franchiseItems = try await franchiseRecommendationCandidates(for: item)
+                detailsCache[item.key] = detail.addingSimilarCandidates(
+                    franchiseItems,
+                    source: item,
+                    sameFranchiseKeys: Set(franchiseItems.map(\.key))
+                )
+            } catch { }
+        }
+        if let detail = detailsCache[item.key], let imdbID = detail.imdbID {
+            do {
+                let franchiseMembers = try await relatedMedia.franchiseMembers(imdbID: imdbID)
+                let franchiseKeys = Set(franchiseMembers.map(\.mediaKey))
+                let franchiseItems = try await tmdb.items(for: Array(franchiseKeys))
+                detailsCache[item.key] = detail.addingSimilarCandidates(
+                    franchiseItems,
+                    source: item,
+                    sameFranchiseKeys: franchiseKeys
                 )
             } catch { }
         }
@@ -2663,20 +2817,101 @@ private final class VestigoModel: ObservableObject {
         }
     }
 
+    private func universalMoreLikeThis(for item: MediaItem, hideWatched: Bool, limit: Int) async -> [MediaItem] {
+        await loadBasicDetailIfNeeded(item)
+        guard let detail = detailsCache[item.key] else {
+            return []
+        }
+
+        var candidates = detail.similar
+        var sameFranchiseKeys = detail.sameFranchiseKeys
+        let strongKeys = detail.strongAPISimilarityKeys
+        let mediumKeys = detail.mediumAPISimilarityKeys
+        let sharedContributorKeys: Set<MediaKey> = []
+
+        if item.kind == .movie {
+            let collectionItems: [MediaItem]
+            do {
+                if let collectionID = detail.tmdbCollectionID {
+                    collectionItems = try await backend.tmdbCollectionRecommendations(collectionID: collectionID)
+                } else {
+                    collectionItems = []
+                }
+
+                candidates.append(contentsOf: collectionItems)
+                sameFranchiseKeys.formUnion(collectionItems.map(\.key))
+            } catch { }
+
+        }
+
+        do {
+            let franchiseItems = try await franchiseRecommendationCandidates(for: item)
+            candidates.append(contentsOf: franchiseItems)
+            sameFranchiseKeys.formUnion(franchiseItems.map(\.key))
+        } catch { }
+
+        if let imdbID = detail.imdbID {
+            do {
+                let franchiseKeys = Set(try await relatedMedia.franchiseMembers(imdbID: imdbID).map(\.mediaKey))
+                candidates.append(contentsOf: try await tmdb.items(for: Array(franchiseKeys)))
+                sameFranchiseKeys.formUnion(franchiseKeys)
+            } catch { }
+        }
+
+        let ranked = MediaDetail.rankedSimilarItems(
+            candidates
+                .uniqued()
+                .filter { candidate in
+                    candidate.shouldShowInDiscovery &&
+                    !candidate.isUpcoming &&
+                    candidate.key != item.key &&
+                    !library.isNeverShowAgain(candidate.key) &&
+                    (!hideWatched || !library.isWatched(candidate.key)) &&
+                    (!settings.prioritiseEnglish || (candidate.originalLanguage ?? "en") == "en")
+                },
+            source: item,
+            sameFranchiseKeys: sameFranchiseKeys,
+            strongAPISimilarityKeys: strongKeys,
+            mediumAPISimilarityKeys: mediumKeys,
+            sharedContributorKeys: sharedContributorKeys
+        )
+
+        return Array(ranked.prefix(limit))
+    }
+
     private func expandedTMDbSimilarCandidates(for item: MediaItem, detail: MediaDetail) async throws -> [MediaItem] {
         if let cached = tmdbExpandedSimilarCache[item.key] {
             return cached
         }
 
-        let personIDs = Array(detail.castAndKeyCrew.map(\.id).prefix(8))
-        async let keywordItems = tmdb.keywordDiscoveryCandidates(for: item, keywordIDs: detail.keywordIDs)
-        async let personItems = tmdb.sharedPersonCandidates(for: item, personIDs: personIDs)
-        let candidates = try await (keywordItems + personItems)
+        let candidates = try await tmdb.keywordDiscoveryCandidates(for: item, keywordIDs: detail.keywordIDs)
             .uniqued()
             .filter { $0.shouldShowInDiscovery && !$0.isUpcoming && $0.key != item.key }
         tmdbExpandedSimilarCache[item.key] = candidates
         return candidates
     }
+
+    private func franchiseRecommendationCandidates(for item: MediaItem) async throws -> [MediaItem] {
+        if let cached = franchiseRecommendationCache[item.key] {
+            return cached
+        }
+
+        let uniqueCandidates = try await backend.exactFranchiseRecommendations(
+            id: "\(item.kind.rawValue)-\(item.id)",
+            matching: item.title
+        )
+        .uniqued()
+        .filter { $0.shouldShowInDiscovery && !$0.isUpcoming && $0.key != item.key }
+        franchiseRecommendationCache[item.key] = uniqueCandidates
+        return uniqueCandidates
+    }
+
+    /*
+    TasteDive recommendation expansion is intentionally disabled.
+
+    The active More Like This system now uses TMDb recommendations/similar results plus exact
+    provider-backed franchise membership. Leaving this code commented keeps the old integration
+    available for future evaluation without querying or crediting an unused recommendation source.
 
     private func tasteDiveCandidates(for item: MediaItem) async throws -> [MediaItem] {
         if let cached = tasteDiveSimilarCache[item.key] {
@@ -2744,6 +2979,7 @@ private final class VestigoModel: ObservableObject {
         if normalizedTitle.contains(normalized) { return 60 }
         return 0
     }
+    */
 
     func loadExternalRatings(_ item: MediaItem, priority: Bool = false) async {
         guard item.kind == .movie || item.kind == .tv else { return }
@@ -2993,9 +3229,10 @@ private final class VestigoModel: ObservableObject {
             }
 
         let prepared = preparedResults(filtered, hideWatched: true)
-        let visibleItems = await filteredShortFilmsIfNeeded(
+        let visibleItems = await filteredContentCleanupIfNeeded(
             prepared,
-            enabled: settings.hideShortFilmsFromCollectionRecommendations
+            hideShortFilms: settings.hideShortFilmsFromCollectionRecommendations,
+            hideExtrasAndPromos: settings.hideExtrasAndPromosFromCollectionRecommendations
         )
         collectionRecommendations[collectionID] = visibleItems
     }
@@ -3294,10 +3531,72 @@ private final class VestigoModel: ObservableObject {
     private func loadLocal() {
         library = Storage.load(UserLibrary.self, key: "Vestigo.library") ?? UserLibrary()
         settings = Storage.load(AppSettings.self, key: "Vestigo.settings") ?? AppSettings()
+        if let syncedNotificationPreferences = Storage.loadNotificationPreferences() {
+            settings.notificationPreferences = syncedNotificationPreferences
+        }
         externalRatingsCache = Storage.load([MediaKey: ExternalRatings].self, key: "Vestigo.externalRatings") ?? [:]
+        localCloudSnapshotModifiedAt = Storage.load(Date.self, key: "Vestigo.cloudSnapshotModifiedAt") ?? .distantPast
         settings.preferredRatingSource = .imdb
         searchFilter = settings.defaultSearchFilter
         mediaFilter = settings.defaultHomeFilter
+    }
+
+    private func syncFromCloudOnLaunch() async {
+        do {
+            guard let snapshot = try await cloudSync.fetchSnapshot() else {
+                saveLocalSoon()
+                return
+            }
+            guard snapshot.modifiedAt > localCloudSnapshotModifiedAt else {
+                if localCloudSnapshotModifiedAt > snapshot.modifiedAt {
+                    saveLocalSoon()
+                }
+                return
+            }
+
+            isApplyingCloudSnapshot = true
+            defer { isApplyingCloudSnapshot = false }
+            library = snapshot.library
+            settings = snapshot.settings
+            externalRatingsCache = snapshot.externalRatings
+            localCloudSnapshotModifiedAt = snapshot.modifiedAt
+            Storage.save(snapshot.modifiedAt, key: "Vestigo.cloudSnapshotModifiedAt")
+            saveLocal()
+
+            settings.preferredRatingSource = .imdb
+            searchFilter = settings.defaultSearchFilter
+            mediaFilter = settings.defaultHomeFilter
+        } catch {
+            print("Cloud sync fetch failed: \(error.localizedDescription)")
+        }
+    }
+
+    private func offerNotificationOnboardingIfNeeded() {
+        guard !settings.notificationPreferences.hasSeenPrompt else { return }
+        showNotificationOnboarding = true
+    }
+
+    private func requestNotificationPermission() {
+        #if canImport(UserNotifications) && os(iOS)
+        Task {
+            do {
+                let granted = try await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .badge, .sound])
+                await MainActor.run {
+                    self.settings.notificationPreferences.isEnabled = granted
+                    self.saveLocalSoon()
+
+                    if granted {
+                        UIApplication.shared.registerForRemoteNotifications()
+                    }
+                }
+            } catch {
+                await MainActor.run {
+                    self.settings.notificationPreferences.isEnabled = false
+                    self.saveLocalSoon()
+                }
+            }
+        }
+        #endif
     }
     
     private func saveLocalSoon() {
@@ -3311,7 +3610,27 @@ private final class VestigoModel: ObservableObject {
     private func saveLocal() {
         Storage.save(library, key: "Vestigo.library")
         Storage.save(settings, key: "Vestigo.settings")
+        Storage.saveNotificationPreferences(settings.notificationPreferences)
         Storage.save(externalRatingsCache, key: "Vestigo.externalRatings")
+
+        guard !isApplyingCloudSnapshot else { return }
+
+        let snapshot = CloudLibrarySnapshot(
+            modifiedAt: Date(),
+            library: library,
+            settings: settings,
+            externalRatings: externalRatingsCache
+        )
+        localCloudSnapshotModifiedAt = snapshot.modifiedAt
+        Storage.save(snapshot.modifiedAt, key: "Vestigo.cloudSnapshotModifiedAt")
+
+        Task {
+            do {
+                try await cloudSync.saveSnapshot(snapshot)
+            } catch {
+                print("Cloud sync save failed: \(error.localizedDescription)")
+            }
+        }
     }
 }
 
@@ -4103,7 +4422,7 @@ private struct ForYouView: View {
                     }
 
                     if let favouriteItem, !filteredForYou(model.moreLikeFavourite).isEmpty {
-                        let sectionTitle = "More like your favourite \(favouriteItem.kind.label.lowercased()): \(favouriteItem.title)"
+                        let sectionTitle = "More like a favourite \(favouriteItem.kind.label.lowercased()): \(favouriteItem.title)"
                         let sectionItems = filteredForYou(model.moreLikeFavourite)
 
                         MediaSection(title: sectionTitle, items: sectionItems, hideWatchedForUpcoming: false, model: model) {
@@ -5585,6 +5904,34 @@ private struct PickForMeOptionButton: View {
         }
     }
 
+    private struct BackendFranchiseRecommendationsResponse: nonisolated Decodable {
+        struct WikidataFranchise: nonisolated Decodable {
+            let name: String?
+        }
+
+        let ok: Bool
+        let source: String?
+        let wikidataFranchise: WikidataFranchise?
+        let tvdbEntityIDCount: Int?
+        let embeddedExactRefCount: Int?
+        let tmdbFindRefCount: Int?
+        let wikidataExactRefCount: Int?
+        let tmdbSearchRefCount: Int?
+        let results: [BackendMediaItemDTO]
+
+        nonisolated var hasExactProviderEvidence: Bool {
+            (tvdbEntityIDCount ?? 0) > 0 ||
+            (embeddedExactRefCount ?? 0) > 0 ||
+            (tmdbFindRefCount ?? 0) > 0 ||
+            (wikidataExactRefCount ?? 0) > 0 ||
+            (source?.contains("wikidata-linked-franchise") == true)
+        }
+
+        nonisolated var mediaItems: [MediaItem] {
+            results.map(\.mediaItem)
+        }
+    }
+
     private actor VestigoBackendClient {
         private let baseURL: URL
 
@@ -5619,21 +5966,31 @@ private struct PickForMeOptionButton: View {
         }
         
         func franchiseRecommendations(id: String, matching query: String) async throws -> [MediaItem] {
+            let response = try await franchiseRecommendationResponse(id: id, matching: query)
+            return response.mediaItems
+        }
+
+        func exactFranchiseRecommendations(id: String, matching query: String) async throws -> [MediaItem] {
+            let response = try await franchiseRecommendationResponse(id: id, matching: query)
+            guard response.hasExactProviderEvidence else { return [] }
+            return response.mediaItems
+        }
+
+        private func franchiseRecommendationResponse(id: String, matching query: String) async throws -> BackendFranchiseRecommendationsResponse {
             var components = URLComponents(url: baseURL.appending(path: "franchise-recommendations"), resolvingAgainstBaseURL: false)!
             components.queryItems = [
                 URLQueryItem(name: "id", value: id),
                 URLQueryItem(name: "query", value: query)
             ]
 
-            guard let url = components.url else { return [] }
+            guard let url = components.url else { throw URLError(.badURL) }
             let (data, response) = try await URLSession.shared.data(from: url)
 
             guard let httpResponse = response as? HTTPURLResponse, (200...299).contains(httpResponse.statusCode) else {
                 throw URLError(.badServerResponse)
             }
 
-            let decoded = try JSONDecoder().decode(BackendFranchiseRecommendationsResponse.self, from: data)
-            return decoded.results.map(\.mediaItem)
+            return try JSONDecoder().decode(BackendFranchiseRecommendationsResponse.self, from: data)
         }
         
         func tmdbCollection(for item: MediaItem) async throws -> BackendTMDbCollectionDTO? {
@@ -5723,11 +6080,6 @@ private struct PickForMeOptionButton: View {
         let franchise: TVDBFranchiseList?
     }
     
-    private struct BackendFranchiseRecommendationsResponse: nonisolated Decodable {
-        let ok: Bool
-        let results: [BackendMediaItemDTO]
-    }
-
     private struct BackendTMDbCollectionResponse: nonisolated Decodable {
         let ok: Bool
         let collection: BackendTMDbCollectionDTO?
@@ -5809,6 +6161,7 @@ private struct PickForMeOptionButton: View {
         @State private var selectedFranchise: FranchiseCollection?
         @State private var tvdbFranchises: [String: TVDBFranchiseList] = [:]
         @State private var tmdbCollectionFranchises: [FranchiseCollection] = []
+        @State private var exactProviderFranchises: [FranchiseCollection] = []
         @State private var tvdbLoadError: String?
         private let backendClient = VestigoBackendClient()
 
@@ -5819,14 +6172,14 @@ private struct PickForMeOptionButton: View {
         }
 
         private var franchises: [FranchiseCollection] {
-            let discoveredIDs = Set(tmdbCollectionFranchises.map(\.id))
+            let discoveredIDs = Set((tmdbCollectionFranchises + exactProviderFranchises).map(\.id))
             let seeded = FranchiseLibrary.defaultFranchises(
                 matching: activeFranchiseSourceItems,
                 tvdbLists: tvdbFranchises
             )
             .filter { !discoveredIDs.contains($0.id) }
 
-            return (tmdbCollectionFranchises + seeded)
+            return (tmdbCollectionFranchises + exactProviderFranchises + seeded)
                 .filter { visibleItemCount(for: $0) > 0 }
                 .sorted { lhs, rhs in
                     lhs.title.localizedCaseInsensitiveCompare(rhs.title) == .orderedAscending
@@ -5972,7 +6325,55 @@ private struct PickForMeOptionButton: View {
             }
             .task(id: screenMode.title) {
                 await loadDiscoveredTMDbCollections()
+                await loadExactProviderFranchises()
                 await loadTVDBFranchises()
+            }
+        }
+
+        private func loadExactProviderFranchises() async {
+            var collectionsByMembership: [String: FranchiseCollection] = [:]
+
+            for item in activeFranchiseSourceItems {
+                do {
+                    let items = try await backendClient.exactFranchiseRecommendations(
+                        id: "\(item.kind.rawValue)-\(item.id)",
+                        matching: item.title
+                    )
+                    .uniqued()
+                    .filter(\.shouldShowInDiscovery)
+                    guard items.count >= 2 else { continue }
+
+                    let collection = FranchiseCollection(
+                        id: "provider-franchise-\(item.key.stableID)",
+                        title: item.title,
+                        logoSystemName: item.kind == .tv ? "tv" : "film.stack",
+                        logoURL: items.first(where: { $0.posterURL != nil })?.posterURL ?? item.posterURL,
+                        aliases: [],
+                        description: "Provider-backed franchise discovered from your library.",
+                        tvdbListQuery: item.title,
+                        tmdbCollectionID: nil,
+                        exactMemberIDs: Set(items.map { "\($0.kind.tmdbPath)-\($0.id)" })
+                    )
+
+                    let membershipKey = collection.exactMemberIDs.sorted().joined(separator: "|")
+                    guard !membershipKey.isEmpty else { continue }
+
+                    if let existing = collectionsByMembership[membershipKey] {
+                        if collection.title.count < existing.title.count {
+                            collectionsByMembership[membershipKey] = collection
+                        }
+                    } else {
+                        collectionsByMembership[membershipKey] = collection
+                    }
+                } catch {
+                    continue
+                }
+            }
+
+            await MainActor.run {
+                exactProviderFranchises = collectionsByMembership.values.sorted { lhs, rhs in
+                    lhs.title.localizedCaseInsensitiveCompare(rhs.title) == .orderedAscending
+                }
             }
         }
 
@@ -6412,7 +6813,7 @@ private struct PickForMeOptionButton: View {
                 if let tmdbCollectionID = franchise.tmdbCollectionID {
                     results = try await backendClient.tmdbCollectionRecommendations(collectionID: tmdbCollectionID)
                 } else {
-                    results = try await backendClient.franchiseRecommendations(id: franchise.id, matching: franchise.tvdbListQuery)
+                    results = try await backendClient.exactFranchiseRecommendations(id: franchise.id, matching: franchise.tvdbListQuery)
                 }
                 let visibleResults = results.filter(\.shouldShowInDiscovery)
                 await MainActor.run {
@@ -6748,14 +7149,18 @@ private struct PickForMeOptionButton: View {
         private enum SettingsCategory: String, CaseIterable, Identifiable {
             case content
             case display
+            case notifications
             case data
+            case about
 
             var id: String { rawValue }
             var title: String {
                 switch self {
                 case .display: return "Display"
                 case .content: return "Content"
+                case .notifications: return "Alerts"
                 case .data: return "Data"
+                case .about: return "About"
                 }
             }
         }
@@ -6940,6 +7345,7 @@ private struct PickForMeOptionButton: View {
                         }
                         
                         ShortFilmsSettingsGroup(model: model)
+                        ExtrasAndPromosSettingsGroup(model: model)
                         
                         DisclosureGroup {
                             VStack(alignment: .leading, spacing: 10) {
@@ -7105,6 +7511,14 @@ private struct PickForMeOptionButton: View {
                         
                     }
                     }
+
+                    if selectedCategory == .notifications {
+                        Text("Notifications")
+                            .sectionTitle()
+                            .padding(.top, 6)
+
+                        NotificationPreferencesContent(model: model, isOnboarding: false)
+                    }
                     
                     if selectedCategory == .data {
                     Text("Data")
@@ -7227,22 +7641,23 @@ private struct PickForMeOptionButton: View {
                         .settingBubble()
                     }
                     
-                    VStack(alignment: .center, spacing: 8) {
-                        Text("This product uses the TMDB API but is not endorsed or certified by TMDB.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .multilineTextAlignment(.center)
-                            .frame(maxWidth: .infinity, alignment: .center)
-                        
-                        Link("TMDB", destination: URL(string: "https://www.themoviedb.org/")!)
-                            .font(.caption.bold())
-                            .frame(maxWidth: .infinity, alignment: .center)
                     }
-                    .frame(maxWidth: .infinity, alignment: .center)
+
+                    if selectedCategory == .about {
+                        Text("About")
+                            .sectionTitle()
+                            .padding(.top, 6)
+
+                        AboutInfoView()
+
+                        AttributionFooter()
                     }
                 }
             }
-            .onChange(of: model.settings) { _, _ in Storage.save(model.settings, key: "Vestigo.settings") }
+            .onChange(of: model.settings) { _, _ in
+                Storage.save(model.settings, key: "Vestigo.settings")
+                Storage.saveNotificationPreferences(model.settings.notificationPreferences)
+            }
             .task {
                 while !Task.isCancelled {
                     try? await Task.sleep(nanoseconds: 5_000_000_000)
@@ -7340,7 +7755,367 @@ private struct PickForMeOptionButton: View {
         }
     }
 
-        private struct ShortFilmsSettingsGroup: View {
+    private struct AboutInfoView: View {
+        private var versionText: String {
+            let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String
+            let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String
+
+            switch (version, build) {
+            case let (.some(version), .some(build)) where !version.isEmpty && !build.isEmpty:
+                return "Version \(version) (\(build))"
+            case let (.some(version), _) where !version.isEmpty:
+                return "Version \(version)"
+            default:
+                return "Version unavailable"
+            }
+        }
+
+        var body: some View {
+            VStack(alignment: .center, spacing: 16) {
+                VStack(alignment: .center, spacing: 4) {
+                    Text("Vestigo")
+                        .font(.system(size: 34, weight: .heavy, design: .rounded))
+                        .foregroundStyle(.primary)
+
+                    Text(versionText)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    Text("Created by Jojo Hyman")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                AboutLinkButton(
+                    title: "GitHub",
+                    systemImage: "chevron.left.forwardslash.chevron.right",
+                    url: URL(string: "https://github.com/Kyrbiis/Vestigo")!
+                )
+
+                VStack(alignment: .center, spacing: 6) {
+                    Text("Your library and preferences are stored on-device and in iCloud where enabled.")
+                    Text("Vestigo was vibe coded: AI assisted with code implementation, while the product thinking, decisions, review, and non-coding work were all done by people.")
+                    Text("Notifications are optional and can be changed anytime in Settings.")
+                    Text("Vestigo is not affiliated with TMDB, IMDb, OMDb, TheTVDB, Watchmode, YouTube, Wikimedia, or their parent companies.")
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+            }
+            .frame(maxWidth: .infinity, alignment: .center)
+            .padding(.vertical, 8)
+        }
+    }
+
+    private struct AboutLinkButton: View {
+        let title: String
+        let systemImage: String
+        let url: URL
+
+        var body: some View {
+            Link(destination: url) {
+                HStack(spacing: 8) {
+                    Image(systemName: systemImage)
+                        .font(.system(size: 14, weight: .semibold))
+
+                    Text(title)
+                        .font(.caption.bold())
+                }
+                .foregroundStyle(.primary)
+                .padding(.horizontal, 12)
+                .frame(height: 34)
+                .contentShape(RoundedRectangle(cornerRadius: 17, style: .continuous))
+            }
+            .buttonStyle(.plain)
+            .liquidGlass(cornerRadius: 17)
+        }
+    }
+
+    private struct AttributionFooter: View {
+        private let providers = AttributionProvider.all
+
+        var body: some View {
+            VStack(alignment: .center, spacing: 12) {
+                Text("Vestigo combines catalog, ratings, recommendations, availability, trailer, and open-knowledge data from the following services:")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+
+                VStack(alignment: .center, spacing: 14) {
+                    ForEach(providers) { provider in
+                        Link(destination: provider.url) {
+                            AttributionProviderRow(provider: provider)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .center)
+            .padding(.top, 8)
+            .padding(.bottom, 2)
+        }
+    }
+
+    private struct AttributionProviderRow: View {
+        let provider: AttributionProvider
+
+        var body: some View {
+            VStack(alignment: .center, spacing: provider.hasLogo ? 5 : 0) {
+                AttributionLogoView(provider: provider)
+
+                Text(provider.description)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .frame(maxWidth: 320)
+            .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        }
+    }
+
+    private struct AttributionLogoView: View {
+        let provider: AttributionProvider
+
+        var body: some View {
+            ZStack {
+                if let logoText = provider.logoText {
+                    Text(logoText)
+                        .font(.custom("HelveticaNeue-Thin", fixedSize: 30))
+                        .fontWeight(.thin)
+                        .foregroundStyle(Color(red: 0.42, green: 0.42, blue: 0.42))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
+                } else if let logoURL = provider.logoURL {
+                    AsyncImage(url: logoURL) { phase in
+                        switch phase {
+                        case .success(let image):
+                            image
+                                .resizable()
+                                .scaledToFit()
+                                .padding(6)
+                        default:
+                            fallback
+                        }
+                    }
+                } else if let logoAssetName = provider.logoAssetName {
+                    Image(logoAssetName)
+                        .resizable()
+                        .scaledToFit()
+                        .padding(2)
+                } else {
+                    fallback
+                }
+            }
+            .frame(width: provider.logoAssetName == nil ? 120 : 150, height: provider.hasLogo ? 36 : 0)
+            .opacity(provider.hasLogo ? 1 : 0)
+            .accessibilityHidden(true)
+        }
+
+        private var fallback: some View {
+            Text(provider.shortLabel)
+                .font(.system(size: 12, weight: .heavy, design: .rounded))
+                .foregroundStyle(.primary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+                .padding(.horizontal, 4)
+        }
+    }
+
+    private struct AttributionProvider: Identifiable {
+        let id: String
+        let name: String
+        let shortLabel: String
+        let description: String
+        let url: URL
+        let logoURL: URL?
+        let logoAssetName: String?
+        let logoText: String?
+
+        var hasLogo: Bool {
+            logoURL != nil || logoAssetName != nil || logoText != nil
+        }
+
+        static let all: [AttributionProvider] = [
+            AttributionProvider(
+                id: "tmdb",
+                name: "TMDB",
+                shortLabel: "TMDB",
+                description: "This product uses the TMDB API but is not endorsed or certified by TMDB.",
+                url: URL(string: "https://www.themoviedb.org/")!,
+                logoURL: nil,
+                logoAssetName: "TMDBLogo",
+                logoText: nil
+            ),
+            AttributionProvider(
+                id: "watchmode",
+                name: "Watchmode",
+                shortLabel: "WM",
+                description: "Streaming availability and provider data are provided in part by Watchmode.",
+                url: URL(string: "https://api.watchmode.com/")!,
+                logoURL: nil,
+                logoAssetName: "WatchmodeLogo",
+                logoText: nil
+            ),
+            AttributionProvider(
+                id: "thetvdb",
+                name: "TheTVDB",
+                shortLabel: "TVDB",
+                description: "Series, season, episode, and franchise metadata are provided in part by TheTVDB.",
+                url: URL(string: "https://thetvdb.com/")!,
+                logoURL: URL(string: "https://www.thetvdb.com/images/attribution/logo1.png"),
+                logoAssetName: nil,
+                logoText: nil
+            ),
+            AttributionProvider(
+                id: "omdb",
+                name: "OMDb",
+                shortLabel: "OMDb",
+                description: "This product uses the OMDb API but is not endorsed or certified by OMDb or IMDb. Ratings and movie data are provided in part by The Open Movie Database and IMDb.",
+                url: URL(string: "https://www.omdbapi.com/")!,
+                logoURL: nil,
+                logoAssetName: nil,
+                logoText: "OMDb API"
+            ),
+            /*
+            TasteDive attribution is intentionally disabled because the app no longer calls
+            TasteDive in the active recommendation path. If we re-enable TasteDive as a live
+            data source later, restore this provider entry at the same time.
+
+            AttributionProvider(
+                id: "tastedive",
+                name: "TasteDive",
+                shortLabel: "TD",
+                description: "Some similar-title candidate data is provided by the legacy TasteDive API.",
+                url: URL(string: "https://tastedive.com/read/api")!,
+                logoURL: nil,
+                logoAssetName: "TasteDiveLogo",
+                logoText: nil
+            ),
+            */
+            AttributionProvider(
+                id: "youtube",
+                name: "YouTube",
+                shortLabel: "YT",
+                description: "Trailer playback uses embedded YouTube videos where available.",
+                url: URL(string: "https://www.youtube.com/")!,
+                logoURL: nil,
+                logoAssetName: "YouTubeLogo",
+                logoText: nil
+            ),
+            AttributionProvider(
+                id: "wikimedia",
+                name: "Wikidata and Wikipedia",
+                shortLabel: "W",
+                description: "Original-media and knowledge links use Wikimedia projects and their content licenses.",
+                url: URL(string: "https://www.wikidata.org/")!,
+                logoURL: nil,
+                logoAssetName: nil,
+                logoText: nil
+            )
+        ]
+    }
+
+    private struct NotificationPreferencesSheet: View {
+        @ObservedObject var model: VestigoModel
+        @Environment(\.dismiss) private var dismiss
+        let isOnboarding: Bool
+
+        var body: some View {
+            NavigationStack {
+                ZStack {
+                    AppBackground(settings: model.settings)
+                        .ignoresSafeArea()
+
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 16) {
+                            Text("Notifications")
+                                .font(.system(size: 34, weight: .heavy, design: .rounded))
+                                .foregroundStyle(.primary)
+
+                            Text("Vestigo can alert you about releases, trailers, where-to-watch updates, new seasons, and franchise continuations. You can enable, disable, or tune each notification type anytime in Settings.")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+
+                            NotificationPreferencesContent(model: model, isOnboarding: isOnboarding)
+                        }
+                        .padding(20)
+                    }
+                }
+                .toolbar {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button(isOnboarding ? "Not now" : "Cancel") {
+                            if isOnboarding {
+                                model.markNotificationPromptSeen()
+                            }
+                            dismiss()
+                        }
+                    }
+
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button("Done") {
+                            model.markNotificationPromptSeen()
+                            dismiss()
+                        }
+                        .fontWeight(.semibold)
+                    }
+                }
+            }
+            .presentationDetents([.large])
+        }
+    }
+
+    private struct NotificationPreferencesContent: View {
+        @ObservedObject var model: VestigoModel
+        let isOnboarding: Bool
+
+        private var preferences: NotificationPreferences {
+            model.settings.notificationPreferences
+        }
+
+        var body: some View {
+            VStack(alignment: .leading, spacing: 12) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Toggle("Allow notifications", isOn: Binding(
+                        get: { preferences.isEnabled },
+                        set: { model.setNotificationsEnabled($0) }
+                    ))
+                    .font(.headline.bold())
+                    .tint(model.settings.accentColor)
+
+                    Text("This is opt-in only. Turning this off disables every notification type below without changing your individual choices.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .settingBubble()
+
+                VStack(alignment: .leading, spacing: 10) {
+                    ForEach(NotificationKind.allCases) { kind in
+                        Toggle(isOn: Binding(
+                            get: { preferences.enabledKinds.contains(kind) },
+                            set: { model.setNotificationKind(kind, isEnabled: $0) }
+                        )) {
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(kind.title)
+                                    .font(.subheadline.bold())
+
+                                Text(kind.description)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .tint(model.settings.accentColor)
+                    }
+                }
+                .disabled(!preferences.isEnabled)
+                .opacity(preferences.isEnabled ? 1 : 0.45)
+                .settingBubble()
+            }
+        }
+    }
+
+    private struct ShortFilmsSettingsGroup: View {
             @ObservedObject var model: VestigoModel
             
             var body: some View {
@@ -7412,6 +8187,87 @@ private struct PickForMeOptionButton: View {
                         .foregroundStyle(.primary)
                     
                     Text("Short films are detected from runtime after details load. Unknown runtimes stay visible.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.leading)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+
+    private struct ExtrasAndPromosSettingsGroup: View {
+            @ObservedObject var model: VestigoModel
+
+            var body: some View {
+                DisclosureGroup {
+                    toggles
+                } label: {
+                    label
+                }
+                .foregroundStyle(.primary)
+                .tint(model.settings.accentColor)
+                .settingBubble()
+                .onChange(of: model.settings.hideExtrasAndPromosFromHome) { _, _ in
+                    Task { await model.loadHome() }
+                }
+                .onChange(of: model.settings.hideExtrasAndPromosFromSearch) { _, _ in
+                    model.updateSearch()
+
+                    Task {
+                        for route in model.searchPath {
+                            await model.loadGenre(route.genre)
+                        }
+                    }
+                }
+                .onChange(of: model.settings.hideExtrasAndPromosFromRecommended) { _, _ in
+                    Task { await model.loadSmartRecommendations() }
+                }
+                .onChange(of: model.settings.hideExtrasAndPromosFromCollectionRecommendations) { _, _ in
+                    Task {
+                        for collection in model.library.collections {
+                            await model.loadCollectionRecommendations(for: collection.id)
+                        }
+                    }
+                }
+            }
+
+            private var toggles: some View {
+                VStack(alignment: .leading, spacing: 10) {
+                    Toggle("Hide from Home", isOn: $model.settings.hideExtrasAndPromosFromHome)
+                        .font(.subheadline.bold())
+                        .foregroundStyle(.primary)
+                        .tint(model.settings.accentColor)
+                        .padding(.trailing, 6)
+
+                    Toggle("Hide from Search", isOn: $model.settings.hideExtrasAndPromosFromSearch)
+                        .font(.subheadline.bold())
+                        .foregroundStyle(.primary)
+                        .tint(model.settings.accentColor)
+                        .padding(.trailing, 6)
+
+                    Toggle("Hide from Recommended", isOn: $model.settings.hideExtrasAndPromosFromRecommended)
+                        .font(.subheadline.bold())
+                        .foregroundStyle(.primary)
+                        .tint(model.settings.accentColor)
+                        .padding(.trailing, 6)
+
+                    Toggle("Hide from Collection Recommendations", isOn: $model.settings.hideExtrasAndPromosFromCollectionRecommendations)
+                        .font(.subheadline.bold())
+                        .foregroundStyle(.primary)
+                        .tint(model.settings.accentColor)
+                        .padding(.trailing, 6)
+                }
+                .padding(.top, 8)
+            }
+
+            private var label: some View {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Hide extras and promos")
+                        .font(.headline.bold())
+                        .foregroundStyle(.primary)
+
+                    Text("Uses TMDb metadata signals like runtime, documentary genre, audience footprint, and catalog completeness. It avoids fixed title phrase lists, so it only runs when enabled.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.leading)
@@ -7725,21 +8581,28 @@ private struct PickForMeOptionButton: View {
                     model.toggleWatchlist(item)
                 }
                 
-                if !item.isUpcoming {
+                if item.isUpcoming {
+                    DetailRowButton(
+                        title: "Calendar",
+                        systemName: "calendar.badge.plus"
+                    ) {
+                        model.addReleaseToCalendar(item)
+                    }
+                } else {
                     DetailRowButton(
                         title: "Watched",
                         systemName: model.library.isWatched(item.key) ? "checkmark.circle.fill" : "checkmark.circle"
                     ) {
                         model.toggleWatched(item, showsRatingPrompt: false)
                     }
-                }
-                
-                DetailRowButton(
-                    title: "Favourite",
-                    systemName: model.library.isFavourite(item) ? "star.fill" : "star",
-                    isEnabled: model.library.isWatched(item.key)
-                ) {
-                    model.requestToggleFavourite(item)
+
+                    DetailRowButton(
+                        title: "Favourite",
+                        systemName: model.library.isFavourite(item) ? "star.fill" : "star",
+                        isEnabled: model.library.isWatched(item.key)
+                    ) {
+                        model.requestToggleFavourite(item)
+                    }
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -7816,7 +8679,7 @@ private struct PickForMeOptionButton: View {
         
         @ViewBuilder private var episodeSection: some View {
             if item.kind == .tv {
-                EpisodeProgressView(show: item, model: model, seasons: detail?.seasons ?? [], isLoading: detail == nil)
+                EpisodeProgressView(show: item, model: model, seasons: detail?.seasons ?? [], providers: visibleProviders ?? [], isLoading: detail == nil)
             }
         }
         
@@ -8685,7 +9548,11 @@ private struct PickForMeOptionButton: View {
                     model.toggleWatchlist(item)
                 }
                 
-                if !item.isUpcoming {
+                if item.isUpcoming {
+                    TileIconButton(systemName: "calendar.badge.plus") {
+                        model.addReleaseToCalendar(item)
+                    }
+                } else {
                     TileIconButton(systemName: model.library.isWatched(item.key) ? "checkmark.circle.fill" : "checkmark.circle") {
                         model.toggleWatched(item)
                     }
@@ -8711,6 +9578,7 @@ private struct PickForMeOptionButton: View {
         let show: MediaItem
         @ObservedObject var model: VestigoModel
         let seasons: [SeasonInfo]
+        let providers: [StreamingOption]
         let isLoading: Bool
         @State private var expandedSeasonNumbers = Set<Int>()
         
@@ -8731,6 +9599,7 @@ private struct PickForMeOptionButton: View {
                             SeasonDropdownView(
                                 show: show,
                                 season: season,
+                                providers: providers,
                                 isExpanded: expandedSeasonNumbers.contains(season.number),
                                 model: model
                             ) {
@@ -8752,8 +9621,11 @@ private struct PickForMeOptionButton: View {
     private struct SeasonDropdownView: View {
         let show: MediaItem
         let season: SeasonInfo
+        let providers: [StreamingOption]
         let isExpanded: Bool
         @ObservedObject var model: VestigoModel
+        @Environment(\.openURL) private var openURL
+        @State private var isProviderDialogPresented = false
         let toggle: () -> Void
         
         var body: some View {
@@ -8775,6 +9647,31 @@ private struct PickForMeOptionButton: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                         
                         Spacer()
+
+                        Button {
+                            isProviderDialogPresented = true
+                        } label: {
+                            Image(systemName: "arrow.up.forward.app")
+                                .font(.caption.bold())
+                                .foregroundStyle(.secondary)
+                                .frame(width: 34, height: 34)
+                                .contentShape(Circle())
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(providerLinks.isEmpty)
+                        .opacity(providerLinks.isEmpty ? 0.45 : 1.0)
+                        .accessibilityLabel("Open \(season.name)")
+                        .confirmationDialog("Open \(season.name)", isPresented: $isProviderDialogPresented, titleVisibility: .visible) {
+                            ForEach(providerLinks.prefix(12)) { provider in
+                                Button(provider.dialogTitle) {
+                                    guard let url = provider.tappableURL else { return }
+                                    openURL(url)
+                                }
+                            }
+                            Button("Cancel", role: .cancel) { }
+                        } message: {
+                            Text("Choose a streaming app from Where to watch.")
+                        }
                         
                         Button(isSeasonWatched ? "Unwatch" : "Mark") {
                             model.markSeason(
@@ -8807,7 +9704,7 @@ private struct PickForMeOptionButton: View {
                     
                     VStack(spacing: 8) {
                         ForEach(episodeRows) { episode in
-                            EpisodeRowView(show: show, seasonNumber: season.number, episode: episode, model: model)
+                            EpisodeRowView(show: show, seasonNumber: season.number, episode: episode, providers: providers, model: model)
                         }
                     }
                     .padding(12)
@@ -8837,13 +9734,20 @@ private struct PickForMeOptionButton: View {
                 EpisodeInfo(number: number, title: "Episode \(number)", airDate: nil, runtime: nil, stillPath: nil)
             }
         }
+
+        private var providerLinks: [StreamingOption] {
+            providers.filter { $0.tappableURL != nil }
+        }
     }
     
     private struct EpisodeRowView: View {
         let show: MediaItem
         let seasonNumber: Int
         let episode: EpisodeInfo
+        let providers: [StreamingOption]
         @ObservedObject var model: VestigoModel
+        @Environment(\.openURL) private var openURL
+        @State private var isProviderDialogPresented = false
         
         var body: some View {
             Button {
@@ -8868,6 +9772,31 @@ private struct PickForMeOptionButton: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     
                     Spacer(minLength: 8)
+
+                    Button {
+                        isProviderDialogPresented = true
+                    } label: {
+                        Image(systemName: "arrow.up.forward.app")
+                            .font(.caption.bold())
+                            .foregroundStyle(.secondary)
+                            .frame(width: 34, height: 34)
+                            .contentShape(Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(providerLinks.isEmpty)
+                    .opacity(providerLinks.isEmpty ? 0.45 : 1.0)
+                    .accessibilityLabel("Open \(episode.title)")
+                    .confirmationDialog("Open \(episode.title)", isPresented: $isProviderDialogPresented, titleVisibility: .visible) {
+                        ForEach(providerLinks.prefix(12)) { provider in
+                            Button(provider.dialogTitle) {
+                                guard let url = provider.tappableURL else { return }
+                                openURL(url)
+                            }
+                        }
+                        Button("Cancel", role: .cancel) { }
+                    } message: {
+                        Text("Choose a streaming app from Where to watch.")
+                    }
                     
                     Image(systemName: isWatched ? "checkmark.circle.fill" : "circle")
                         .font(.title3.bold())
@@ -8896,6 +9825,10 @@ private struct PickForMeOptionButton: View {
             }
             
             return parts.joined(separator: " • ")
+        }
+
+        private var providerLinks: [StreamingOption] {
+            providers.filter { $0.tappableURL != nil }
         }
     }
     
@@ -9394,10 +10327,7 @@ private struct PickForMeOptionButton: View {
         @Environment(\.imageRefreshToken) private var imageRefreshToken
         
         private var tappableURL: URL? {
-            guard let rawURL = option.openURL?.trimmingCharacters(in: .whitespacesAndNewlines), !rawURL.isEmpty else {
-                return nil
-            }
-            return URL(string: rawURL)
+            option.tappableURL
         }
         
         var body: some View {
@@ -9482,6 +10412,17 @@ private struct PickForMeOptionButton: View {
             }
             
             return parts.joined(separator: " • ")
+        }
+
+        var dialogTitle: String {
+            "\(cleanedServiceName) - \(cleanedAvailabilityLine)"
+        }
+
+        var tappableURL: URL? {
+            guard let rawURL = openURL?.trimmingCharacters(in: .whitespacesAndNewlines), !rawURL.isEmpty else {
+                return nil
+            }
+            return URL(string: rawURL)
         }
         
         private var cleanedTypeText: String? {
@@ -10928,6 +11869,37 @@ private struct PickForMeOptionButton: View {
             let response: TMDbPersonDetailResponse = try await fetch(path: "/person/\(personID)", query: [])
             return PersonDetail(response: response)
         }
+
+        func item(for key: MediaKey) async throws -> MediaItem {
+            let response: TMDbStandaloneMediaDTO = try await fetch(path: "/\(key.kind.tmdbPath)/\(key.id)", query: [])
+            return MediaItem(
+                id: response.id,
+                kind: key.kind,
+                title: response.title ?? response.name ?? "",
+                overview: response.overview ?? "",
+                posterPath: response.posterPath,
+                backdropPath: response.backdropPath,
+                releaseDate: response.releaseDate ?? response.firstAirDate,
+                voteAverage: response.voteAverage ?? 0,
+                voteCount: response.voteCount,
+                genreIDs: response.genres?.map(\.id) ?? [],
+                creditRole: nil,
+                runtime: response.runtime,
+                originalLanguage: response.originalLanguage
+            )
+        }
+
+        func items(for keys: [MediaKey]) async throws -> [MediaItem] {
+            var items: [MediaItem] = []
+            for key in keys.prefix(40) where key.kind == .movie || key.kind == .tv {
+                do {
+                    items.append(try await item(for: key))
+                } catch {
+                    continue
+                }
+            }
+            return items.uniqued()
+        }
         
         
         private func fetchList(path: String, query: [URLQueryItem]) async throws -> [MediaItem] {
@@ -10967,6 +11939,11 @@ private struct PickForMeOptionButton: View {
         }
     }
 
+    /*
+    TasteDive client models are intentionally disabled with the inactive recommendation path.
+    They are kept here as commented reference code so a future re-evaluation can restore the
+    client and attribution together.
+
     private struct TasteDiveService {
         private let base = "https://mtttuyvpjyugudkevchj.supabase.co/functions/v1/vestigo-api"
 
@@ -10996,6 +11973,7 @@ private struct PickForMeOptionButton: View {
         let ok: Bool
         let results: [String]
     }
+    */
 
     private struct RelatedMediaService {
         private let endpoint = URL(string: "https://query.wikidata.org/sparql")!
@@ -11024,6 +12002,29 @@ private struct PickForMeOptionButton: View {
             return RelatedMediaSection.sections(from: items)
         }
 
+        func franchiseMembers(imdbID: String) async throws -> [WikidataFranchiseMember] {
+            let cleanedID = imdbID.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard cleanedID.hasPrefix("tt") else { return [] }
+
+            var components = URLComponents(url: endpoint, resolvingAgainstBaseURL: false)!
+            components.queryItems = [
+                URLQueryItem(name: "query", value: franchiseQuery(imdbID: cleanedID)),
+                URLQueryItem(name: "format", value: "json")
+            ]
+
+            guard let url = components.url else { return [] }
+            var request = URLRequest(url: url)
+            request.setValue("application/sparql-results+json", forHTTPHeaderField: "Accept")
+
+            let (data, response) = try await URLSession.shared.data(for: request)
+            if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+                return []
+            }
+
+            let decoded = try JSONDecoder().decode(WikidataFranchiseSPARQLResponse.self, from: data)
+            return decoded.results.bindings.compactMap(WikidataFranchiseMember.init(binding:))
+        }
+
         private func sparqlQuery(imdbID: String) -> String {
             """
             SELECT ?relation ?item ?itemLabel ?itemDescription ?image ?article WHERE {
@@ -11040,6 +12041,63 @@ private struct PickForMeOptionButton: View {
             LIMIT 30
             """
         }
+
+        private func franchiseQuery(imdbID: String) -> String {
+            """
+            SELECT DISTINCT ?tmdbID ?kind WHERE {
+              ?work wdt:P345 "\(imdbID)" .
+              {
+                ?work wdt:P179 ?series .
+                ?item wdt:P179 ?series .
+              } UNION {
+                ?work wdt:P361 ?parent .
+                ?item wdt:P361 ?parent .
+              } UNION {
+                ?work wdt:P1080 ?universe .
+                ?item wdt:P1080 ?universe .
+              }
+              FILTER(?item != ?work)
+              {
+                ?item wdt:P4985 ?tmdbID .
+                BIND("tv" AS ?kind)
+              } UNION {
+                ?item wdt:P4947 ?tmdbID .
+                BIND("movie" AS ?kind)
+              }
+            }
+            LIMIT 50
+            """
+        }
+    }
+
+    private struct WikidataFranchiseSPARQLResponse: Decodable {
+        let results: WikidataFranchiseSPARQLResults
+    }
+
+    private struct WikidataFranchiseSPARQLResults: Decodable {
+        let bindings: [WikidataFranchiseBinding]
+    }
+
+    private struct WikidataFranchiseBinding: Decodable {
+        let tmdbID: WikidataSPARQLValue
+        let kind: WikidataSPARQLValue
+    }
+
+    private struct WikidataFranchiseMember: Hashable {
+        let tmdbID: Int
+        let kind: MediaKind
+
+        init?(binding: WikidataFranchiseBinding) {
+            guard let id = Int(binding.tmdbID.value) else { return nil }
+            switch binding.kind.value {
+            case "tv": kind = .tv
+            case "movie": kind = .movie
+            default: return nil
+            }
+            tmdbID = id
+        }
+
+        var mediaKey: MediaKey { MediaKey(id: tmdbID, kind: kind) }
     }
 
     private struct WikidataSPARQLResponse: Decodable {
@@ -11097,6 +12155,71 @@ private struct PickForMeOptionButton: View {
         let country: String?
         let count: Int?
         let sources: [StreamingOption]
+    }
+
+#if canImport(EventKit)
+    private struct ReleaseCalendarService {
+        private let eventStore = EKEventStore()
+
+        func addReleaseEvent(for item: MediaItem, releaseDate: Date) async throws {
+            let granted = try await eventStore.requestWriteOnlyAccessToEvents()
+            guard granted else {
+                throw CalendarAddError.accessDenied
+            }
+
+            guard let calendar = eventStore.defaultCalendarForNewEvents else {
+                throw CalendarAddError.noCalendar
+            }
+
+            let event = EKEvent(eventStore: eventStore)
+            event.title = calendarTitle(for: item)
+            event.notes = calendarNotes(for: item)
+            event.calendar = calendar
+            event.isAllDay = true
+            event.startDate = Calendar.current.startOfDay(for: releaseDate)
+            event.endDate = Calendar.current.date(byAdding: .day, value: 1, to: event.startDate) ?? event.startDate
+
+            try eventStore.save(event, span: .thisEvent)
+        }
+
+        private func calendarTitle(for item: MediaItem) -> String {
+            switch item.kind {
+            case .movie:
+                return "\(item.title) release"
+            case .tv:
+                return "\(item.title) season release"
+            case .person:
+                return item.title
+            }
+        }
+
+        private func calendarNotes(for item: MediaItem) -> String {
+            item.overview.isEmpty ? "Added by Vestigo." : "\(item.overview)\n\nAdded by Vestigo."
+        }
+    }
+#else
+    private struct ReleaseCalendarService {
+        func addReleaseEvent(for item: MediaItem, releaseDate: Date) async throws {
+            throw CalendarAddError.unavailable
+        }
+    }
+#endif
+
+    private enum CalendarAddError: LocalizedError {
+        case accessDenied
+        case noCalendar
+        case unavailable
+
+        var errorDescription: String? {
+            switch self {
+            case .accessDenied:
+                return "Calendar access was not granted."
+            case .noCalendar:
+                return "No writable calendar is available."
+            case .unavailable:
+                return "Calendar access is not available on this device."
+            }
+        }
     }
 
         
@@ -11159,13 +12282,14 @@ private struct PickForMeOptionButton: View {
         let releaseDate: String?
         let firstAirDate: String?
         let voteAverage: Double?
+        let voteCount: Int?
         let genreIDs: [Int]?
         let originalLanguage: String?
         let birthday: String?
         let deathday: String?
         let placeOfBirth: String?
         let knownForDepartment: String?
-        
+
         enum CodingKeys: String, CodingKey {
             case id, title, name, overview, character, job
             case mediaType = "media_type"
@@ -11174,12 +12298,45 @@ private struct PickForMeOptionButton: View {
             case releaseDate = "release_date"
             case firstAirDate = "first_air_date"
             case voteAverage = "vote_average"
+            case voteCount = "vote_count"
             case genreIDs = "genre_ids"
             case originalLanguage = "original_language"
             case birthday
             case deathday
             case placeOfBirth = "place_of_birth"
             case knownForDepartment = "known_for_department"
+        }
+    }
+
+    private struct TMDbGenreDTO: Decodable {
+        let id: Int
+        let name: String?
+    }
+
+    private struct TMDbStandaloneMediaDTO: Decodable {
+        let id: Int
+        let title: String?
+        let name: String?
+        let overview: String?
+        let posterPath: String?
+        let backdropPath: String?
+        let releaseDate: String?
+        let firstAirDate: String?
+        let voteAverage: Double?
+        let voteCount: Int?
+        let genres: [TMDbGenreDTO]?
+        let runtime: Int?
+        let originalLanguage: String?
+
+        enum CodingKeys: String, CodingKey {
+            case id, title, name, overview, genres, runtime
+            case posterPath = "poster_path"
+            case backdropPath = "backdrop_path"
+            case releaseDate = "release_date"
+            case firstAirDate = "first_air_date"
+            case voteAverage = "vote_average"
+            case voteCount = "vote_count"
+            case originalLanguage = "original_language"
         }
     }
     
@@ -12141,11 +13298,12 @@ private struct PickForMeOptionButton: View {
         let backdropPath: String?
         let releaseDate: String?
         let voteAverage: Double
+        let voteCount: Int?
         let genreIDs: [Int]
         let creditRole: String?
         let runtime: Int?
         let originalLanguage: String?
-        
+
         nonisolated init(
             id: Int,
             kind: MediaKind,
@@ -12155,6 +13313,7 @@ private struct PickForMeOptionButton: View {
             backdropPath: String?,
             releaseDate: String?,
             voteAverage: Double,
+            voteCount: Int? = nil,
             genreIDs: [Int],
             creditRole: String?,
             runtime: Int?,
@@ -12168,12 +13327,13 @@ private struct PickForMeOptionButton: View {
             self.backdropPath = backdropPath
             self.releaseDate = releaseDate
             self.voteAverage = voteAverage
+            self.voteCount = voteCount
             self.genreIDs = genreIDs
             self.creditRole = creditRole
             self.runtime = runtime
             self.originalLanguage = originalLanguage
         }
-        
+
         init(_ dto: TMDbMediaDTO) {
             id = dto.id
             if dto.mediaType == "tv" || (dto.name != nil && dto.title == nil) { kind = .tv }
@@ -12185,6 +13345,7 @@ private struct PickForMeOptionButton: View {
             backdropPath = dto.backdropPath
             releaseDate = dto.releaseDate ?? dto.firstAirDate
             voteAverage = dto.voteAverage ?? 0
+            voteCount = dto.voteCount
             genreIDs = dto.genreIDs ?? []
             creditRole = dto.character ?? dto.job
             runtime = nil
@@ -12210,6 +13371,7 @@ private struct PickForMeOptionButton: View {
                 backdropPath: backdropPath,
                 releaseDate: releaseDate,
                 voteAverage: voteAverage,
+                voteCount: voteCount,
                 genreIDs: genreIDs,
                 creditRole: creditRole,
                 runtime: runtime,
@@ -12424,6 +13586,10 @@ private struct PickForMeOptionButton: View {
         let trailers: [TrailerVideo]
         let imdbID: String?
         let tmdbProviders: [StreamingOption]
+        let sameFranchiseKeys: Set<MediaKey>
+        let strongAPISimilarityKeys: Set<MediaKey>
+        let mediumAPISimilarityKeys: Set<MediaKey>
+        let sharedContributorKeys: Set<MediaKey>
         
         init(response: TMDbDetailResponse, fallback: MediaItem) {
             let crewList: [PersonDTO] = response.credits?.crew ?? []
@@ -12434,10 +13600,13 @@ private struct PickForMeOptionButton: View {
             status = response.status
             runtime = response.runtime
             ageRating = response.usAgeRating
-            keywordIDs = response.keywords?.keywordIDs ?? []
+            let allKeywords: [TMDbKeyword] = response.keywords?.keywords ?? response.keywords?.results ?? []
+            keywordIDs = allKeywords.map(\.id)
             trailers = TrailerVideo.ranked(from: response.videos?.results ?? [])
             imdbID = response.externalIDs?.imdbID
             tmdbProviders = response.watchProviders?.usStreamingOptions ?? []
+            sameFranchiseKeys = []
+            sharedContributorKeys = []
             
             let directorDTO = crewList.first { dto in
                 dto.job == "Director"
@@ -12503,24 +13672,35 @@ private struct PickForMeOptionButton: View {
                 return SeasonInfo(number: number, name: name, airDate: airDate, episodeCount: count, episodes: episodes)
             }
             
-            let recommendationResults: [TMDbMediaDTO] = response.recommendations?.results ?? []
-            let similarResults: [TMDbMediaDTO] = response.similar?.results ?? []
-            let combinedResults: [TMDbMediaDTO] = similarResults + recommendationResults
-            let mappedSimilar: [MediaItem] = combinedResults.map { dto in
-                MediaItem(dto)
-            }
+            let recommendationItems: [MediaItem] = (response.recommendations?.results ?? []).map { MediaItem($0) }
+            let similarItems: [MediaItem] = (response.similar?.results ?? []).map { MediaItem($0) }
+            let strongAPISimilarityKeys = Set(recommendationItems.map(\.key))
+            let mediumAPISimilarityKeys = Set(similarItems.map(\.key)).subtracting(strongAPISimilarityKeys)
+            self.strongAPISimilarityKeys = strongAPISimilarityKeys
+            self.mediumAPISimilarityKeys = mediumAPISimilarityKeys
+            let mappedSimilar: [MediaItem] = recommendationItems + similarItems
             similar = Self.rankedSimilarItems(
                 mappedSimilar.uniqued().filter { $0.shouldShowInDiscovery && !$0.isUpcoming && $0.key != fallback.key },
                 source: fallback,
-                cast: mappedCast,
-                keyCrew: uniqueKeyCrew,
-                runtime: runtime,
-                sourceBoosts: [:]
+                strongAPISimilarityKeys: strongAPISimilarityKeys,
+                mediumAPISimilarityKeys: mediumAPISimilarityKeys
             )
         }
 
-        func addingSimilarCandidates(_ candidates: [MediaItem], source: MediaItem, sourceBoosts: [MediaKey: Double] = [:]) -> MediaDetail {
-            MediaDetail(
+        func addingSimilarCandidates(
+            _ candidates: [MediaItem],
+            source: MediaItem,
+            sameFranchiseKeys: Set<MediaKey> = [],
+            strongAPISimilarityKeys: Set<MediaKey> = [],
+            mediumAPISimilarityKeys: Set<MediaKey> = [],
+            sharedContributorKeys: Set<MediaKey> = []
+        ) -> MediaDetail {
+            let mergedSameFranchiseKeys = self.sameFranchiseKeys.union(sameFranchiseKeys)
+            let mergedStrongAPISimilarityKeys = self.strongAPISimilarityKeys.union(strongAPISimilarityKeys)
+            let mergedMediumAPISimilarityKeys = self.mediumAPISimilarityKeys.union(mediumAPISimilarityKeys)
+            let mergedSharedContributorKeys = self.sharedContributorKeys.union(sharedContributorKeys)
+
+            return MediaDetail(
                 director: director,
                 creator: creator,
                 cast: cast,
@@ -12529,10 +13709,10 @@ private struct PickForMeOptionButton: View {
                 similar: Self.rankedSimilarItems(
                     (similar + candidates).uniqued().filter { $0.shouldShowInDiscovery && !$0.isUpcoming && $0.key != source.key },
                     source: source,
-                    cast: cast,
-                    keyCrew: castAndKeyCrew,
-                    runtime: runtime,
-                    sourceBoosts: sourceBoosts
+                    sameFranchiseKeys: mergedSameFranchiseKeys,
+                    strongAPISimilarityKeys: mergedStrongAPISimilarityKeys,
+                    mediumAPISimilarityKeys: mergedMediumAPISimilarityKeys,
+                    sharedContributorKeys: mergedSharedContributorKeys
                 ),
                 firstAirDate: firstAirDate,
                 lastAirDate: lastAirDate,
@@ -12543,7 +13723,11 @@ private struct PickForMeOptionButton: View {
                 keywordIDs: keywordIDs,
                 trailers: trailers,
                 imdbID: imdbID,
-                tmdbProviders: tmdbProviders
+                tmdbProviders: tmdbProviders,
+                sameFranchiseKeys: mergedSameFranchiseKeys,
+                strongAPISimilarityKeys: mergedStrongAPISimilarityKeys,
+                mediumAPISimilarityKeys: mergedMediumAPISimilarityKeys,
+                sharedContributorKeys: mergedSharedContributorKeys
             )
         }
 
@@ -12551,7 +13735,7 @@ private struct PickForMeOptionButton: View {
             trailers.first
         }
 
-        private init(director: PersonSummary?, creator: PersonSummary?, cast: [PersonSummary], castAndKeyCrew: [PersonSummary], seasons: [SeasonInfo], similar: [MediaItem], firstAirDate: String?, lastAirDate: String?, status: String?, runtime: Int?, ageRating: String?, tmdbCollectionID: Int?, keywordIDs: [Int], trailers: [TrailerVideo], imdbID: String?, tmdbProviders: [StreamingOption]) {
+        private init(director: PersonSummary?, creator: PersonSummary?, cast: [PersonSummary], castAndKeyCrew: [PersonSummary], seasons: [SeasonInfo], similar: [MediaItem], firstAirDate: String?, lastAirDate: String?, status: String?, runtime: Int?, ageRating: String?, tmdbCollectionID: Int?, keywordIDs: [Int], trailers: [TrailerVideo], imdbID: String?, tmdbProviders: [StreamingOption], sameFranchiseKeys: Set<MediaKey>, strongAPISimilarityKeys: Set<MediaKey>, mediumAPISimilarityKeys: Set<MediaKey>, sharedContributorKeys: Set<MediaKey>) {
             self.director = director
             self.creator = creator
             self.cast = cast
@@ -12568,87 +13752,223 @@ private struct PickForMeOptionButton: View {
             self.trailers = trailers
             self.imdbID = imdbID
             self.tmdbProviders = tmdbProviders
+            self.sameFranchiseKeys = sameFranchiseKeys
+            self.strongAPISimilarityKeys = strongAPISimilarityKeys
+            self.mediumAPISimilarityKeys = mediumAPISimilarityKeys
+            self.sharedContributorKeys = sharedContributorKeys
         }
 
-        private static func rankedSimilarItems(_ items: [MediaItem], source: MediaItem, cast: [PersonSummary], keyCrew: [PersonSummary], runtime: Int?, sourceBoosts: [MediaKey: Double]) -> [MediaItem] {
+        static func rankedSimilarItems(
+            _ items: [MediaItem],
+            source: MediaItem,
+            sameFranchiseKeys: Set<MediaKey> = [],
+            strongAPISimilarityKeys: Set<MediaKey> = [],
+            mediumAPISimilarityKeys: Set<MediaKey> = [],
+            sharedContributorKeys: Set<MediaKey> = []
+        ) -> [MediaItem] {
             let sourceGenres = Set(source.genreIDs)
-            let sourceText = normalizedSimilarityText("\(source.title) \(source.overview)")
-            let sourceTokens = Set(sourceText.split(separator: " ").map(String.init).filter { $0.count >= 4 })
-            let castNames = Set(cast.prefix(6).map { normalizedSimilarityText($0.name) })
-            let crewNames = Set(keyCrew.prefix(6).map { normalizedSimilarityText($0.name) })
+            let sourceLanguage = source.originalLanguage
+            let sourceYear = source.releaseYearNumber
+            let sourceVote = source.voteAverage
+            let sourceTokens = recommendationTokens(for: source)
+            let sourceTone = genreVector(for: source)
 
-            return items
-                .compactMap { item -> (item: MediaItem, score: Double)? in
+            let scoredItems = items.enumerated()
+                .compactMap { entry -> (item: MediaItem, score: Double, inputIndex: Int)? in
+                    let inputIndex = entry.offset
+                    let item = entry.element
+                    let sameFranchise = sameFranchiseKeys.contains(item.key)
+                    let strongAPISimilarity = strongAPISimilarityKeys.contains(item.key)
+                    let mediumAPISimilarity = mediumAPISimilarityKeys.contains(item.key)
+                    let sharedContributor = sharedContributorKeys.contains(item.key)
+                    let isTVSource = source.kind == .tv
+                    let isCrossKindForTVSource = isTVSource && item.kind != source.kind
                     let itemGenres = Set(item.genreIDs)
-                    let itemText = normalizedSimilarityText("\(item.title) \(item.overview)")
-                    let itemTokens = Set(itemText.split(separator: " ").map(String.init).filter { $0.count >= 4 })
-                    let sharedSpecificTokens = sourceTokens.intersection(itemTokens).filter { !moreLikeThisBroadSimilarityTokens.contains($0) }
+                    let sharedGenres = sourceGenres.intersection(itemGenres)
+                    let sharedSpecificTokens = sourceTokens.intersection(recommendationTokens(for: item))
                     let titleScore = titleRelationshipScore(sourceTitle: source.title, itemTitle: item.title)
                     let evidence = similarityEvidenceScore(
                         source: source,
                         item: item,
-                        sourceText: sourceText,
-                        itemText: itemText,
                         sharedSpecificTokens: sharedSpecificTokens,
                         sourceGenres: sourceGenres,
-                        itemGenres: itemGenres,
-                        castNames: castNames,
-                        crewNames: crewNames
+                        itemGenres: itemGenres
                     )
 
-                    guard titleScore >= 18 || evidence.passesGate else {
+                    let hasSourceEvidence = sameFranchise || strongAPISimilarity || mediumAPISimilarity || sharedContributor
+                    let hasHumanEvidence = evidence.passesGate || sharedSpecificTokens.count >= 2 || titleScore >= 18
+                    guard hasSourceEvidence || hasHumanEvidence else {
+                        return nil
+                    }
+
+                    if isCrossKindForTVSource && !sameFranchise && !strongAPISimilarity {
                         return nil
                     }
 
                     var score = 0.0
 
-                    score += titleScore
+                    if sameFranchise {
+                        score += 80.0
+                    }
+
+                    if strongAPISimilarity {
+                        score += 32.0
+                    }
+
+                    if mediumAPISimilarity {
+                        score += isTVSource ? 6.0 : 13.0
+                    }
+
+                    if sharedContributor {
+                        score += isTVSource ? 2.0 : 8.0
+                    }
+
+                    let strongGenreOverlap = sharedGenres.filter { !moreLikeThisWeakSimilarityGenreIDs.contains($0) }.count
+                    let weakGenreOverlap = sharedGenres.filter { moreLikeThisWeakSimilarityGenreIDs.contains($0) }.count
+                    score += Double(strongGenreOverlap) * 5.5
+                    score += Double(weakGenreOverlap) * 1.2
+                    score += isTVSource && !sameFranchise && !strongAPISimilarity ? min(titleScore, 8.0) : titleScore
                     score += evidence.score
+                    score += min(Double(sharedSpecificTokens.count) * (isTVSource ? 1.6 : 3.0), isTVSource ? 8.0 : 18.0)
 
-                    score += Double(sharedSpecificTokens.count) * 4.0
-                    score += Double(sourceGenres.intersection(itemGenres).filter { !moreLikeThisWeakSimilarityGenreIDs.contains($0) }.count) * 1.2
-                    score += Double(sourceGenres.intersection(itemGenres).filter { moreLikeThisWeakSimilarityGenreIDs.contains($0) }.count) * 0.25
+                    let toneSimilarity = sourceTone.similarity(to: genreVector(for: item))
+                    score += toneSimilarity * 7.0
 
-                    if item.originalLanguage == source.originalLanguage {
-                        score += 0.4
-                    }
-
-                    if let sourceYear = source.releaseYearNumber, let itemYear = item.releaseYearNumber {
-                        let distance = abs(sourceYear - itemYear)
-                        if distance <= 3 {
-                            score += 0.8
-                        } else if distance <= 8 {
-                            score += 0.25
+                    if let sourceYear, let itemYear = item.releaseYearNumber {
+                        let diff = abs(sourceYear - itemYear)
+                        if diff == 0 {
+                            score += 4.0
+                        } else if diff <= 3 {
+                            score += 3.0
+                        } else if diff <= 7 {
+                            score += 1.6
+                        } else if diff > 25, !sameFranchise {
+                            score -= 1.4
                         }
                     }
 
-                    if let runtime, let itemRuntime = item.runtime {
-                        let runtimeDistance = abs(runtime - itemRuntime)
-                        if runtimeDistance <= 15 {
-                            score += 1.4
-                        } else if runtimeDistance <= 30 {
-                            score += 0.6
-                        }
-                    }
-
-                    if itemText.containsAny(Array(castNames)) {
+                    if source.kind == item.kind {
                         score += 3.0
+                    } else if sameFranchise || strongAPISimilarity {
+                        score += 0.8
+                    } else {
+                        score -= 2.0
                     }
 
-                    if itemText.containsAny(Array(crewNames)) {
-                        score += 4.0
+                    if item.originalLanguage == sourceLanguage {
+                        score += 2.0
+                    } else if !sameFranchise && !strongAPISimilarity {
+                        score -= 1.2
                     }
 
-                    score += min(sourceBoosts[item.key] ?? 0, 2.5)
-                    score += min(item.voteAverage, 10) * 0.25
+                    if sourceVote > 0, item.voteAverage > 0 {
+                        let voteDelta = abs(sourceVote - item.voteAverage)
+                        if voteDelta <= 0.5 {
+                            score += 2.0
+                        } else if voteDelta <= 1.0 {
+                            score += 1.0
+                        }
+                    }
 
-                    return (item, score)
+                    if item.voteAverage >= 7.5 {
+                        score += 2.0
+                    } else if item.voteAverage >= 6.5 {
+                        score += 0.8
+                    } else if item.voteAverage > 0 {
+                        score -= 2.5
+                    }
+
+                    if let voteCount = item.voteCount {
+                        if voteCount >= 1_000 {
+                            score += 1.4
+                        } else if voteCount < 25, !sameFranchise {
+                            score -= 3.0
+                        }
+                    }
+
+                    if sourceGenres.isDisjoint(with: itemGenres), !sameFranchise, !strongAPISimilarity, sharedSpecificTokens.isEmpty {
+                        score -= 10.0
+                    }
+
+                    let minimumScore = isTVSource && !mediumAPISimilarity ? 14.0 : 11.0
+                    if !sameFranchise && !strongAPISimilarity && score < minimumScore {
+                        return nil
+                    }
+
+                    return (item, score, inputIndex)
                 }
+
+            return scoredItems
                 .sorted { lhs, rhs in
-                    if lhs.score != rhs.score { return lhs.score > rhs.score }
-                    return lhs.item.voteAverage > rhs.item.voteAverage
+                    let lhsFranchise = sameFranchiseKeys.contains(lhs.item.key)
+                    let rhsFranchise = sameFranchiseKeys.contains(rhs.item.key)
+                    if lhsFranchise != rhsFranchise { return lhsFranchise }
+
+                    if lhsFranchise && rhsFranchise, lhs.score != rhs.score {
+                        return lhs.score > rhs.score
+                    }
+
+                    return lhs.inputIndex < rhs.inputIndex
                 }
                 .map(\.item)
+                .uniqued()
+        }
+
+        private struct RecommendationGenreVector {
+            let action: Double
+            let comedy: Double
+            let horror: Double
+            let mystery: Double
+            let romance: Double
+            let speculative: Double
+            let family: Double
+            let documentary: Double
+            let crime: Double
+            let prestigeDrama: Double
+
+            func similarity(to other: RecommendationGenreVector) -> Double {
+                let lhs = [action, comedy, horror, mystery, romance, speculative, family, documentary, crime, prestigeDrama]
+                let rhs = [other.action, other.comedy, other.horror, other.mystery, other.romance, other.speculative, other.family, other.documentary, other.crime, other.prestigeDrama]
+                let dot = zip(lhs, rhs).reduce(0.0) { $0 + ($1.0 * $1.1) }
+                let lhsMagnitude = sqrt(lhs.reduce(0.0) { $0 + ($1 * $1) })
+                let rhsMagnitude = sqrt(rhs.reduce(0.0) { $0 + ($1 * $1) })
+                guard lhsMagnitude > 0, rhsMagnitude > 0 else { return 0 }
+                return dot / (lhsMagnitude * rhsMagnitude)
+            }
+        }
+
+        private static func genreVector(for item: MediaItem) -> RecommendationGenreVector {
+            let genres = Set(item.genreIDs)
+
+            func has(_ ids: Set<Int>) -> Double {
+                genres.isDisjoint(with: ids) ? 0.0 : 1.0
+            }
+
+            return RecommendationGenreVector(
+                action: has([28, 12, 53, 10752, 10759]),
+                comedy: has([35]),
+                horror: has([27]),
+                mystery: has([9648]),
+                romance: has([10749]),
+                speculative: has([878, 14, 10765]),
+                family: has([16, 10751, 10762]),
+                documentary: has([99]),
+                crime: has([80]),
+                prestigeDrama: has([18, 36])
+            )
+        }
+
+        private static func recommendationTokens(for item: MediaItem) -> Set<String> {
+            let text = normalizedSimilarityText("\(item.title) \(item.overview)")
+            let rawTokens = text
+                .split(separator: " ")
+                .map(String.init)
+                .filter { token in
+                    token.count >= 6 &&
+                    token.rangeOfCharacter(from: .decimalDigits) == nil
+                }
+
+            return Set(rawTokens)
         }
 
         private struct SimilarityEvidence {
@@ -12661,16 +13981,41 @@ private struct PickForMeOptionButton: View {
             }
         }
 
+        private static func relaxedSimilarityPass(
+            titleScore: Double,
+            evidence: SimilarityEvidence,
+            sharedSpecificTokenCount: Int,
+            mediumAPISimilarity: Bool
+        ) -> Bool {
+            if titleScore >= 12 {
+                return true
+            }
+
+            if evidence.strongSignalCount >= 1 {
+                return true
+            }
+
+            if evidence.mediumSignalCount >= 2, sharedSpecificTokenCount >= 1 {
+                return true
+            }
+
+            if sharedSpecificTokenCount >= 2, evidence.score >= 5.0 {
+                return true
+            }
+
+            if mediumAPISimilarity && sharedSpecificTokenCount >= 1 {
+                return true
+            }
+
+            return false
+        }
+
         private static func similarityEvidenceScore(
             source: MediaItem,
             item: MediaItem,
-            sourceText: String,
-            itemText: String,
             sharedSpecificTokens: Set<String>,
             sourceGenres: Set<Int>,
-            itemGenres: Set<Int>,
-            castNames: Set<String>,
-            crewNames: Set<String>
+            itemGenres: Set<Int>
         ) -> SimilarityEvidence {
             var score = 0.0
             var strong = 0
@@ -12693,25 +14038,6 @@ private struct PickForMeOptionButton: View {
                 medium += 1
             }
 
-            let sharedSubjectClusters = subjectClusterMatches(sourceText: sourceText, itemText: itemText)
-            if sharedSubjectClusters >= 2 {
-                score += Double(sharedSubjectClusters) * 5.0
-                strong += 1
-            } else if sharedSubjectClusters == 1 {
-                score += 3.4
-                medium += 1
-            }
-
-            if itemText.containsAny(Array(crewNames)) {
-                score += 7.0
-                strong += 1
-            }
-
-            if itemText.containsAny(Array(castNames)) {
-                score += 5.0
-                medium += 1
-            }
-
             let strongGenreOverlap = sourceGenres.intersection(itemGenres).filter { !moreLikeThisWeakSimilarityGenreIDs.contains($0) }.count
             if strongGenreOverlap >= 1 {
                 score += Double(strongGenreOverlap) * 2.6
@@ -12726,12 +14052,6 @@ private struct PickForMeOptionButton: View {
             return SimilarityEvidence(score: score, strongSignalCount: strong, mediumSignalCount: medium)
         }
 
-        private static func subjectClusterMatches(sourceText: String, itemText: String) -> Int {
-            moreLikeThisSubjectSimilarityClusters.filter { cluster in
-                sourceText.containsAny(cluster) && itemText.containsAny(cluster)
-            }.count
-        }
-
         private static func normalizedSimilarityText(_ value: String) -> String {
             value
                 .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
@@ -12742,7 +14062,7 @@ private struct PickForMeOptionButton: View {
 
         private static func titleStem(_ value: String) -> String {
             normalizedSimilarityText(value)
-                .replacingOccurrences(of: "\\b(the|a|an|part|chapter|season|movie|film)\\b", with: "", options: .regularExpression)
+                .replacingOccurrences(of: "\\b(the|a|an|of|from|part|chapter|season|movie|film|series)\\b", with: "", options: .regularExpression)
                 .split(separator: " ")
                 .prefix(3)
                 .joined(separator: " ")
@@ -12757,9 +14077,8 @@ private struct PickForMeOptionButton: View {
             if item.hasPrefix(source + " ") {
                 let suffix = item.dropFirst(source.count).trimmingCharacters(in: .whitespacesAndNewlines)
                 let firstToken = suffix.split(separator: " ").first.map(String.init) ?? ""
-                let sequelTokens: Set<String> = ["2", "3", "4", "5", "6", "7", "8", "9", "ii", "iii", "iv", "v", "vi", "vii", "viii", "ix"]
 
-                if sequelTokens.contains(firstToken) {
+                if isSequelOrdinalToken(firstToken) {
                     return 92
                 }
 
@@ -12773,8 +14092,48 @@ private struct PickForMeOptionButton: View {
             let sourceStem = titleStem(sourceTitle)
             let itemStem = titleStem(itemTitle)
             if !sourceStem.isEmpty && sourceStem == itemStem { return 36 }
-            if !sourceStem.isEmpty && (itemStem.contains(sourceStem) || sourceStem.contains(itemStem)) { return 18 }
+            let sourceStemTokens = sourceStem.split(separator: " ")
+            let itemStemTokens = itemStem.split(separator: " ")
+            let shorterStem = sourceStem.count <= itemStem.count ? sourceStem : itemStem
+            let hasMeaningfulContainedStem = shorterStem.count >= 8 && sourceStemTokens.count >= 2 && itemStemTokens.count >= 2
+            if hasMeaningfulContainedStem && (itemStem.contains(sourceStem) || sourceStem.contains(itemStem)) { return 18 }
             return 0
+        }
+
+        private static func isSequelOrdinalToken(_ token: String) -> Bool {
+            if let number = Int(token), number > 1 {
+                return true
+            }
+
+            guard token.range(of: #"^[ivxlcdm]+$"#, options: .regularExpression) != nil else {
+                return false
+            }
+
+            var previous = 0
+            var total = 0
+
+            for character in token.reversed() {
+                let value: Int
+                switch character {
+                case "i": value = 1
+                case "v": value = 5
+                case "x": value = 10
+                case "l": value = 50
+                case "c": value = 100
+                case "d": value = 500
+                case "m": value = 1000
+                default: return false
+                }
+
+                if value < previous {
+                    total -= value
+                } else {
+                    total += value
+                    previous = value
+                }
+            }
+
+            return total > 1
         }
         
         var yearRangeText: String {
@@ -13092,6 +14451,52 @@ private struct PickForMeOptionButton: View {
     
     private struct EpisodeKey: Codable, Hashable { let show: MediaKey; let season: Int; let episode: Int }
     private struct MediaCollection: Identifiable, Codable, Hashable { var id = UUID(); var name: String; var isDynamic: Bool; var itemKeys: Set<MediaKey> = [] }
+
+    private enum NotificationKind: String, Codable, CaseIterable, Identifiable, Hashable {
+        case watchlistRelease
+        case similarUpcoming
+        case newTrailer
+        case watchAvailability
+        case watchedSeriesSeason
+        case franchiseInstallment
+
+        var id: String { rawValue }
+
+        var title: String {
+            switch self {
+            case .watchlistRelease: return "Watchlist releases"
+            case .similarUpcoming: return "Strong recommendation matches"
+            case .newTrailer: return "New trailers"
+            case .watchAvailability: return "Where-to-watch updates"
+            case .watchedSeriesSeason: return "New watched-show seasons"
+            case .franchiseInstallment: return "Franchise continuations"
+            }
+        }
+
+        var description: String {
+            switch self {
+            case .watchlistRelease:
+                return "A movie in your Watchlist is released, or a watchlisted show gets a new season."
+            case .similarUpcoming:
+                return "A movie or show comes out, or is upcoming, and strongly fits your watched, favourited, or highly rated history."
+            case .newTrailer:
+                return "A new trailer appears for something you watched or saved."
+            case .watchAvailability:
+                return "A saved released item gains or changes where-to-watch provider data."
+            case .watchedSeriesSeason:
+                return "A new season of a show you marked watched is released."
+            case .franchiseInstallment:
+                return "A new installment in a franchise you watched is released or upcoming."
+            }
+        }
+    }
+
+    private struct NotificationPreferences: Codable, Hashable {
+        var isEnabled = false
+        var enabledKinds: Set<NotificationKind> = Set(NotificationKind.allCases)
+        var hasSeenPrompt = false
+        var deviceToken: String?
+    }
     
     private struct AppSettings: Codable, Hashable {
         var recommendationStrength: Double = 3.5
@@ -13113,6 +14518,10 @@ private struct PickForMeOptionButton: View {
         var hideShortFilmsFromSearch = false
         var hideShortFilmsFromRecommended = false
         var hideShortFilmsFromCollectionRecommendations = false
+        var hideExtrasAndPromosFromHome = false
+        var hideExtrasAndPromosFromSearch = false
+        var hideExtrasAndPromosFromRecommended = false
+        var hideExtrasAndPromosFromCollectionRecommendations = false
         var defaultSearchFilter: SearchFilter = .all
         var defaultHomeFilter: MediaFilter = .both
         var defaultCategorySort: GenreSort = .tmdbRating
@@ -13123,6 +14532,85 @@ private struct PickForMeOptionButton: View {
         var warnBeforeReplacingFavourite = true
         var promptToRateAfterMarkingWatched = true
         var preferredRatingSource: RatingSource = .imdb
+        var notificationPreferences = NotificationPreferences()
+
+        enum CodingKeys: String, CodingKey {
+            case recommendationStrength
+            case appearance
+            case accent
+            case accentRed
+            case accentGreen
+            case accentBlue
+            case name
+            case prioritiseEnglish
+            case removeItemsFromWatchlist
+            case usePlainBackground
+            case hideAdultResults
+            case hideAnimeResults
+            case hideLowestAgeRatings
+            case hideWatchedFromHome
+            case hideWatchedFromSearch
+            case hideShortFilmsFromHome
+            case hideShortFilmsFromSearch
+            case hideShortFilmsFromRecommended
+            case hideShortFilmsFromCollectionRecommendations
+            case hideExtrasAndPromosFromHome
+            case hideExtrasAndPromosFromSearch
+            case hideExtrasAndPromosFromRecommended
+            case hideExtrasAndPromosFromCollectionRecommendations
+            case defaultSearchFilter
+            case defaultHomeFilter
+            case defaultCategorySort
+            case showUpcomingReleases
+            case hideUpcomingFromSearch
+            case hideUpcomingFromRecommended
+            case hideUpcomingFromCollectionRecommendations
+            case warnBeforeReplacingFavourite
+            case promptToRateAfterMarkingWatched
+            case preferredRatingSource
+            case notificationPreferences
+        }
+
+        init() {}
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+
+            recommendationStrength = try container.decodeIfPresent(Double.self, forKey: .recommendationStrength) ?? recommendationStrength
+            appearance = try container.decodeIfPresent(AppearanceMode.self, forKey: .appearance) ?? appearance
+            accent = try container.decodeIfPresent(AccentChoice.self, forKey: .accent) ?? accent
+            accentRed = try container.decodeIfPresent(Double.self, forKey: .accentRed) ?? accentRed
+            accentGreen = try container.decodeIfPresent(Double.self, forKey: .accentGreen) ?? accentGreen
+            accentBlue = try container.decodeIfPresent(Double.self, forKey: .accentBlue) ?? accentBlue
+            name = try container.decodeIfPresent(String.self, forKey: .name) ?? name
+            prioritiseEnglish = try container.decodeIfPresent(Bool.self, forKey: .prioritiseEnglish) ?? prioritiseEnglish
+            removeItemsFromWatchlist = try container.decodeIfPresent(Bool.self, forKey: .removeItemsFromWatchlist) ?? removeItemsFromWatchlist
+            usePlainBackground = try container.decodeIfPresent(Bool.self, forKey: .usePlainBackground) ?? usePlainBackground
+            hideAdultResults = try container.decodeIfPresent(Bool.self, forKey: .hideAdultResults) ?? hideAdultResults
+            hideAnimeResults = try container.decodeIfPresent(Bool.self, forKey: .hideAnimeResults) ?? hideAnimeResults
+            hideLowestAgeRatings = try container.decodeIfPresent(Bool.self, forKey: .hideLowestAgeRatings) ?? hideLowestAgeRatings
+            hideWatchedFromHome = try container.decodeIfPresent(Bool.self, forKey: .hideWatchedFromHome) ?? hideWatchedFromHome
+            hideWatchedFromSearch = try container.decodeIfPresent(Bool.self, forKey: .hideWatchedFromSearch) ?? hideWatchedFromSearch
+            hideShortFilmsFromHome = try container.decodeIfPresent(Bool.self, forKey: .hideShortFilmsFromHome) ?? hideShortFilmsFromHome
+            hideShortFilmsFromSearch = try container.decodeIfPresent(Bool.self, forKey: .hideShortFilmsFromSearch) ?? hideShortFilmsFromSearch
+            hideShortFilmsFromRecommended = try container.decodeIfPresent(Bool.self, forKey: .hideShortFilmsFromRecommended) ?? hideShortFilmsFromRecommended
+            hideShortFilmsFromCollectionRecommendations = try container.decodeIfPresent(Bool.self, forKey: .hideShortFilmsFromCollectionRecommendations) ?? hideShortFilmsFromCollectionRecommendations
+            hideExtrasAndPromosFromHome = try container.decodeIfPresent(Bool.self, forKey: .hideExtrasAndPromosFromHome) ?? hideExtrasAndPromosFromHome
+            hideExtrasAndPromosFromSearch = try container.decodeIfPresent(Bool.self, forKey: .hideExtrasAndPromosFromSearch) ?? hideExtrasAndPromosFromSearch
+            hideExtrasAndPromosFromRecommended = try container.decodeIfPresent(Bool.self, forKey: .hideExtrasAndPromosFromRecommended) ?? hideExtrasAndPromosFromRecommended
+            hideExtrasAndPromosFromCollectionRecommendations = try container.decodeIfPresent(Bool.self, forKey: .hideExtrasAndPromosFromCollectionRecommendations) ?? hideExtrasAndPromosFromCollectionRecommendations
+            defaultSearchFilter = try container.decodeIfPresent(SearchFilter.self, forKey: .defaultSearchFilter) ?? defaultSearchFilter
+            defaultHomeFilter = try container.decodeIfPresent(MediaFilter.self, forKey: .defaultHomeFilter) ?? defaultHomeFilter
+            defaultCategorySort = try container.decodeIfPresent(GenreSort.self, forKey: .defaultCategorySort) ?? defaultCategorySort
+            showUpcomingReleases = try container.decodeIfPresent(Bool.self, forKey: .showUpcomingReleases) ?? showUpcomingReleases
+            hideUpcomingFromSearch = try container.decodeIfPresent(Bool.self, forKey: .hideUpcomingFromSearch) ?? hideUpcomingFromSearch
+            hideUpcomingFromRecommended = try container.decodeIfPresent(Bool.self, forKey: .hideUpcomingFromRecommended) ?? hideUpcomingFromRecommended
+            hideUpcomingFromCollectionRecommendations = try container.decodeIfPresent(Bool.self, forKey: .hideUpcomingFromCollectionRecommendations) ?? hideUpcomingFromCollectionRecommendations
+            warnBeforeReplacingFavourite = try container.decodeIfPresent(Bool.self, forKey: .warnBeforeReplacingFavourite) ?? warnBeforeReplacingFavourite
+            promptToRateAfterMarkingWatched = try container.decodeIfPresent(Bool.self, forKey: .promptToRateAfterMarkingWatched) ?? promptToRateAfterMarkingWatched
+            preferredRatingSource = try container.decodeIfPresent(RatingSource.self, forKey: .preferredRatingSource) ?? preferredRatingSource
+            notificationPreferences = try container.decodeIfPresent(NotificationPreferences.self, forKey: .notificationPreferences) ?? notificationPreferences
+        }
     }
     
     private extension AppSettings {
@@ -13527,6 +15015,8 @@ private struct PickForMeOptionButton: View {
     }
     
     private enum Storage {
+        private static let notificationPreferencesKey = "Vestigo.notificationPreferences"
+
         static func load<T: Decodable>(_ type: T.Type, key: String) -> T? {
             guard let data = UserDefaults.standard.data(forKey: key) else { return nil }
             return try? JSONDecoder().decode(T.self, from: data)
@@ -13534,7 +15024,91 @@ private struct PickForMeOptionButton: View {
         static func save<T: Encodable>(_ value: T, key: String) {
             if let data = try? JSONEncoder().encode(value) { UserDefaults.standard.set(data, forKey: key) }
         }
+
+        static func loadNotificationPreferences() -> NotificationPreferences? {
+            let cloudStore = NSUbiquitousKeyValueStore.default
+            cloudStore.synchronize()
+
+            if let cloudData = cloudStore.data(forKey: notificationPreferencesKey),
+               let preferences = try? JSONDecoder().decode(NotificationPreferences.self, from: cloudData) {
+                UserDefaults.standard.set(cloudData, forKey: notificationPreferencesKey)
+                return preferences
+            }
+
+            return load(NotificationPreferences.self, key: notificationPreferencesKey)
+        }
+
+        static func saveNotificationPreferences(_ preferences: NotificationPreferences) {
+            guard let data = try? JSONEncoder().encode(preferences) else { return }
+            UserDefaults.standard.set(data, forKey: notificationPreferencesKey)
+            let cloudStore = NSUbiquitousKeyValueStore.default
+            cloudStore.set(data, forKey: notificationPreferencesKey)
+            cloudStore.synchronize()
+        }
     }
+
+    private struct CloudLibrarySnapshot: Codable {
+        let modifiedAt: Date
+        let library: UserLibrary
+        let settings: AppSettings
+        let externalRatings: [MediaKey: ExternalRatings]
+    }
+
+#if canImport(CloudKit)
+    private struct CloudLibrarySyncService {
+        private let database = CKContainer.default().privateCloudDatabase
+        private let recordID = CKRecord.ID(recordName: "vestigo-user-snapshot")
+        private let recordType = "VestigoUserSnapshot"
+        private let payloadKey = "payload"
+        private let modifiedAtKey = "modifiedAt"
+
+        func fetchSnapshot() async throws -> CloudLibrarySnapshot? {
+            do {
+                let record = try await database.record(for: recordID)
+                guard let asset = record[payloadKey] as? CKAsset,
+                      let fileURL = asset.fileURL else {
+                    return nil
+                }
+                let data = try Data(contentsOf: fileURL)
+                return try JSONDecoder().decode(CloudLibrarySnapshot.self, from: data)
+            } catch let error as CKError where error.code == .unknownItem {
+                return nil
+            }
+        }
+
+        func saveSnapshot(_ snapshot: CloudLibrarySnapshot) async throws {
+            let record: CKRecord
+
+            do {
+                record = try await database.record(for: recordID)
+            } catch let error as CKError where error.code == .unknownItem {
+                record = CKRecord(recordType: recordType, recordID: recordID)
+            }
+
+            let payloadURL = try temporaryPayloadURL(for: snapshot)
+            record[payloadKey] = CKAsset(fileURL: payloadURL)
+            record[modifiedAtKey] = snapshot.modifiedAt as CKRecordValue
+            _ = try await database.save(record)
+        }
+
+        private func temporaryPayloadURL(for snapshot: CloudLibrarySnapshot) throws -> URL {
+            let data = try JSONEncoder().encode(snapshot)
+            let url = FileManager.default.temporaryDirectory
+                .appendingPathComponent("vestigo-cloud-snapshot-\(UUID().uuidString)")
+                .appendingPathExtension("json")
+            try data.write(to: url, options: [.atomic])
+            return url
+        }
+    }
+#else
+    private struct CloudLibrarySyncService {
+        func fetchSnapshot() async throws -> CloudLibrarySnapshot? {
+            nil
+        }
+
+        func saveSnapshot(_ snapshot: CloudLibrarySnapshot) async throws { }
+    }
+#endif
     
     private enum DateParser {
         static func parse(_ text: String?) -> Date? {
