@@ -687,6 +687,25 @@ private final class VestigoModel: ObservableObject {
     @Published var collectionsResetToken = UUID()
     @Published var imageRefreshToken = 0
     @Published var showNotificationOnboarding = false
+    @Published var notificationOnboardingDismissToken = UUID()
+
+    private enum HomeSectionKind: Hashable {
+        case trending
+        case popular
+        case newReleases
+        case upcoming
+    }
+
+    private struct HomeSectionLoadResult {
+        let section: HomeSectionKind
+        let items: [MediaItem]
+        let errorText: String?
+    }
+
+    enum NotificationToggleSource {
+        case onboarding
+        case settings
+    }
     
     private let tmdb = TMDbService()
     // TasteDive is intentionally disabled because the current recommendation system no longer calls it.
@@ -859,13 +878,18 @@ private final class VestigoModel: ObservableObject {
         return ["G", "U", "TV-Y", "TV-G", "TV-Y7", "TV-Y7-FV"].contains(normalized)
     }
 
-    func filteredContentCleanupIfNeeded(_ items: [MediaItem], hideShortFilms: Bool, hideExtrasAndPromos: Bool) async -> [MediaItem] {
+    func filteredContentCleanupIfNeeded(
+        _ items: [MediaItem],
+        hideShortFilms: Bool,
+        hideExtrasAndPromos: Bool,
+        loadMissingDetails: Bool = true
+    ) async -> [MediaItem] {
         guard hideShortFilms || hideExtrasAndPromos || settings.hideLowestAgeRatings else { return items }
 
         var filtered: [MediaItem] = []
 
         for item in items {
-            if detailsCache[item.key] == nil {
+            if loadMissingDetails, detailsCache[item.key] == nil {
                 await loadBasicDetailIfNeeded(item)
             }
 
@@ -915,9 +939,13 @@ private final class VestigoModel: ObservableObject {
     
     func bootstrap() async {
         loadLocal()
-        await syncFromCloudOnLaunch()
         offerNotificationOnboardingIfNeeded()
         await loadHome()
+
+        Task {
+            await syncFromCloudOnLaunch()
+            await loadHome()
+        }
     }
 
     func markNotificationPromptSeen() {
@@ -925,13 +953,13 @@ private final class VestigoModel: ObservableObject {
         saveLocalSoon()
     }
 
-    func setNotificationsEnabled(_ isEnabled: Bool) {
+    func setNotificationsEnabled(_ isEnabled: Bool, source: NotificationToggleSource = .settings) {
         settings.notificationPreferences.isEnabled = isEnabled
         settings.notificationPreferences.hasSeenPrompt = true
         saveLocalSoon()
 
         guard isEnabled else { return }
-        requestNotificationPermission()
+        requestNotificationPermission(source: source)
     }
 
     func setNotificationKind(_ kind: NotificationKind, isEnabled: Bool) {
@@ -982,39 +1010,144 @@ private final class VestigoModel: ObservableObject {
     }
     
     func loadHome() async {
+        applyCachedHomeFeedIfAvailable()
+
         isLoading = true
         errorText = nil
         defer { isLoading = false }
+
+        var loadErrors: [String] = []
+        var refreshedSections: Set<HomeSectionKind> = []
+
+        await withTaskGroup(of: HomeSectionLoadResult.self) { group in
+            group.addTask { await self.loadHomeSection(.trending) }
+            group.addTask { await self.loadHomeSection(.popular) }
+            group.addTask { await self.loadHomeSection(.newReleases) }
+            group.addTask { await self.loadHomeSection(.upcoming) }
+
+            for await result in group {
+                if let sectionError = result.errorText {
+                    loadErrors.append(sectionError)
+                    continue
+                }
+
+                guard !result.items.isEmpty else { continue }
+
+                refreshedSections.insert(result.section)
+
+                switch result.section {
+                case .trending:
+                    trending = result.items
+                case .popular:
+                    popular = result.items
+                case .newReleases:
+                    newReleases = result.items
+                case .upcoming:
+                    upcoming = result.items
+                }
+
+                refineHomeSection(result.section, items: result.items)
+            }
+        }
+
+        if !refreshedSections.isEmpty {
+            saveCurrentHomeFeedCache()
+        }
+
+        await loadSmartRecommendations()
+
+        if trending.isEmpty,
+           popular.isEmpty,
+           newReleases.isEmpty,
+           upcoming.isEmpty,
+           let firstError = loadErrors.first {
+            errorText = firstError
+        }
+    }
+
+    private func loadHomeSection(_ section: HomeSectionKind) async -> HomeSectionLoadResult {
         do {
-            async let tr = tmdb.trending(filter: mediaFilter)
-            async let pop = tmdb.popular(filter: mediaFilter)
-            async let now = tmdb.newReleases(filter: mediaFilter)
-            async let soon = tmdb.upcoming(filter: mediaFilter)
-            let today = Calendar.current.startOfDay(for: Date())
-            let realUpcoming = (try await soon).filter { item in
-                guard let releaseDate = item.releaseDateValue else { return false }
-                return releaseDate > today
+            let loadedItems: [MediaItem]
+            switch section {
+            case .trending:
+                loadedItems = try await tmdb.trending(filter: mediaFilter)
+            case .popular:
+                loadedItems = try await tmdb.popular(filter: mediaFilter)
+            case .newReleases:
+                loadedItems = try await tmdb.newReleases(filter: mediaFilter)
+            case .upcoming:
+                let items = try await tmdb.upcoming(filter: mediaFilter)
+                let today = Calendar.current.startOfDay(for: Date())
+                loadedItems = items.filter { item in
+                    guard let releaseDate = item.releaseDateValue else { return false }
+                    return releaseDate > today
+                }
             }
 
-            let preparedTrending = preparedResults(try await tr, hideWatched: settings.hideWatchedFromHome)
-            let preparedPopular = preparedResults(try await pop, hideWatched: settings.hideWatchedFromHome)
-            let preparedNewReleases = preparedResults(try await now, hideWatched: settings.hideWatchedFromHome)
-            let preparedUpcoming = preparedResults(realUpcoming, hideWatched: settings.hideWatchedFromHome)
+            let prepared = preparedResults(loadedItems, hideWatched: settings.hideWatchedFromHome)
+            let loaded = await filteredContentCleanupIfNeeded(
+                prepared,
+                hideShortFilms: settings.hideShortFilmsFromHome,
+                hideExtrasAndPromos: settings.hideExtrasAndPromosFromHome,
+                loadMissingDetails: false
+            )
 
-            let loadedTrending = await filteredContentCleanupIfNeeded(preparedTrending, hideShortFilms: settings.hideShortFilmsFromHome, hideExtrasAndPromos: settings.hideExtrasAndPromosFromHome)
-            let loadedPopular = await filteredContentCleanupIfNeeded(preparedPopular, hideShortFilms: settings.hideShortFilmsFromHome, hideExtrasAndPromos: settings.hideExtrasAndPromosFromHome)
-            let loadedNewReleases = await filteredContentCleanupIfNeeded(preparedNewReleases, hideShortFilms: settings.hideShortFilmsFromHome, hideExtrasAndPromos: settings.hideExtrasAndPromosFromHome)
-            let loadedUpcoming = await filteredContentCleanupIfNeeded(preparedUpcoming, hideShortFilms: settings.hideShortFilmsFromHome, hideExtrasAndPromos: settings.hideExtrasAndPromosFromHome)
-
-            if !loadedTrending.isEmpty { trending = loadedTrending }
-            if !loadedPopular.isEmpty { popular = loadedPopular }
-            if !loadedNewReleases.isEmpty { newReleases = loadedNewReleases }
-            if !loadedUpcoming.isEmpty { upcoming = loadedUpcoming }
-            await loadSmartRecommendations()
+            return HomeSectionLoadResult(section: section, items: loaded, errorText: nil)
         } catch {
             if !LoadErrorFilter.shouldIgnore(error) {
-                errorText = error.localizedDescription
+                return HomeSectionLoadResult(section: section, items: [], errorText: error.localizedDescription)
             }
+            return HomeSectionLoadResult(section: section, items: [], errorText: nil)
+        }
+    }
+
+    private func applyCachedHomeFeedIfAvailable() {
+        guard let cache = Storage.loadNewestHomeFeedCache(for: mediaFilter) else { return }
+
+        if !cache.trending.isEmpty { trending = cache.trending }
+        if !cache.popular.isEmpty { popular = cache.popular }
+        if !cache.newReleases.isEmpty { newReleases = cache.newReleases }
+        if !cache.upcoming.isEmpty { upcoming = cache.upcoming }
+    }
+
+    private func saveCurrentHomeFeedCache() {
+        let cache = HomeFeedCache(
+            cachedAt: Date(),
+            filter: mediaFilter,
+            trending: trending,
+            popular: popular,
+            newReleases: newReleases,
+            upcoming: upcoming
+        )
+        Storage.saveHomeFeedCache(cache)
+    }
+
+    private func refineHomeSection(_ section: HomeSectionKind, items: [MediaItem]) {
+        guard settings.hideShortFilmsFromHome || settings.hideExtrasAndPromosFromHome || settings.hideLowestAgeRatings else { return }
+
+        Task { [weak self] in
+            guard let self else { return }
+            let refinedItems = await self.filteredContentCleanupIfNeeded(
+                items,
+                hideShortFilms: self.settings.hideShortFilmsFromHome,
+                hideExtrasAndPromos: self.settings.hideExtrasAndPromosFromHome,
+                loadMissingDetails: true
+            )
+
+            guard refinedItems.map(\.key) != items.map(\.key) else { return }
+
+            switch section {
+            case .trending:
+                self.trending = refinedItems
+            case .popular:
+                self.popular = refinedItems
+            case .newReleases:
+                self.newReleases = refinedItems
+            case .upcoming:
+                self.upcoming = refinedItems
+            }
+
+            self.saveCurrentHomeFeedCache()
         }
     }
 
@@ -3576,17 +3709,46 @@ private final class VestigoModel: ObservableObject {
         showNotificationOnboarding = true
     }
 
-    private func requestNotificationPermission() {
+    private func requestNotificationPermission(source: NotificationToggleSource) {
         #if canImport(UserNotifications) && os(iOS)
         Task {
             do {
-                let granted = try await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .badge, .sound])
+                let center = UNUserNotificationCenter.current()
+                let currentSettings = await center.notificationSettings()
+                let granted: Bool
+                let shouldOpenNotificationSettings: Bool
+
+                switch currentSettings.authorizationStatus {
+                case .authorized, .provisional, .ephemeral:
+                    granted = true
+                    shouldOpenNotificationSettings = false
+                case .notDetermined:
+                    granted = try await center.requestAuthorization(options: [.alert, .badge, .sound])
+                    shouldOpenNotificationSettings = false
+                case .denied:
+                    granted = false
+                    shouldOpenNotificationSettings = source == .settings
+                @unknown default:
+                    granted = false
+                    shouldOpenNotificationSettings = false
+                }
+
                 await MainActor.run {
                     self.settings.notificationPreferences.isEnabled = granted
                     self.saveLocalSoon()
 
                     if granted {
                         UIApplication.shared.registerForRemoteNotifications()
+                    } else {
+                        if source == .onboarding {
+                            self.notificationOnboardingDismissToken = UUID()
+                        } else {
+                            self.errorText = "Notifications are disabled in system settings."
+                        }
+
+                        if shouldOpenNotificationSettings {
+                            UIApplication.shared.openNotificationSettings()
+                        }
                     }
                 }
             } catch {
@@ -3655,6 +3817,23 @@ private extension View {
         }
     }
 }
+
+#if canImport(UIKit) && os(iOS)
+private extension UIApplication {
+    func openNotificationSettings() {
+        let notificationSettingsURL: URL?
+        if #available(iOS 16.0, *) {
+            notificationSettingsURL = URL(string: UIApplication.openNotificationSettingsURLString)
+        } else {
+            notificationSettingsURL = nil
+        }
+
+        let fallbackURL = URL(string: UIApplication.openSettingsURLString)
+        guard let url = notificationSettingsURL ?? fallbackURL else { return }
+        open(url)
+    }
+}
+#endif
 
 private struct FavouriteReplacementOverlay: View {
     let current: MediaItem
@@ -8062,6 +8241,10 @@ private struct PickForMeOptionButton: View {
                 }
             }
             .presentationDetents([.large])
+            .onChange(of: model.notificationOnboardingDismissToken) { _, _ in
+                guard isOnboarding else { return }
+                dismiss()
+            }
         }
     }
 
@@ -8078,7 +8261,7 @@ private struct PickForMeOptionButton: View {
                 VStack(alignment: .leading, spacing: 8) {
                     Toggle("Allow notifications", isOn: Binding(
                         get: { preferences.isEnabled },
-                        set: { model.setNotificationsEnabled($0) }
+                        set: { model.setNotificationsEnabled($0, source: isOnboarding ? .onboarding : .settings) }
                     ))
                     .font(.headline.bold())
                     .tint(model.settings.accentColor)
@@ -10053,7 +10236,12 @@ private struct PickForMeOptionButton: View {
                 .buttonStyle(.plain)
                 
                 if items.isEmpty {
-                    StatusBubble(title: "Nothing here yet", text: "This section will fill after more data loads or after you rate more watched items.")
+                    if model.isLoading {
+                        ProgressView()
+                            .frame(maxWidth: .infinity, minHeight: 120)
+                    } else {
+                        StatusBubble(title: "Nothing here yet", text: "This section will fill after more data loads or after you rate more watched items.")
+                    }
                 } else {
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(alignment: .top, spacing: 14) {
@@ -11205,24 +11393,60 @@ private struct PickForMeOptionButton: View {
         
         func newReleases(filter: MediaFilter) async throws -> [MediaItem] {
             var items: [MediaItem] = []
+            var firstError: Error?
+
             if filter != .tv {
-                items += try await fetchList(path: "/movie/now_playing", query: [URLQueryItem(name: "region", value: "US")])
+                do {
+                    items += try await fetchList(path: "/movie/now_playing", query: [URLQueryItem(name: "region", value: "US")])
+                } catch {
+                    firstError = firstError ?? error
+                }
             }
+
             if filter != .movie {
-                items += try await fetchList(path: "/tv/on_the_air", query: [])
+                do {
+                    items += try await fetchList(path: "/tv/on_the_air", query: [])
+                } catch {
+                    firstError = firstError ?? error
+                }
             }
-            return items
+
+            if items.isEmpty, let firstError {
+                throw firstError
+            }
+
+            return items.uniqued()
         }
         
         func upcoming(filter: MediaFilter) async throws -> [MediaItem] {
             var items: [MediaItem] = []
+            var firstError: Error?
+
             if filter != .tv {
-                items += try await fetchList(path: "/movie/upcoming", query: [URLQueryItem(name: "region", value: "US")])
+                do {
+                    items += try await fetchList(path: "/movie/upcoming", query: [URLQueryItem(name: "region", value: "US")])
+                } catch {
+                    firstError = firstError ?? error
+                }
             }
+
             if filter != .movie {
-                items += try await fetchList(path: "/tv/airing_today", query: [])
+                do {
+                    items += try await fetchList(path: "/discover/tv", query: [
+                        URLQueryItem(name: "first_air_date.gte", value: DateParser.tmdbDateString(from: Date())),
+                        URLQueryItem(name: "sort_by", value: "popularity.desc"),
+                        URLQueryItem(name: "include_null_first_air_dates", value: "false")
+                    ])
+                } catch {
+                    firstError = firstError ?? error
+                }
             }
-            return items
+
+            if items.isEmpty, let firstError {
+                throw firstError
+            }
+
+            return items.uniqued()
         }
         
         func search(query: String, filter: MediaFilter, includeAdult: Bool = false) async throws -> [MediaItem] {
@@ -13959,16 +14183,19 @@ private struct PickForMeOptionButton: View {
         }
 
         private static func recommendationTokens(for item: MediaItem) -> Set<String> {
-            let text = normalizedSimilarityText("\(item.title) \(item.overview)")
-            let rawTokens = text
-                .split(separator: " ")
-                .map(String.init)
-                .filter { token in
-                    token.count >= 6 &&
-                    token.rangeOfCharacter(from: .decimalDigits) == nil
-                }
+            let combinedText = item.title + " " + item.overview
+            let normalizedText = normalizedSimilarityText(combinedText)
+            let tokenParts: [Substring] = normalizedText.split(separator: " ")
+            var tokens = Set<String>()
 
-            return Set(rawTokens)
+            for tokenPart in tokenParts {
+                let token = String(tokenPart)
+                guard token.count >= 6 else { continue }
+                guard token.rangeOfCharacter(from: .decimalDigits) == nil else { continue }
+                tokens.insert(token)
+            }
+
+            return tokens
         }
 
         private struct SimilarityEvidence {
@@ -15016,6 +15243,7 @@ private struct PickForMeOptionButton: View {
     
     private enum Storage {
         private static let notificationPreferencesKey = "Vestigo.notificationPreferences"
+        private static let homeFeedCacheKeyPrefix = "Vestigo.homeFeedCaches"
 
         static func load<T: Decodable>(_ type: T.Type, key: String) -> T? {
             guard let data = UserDefaults.standard.data(forKey: key) else { return nil }
@@ -15045,6 +15273,33 @@ private struct PickForMeOptionButton: View {
             cloudStore.set(data, forKey: notificationPreferencesKey)
             cloudStore.synchronize()
         }
+
+        static func loadNewestHomeFeedCache(for filter: MediaFilter) -> HomeFeedCache? {
+            load([HomeFeedCache].self, key: homeFeedCacheKey(for: filter))?
+                .sorted { $0.cachedAt > $1.cachedAt }
+                .first { $0.filter == filter && $0.hasContent }
+        }
+
+        static func saveHomeFeedCache(_ cache: HomeFeedCache) {
+            guard cache.hasContent else { return }
+
+            let key = homeFeedCacheKey(for: cache.filter)
+            var caches = load([HomeFeedCache].self, key: key) ?? []
+            caches.insert(cache, at: 0)
+            caches = caches
+                .filter { $0.filter == cache.filter && $0.hasContent }
+                .sorted { $0.cachedAt > $1.cachedAt }
+
+            if caches.count > 2 {
+                caches = Array(caches.prefix(2))
+            }
+
+            save(caches, key: key)
+        }
+
+        private static func homeFeedCacheKey(for filter: MediaFilter) -> String {
+            "\(homeFeedCacheKeyPrefix).\(filter.rawValue)"
+        }
     }
 
     private struct CloudLibrarySnapshot: Codable {
@@ -15052,6 +15307,19 @@ private struct PickForMeOptionButton: View {
         let library: UserLibrary
         let settings: AppSettings
         let externalRatings: [MediaKey: ExternalRatings]
+    }
+
+    private struct HomeFeedCache: Codable {
+        let cachedAt: Date
+        let filter: MediaFilter
+        let trending: [MediaItem]
+        let popular: [MediaItem]
+        let newReleases: [MediaItem]
+        let upcoming: [MediaItem]
+
+        var hasContent: Bool {
+            !trending.isEmpty || !popular.isEmpty || !newReleases.isEmpty || !upcoming.isEmpty
+        }
     }
 
 #if canImport(CloudKit)
@@ -15118,6 +15386,14 @@ private struct PickForMeOptionButton: View {
             formatter.locale = Locale(identifier: "en_US_POSIX")
             formatter.dateFormat = "yyyy-MM-dd"
             return formatter.date(from: text)
+        }
+
+        static func tmdbDateString(from date: Date) -> String {
+            let formatter = DateFormatter()
+            formatter.calendar = Calendar(identifier: .gregorian)
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.dateFormat = "yyyy-MM-dd"
+            return formatter.string(from: date)
         }
     }
     
