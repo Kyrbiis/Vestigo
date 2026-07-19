@@ -413,7 +413,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.5;
+				MARKETING_VERSION = 1.7;
 				PRODUCT_BUNDLE_IDENTIFIER = com.jojovestigo;
 				PRODUCT_NAME = Vestigo;
 				PROVISIONING_PROFILE_SPECIFIER = "";
@@ -452,7 +452,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.5;
+				MARKETING_VERSION = 1.7;
 				PRODUCT_BUNDLE_IDENTIFIER = com.jojovestigo;
 				PRODUCT_NAME = Vestigo;
 				PROVISIONING_PROFILE_SPECIFIER = "";

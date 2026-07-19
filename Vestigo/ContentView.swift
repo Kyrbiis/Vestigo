@@ -200,7 +200,7 @@ struct ContentView: View {
             }
         )
         #endif
-        .preferredColorScheme(model.settings.appearance == .dark ? .dark : .light)
+        .preferredColorScheme(model.settings.appearance.preferredColorScheme)
         .environment(\.imageRefreshToken, model.imageRefreshToken)
         .environment(\.refreshImages, RefreshImagesAction {
             model.refreshImages()
@@ -383,7 +383,7 @@ extension MediaItem {
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
         guard !normalizedTitle.isEmpty else { return false }
-        guard voteAverage > 0 else { return false }
+        guard voteAverage > 0 || isRecentOrUpcomingRelease else { return false }
         guard let releaseDate, let releaseYear = Int(releaseDate.prefix(4)), releaseYear > 1870 else { return false }
         if normalizedReleaseDate == "tba" || normalizedReleaseDate == "date tba" { return false }
         if normalizedReleaseDate.contains("tba") { return false }
@@ -401,6 +401,13 @@ extension MediaItem {
         }
 
         return Int(releaseYearText.prefix(4))
+    }
+
+    var isRecentOrUpcomingRelease: Bool {
+        guard let date = releaseDateValue else { return false }
+        if date > .now { return true }
+        let daysSinceRelease = Calendar.current.dateComponents([.day], from: date, to: .now).day ?? .max
+        return daysSinceRelease <= 7
     }
 }
 
@@ -635,6 +642,7 @@ private final class VestigoModel: ObservableObject {
     @Published var watchlistViewMode: ViewMode = .tile
     @Published var collectionViewMode: ViewMode = .tile
     @Published var sortOption: SortOption = .tmdbRating
+    @Published var sortDirection: SortDirection = .descending
 
     @Published var searchFiltersExpanded = false
     @Published var expandedSearchFilterSections: Set<SearchFilterSection> = []
@@ -1215,26 +1223,52 @@ private final class VestigoModel: ObservableObject {
         
         var scoredRecommendations: [MediaKey: (item: MediaItem, score: Double)] = [:]
         var nextItems: [MediaItem] = []
-        
+
+        let notInterestedSeeds = library.notInterestedItems
+
+        func notInterestedDownweight(for candidate: MediaItem) -> Double {
+            if library.isNotInterested(candidate.key) {
+                return 0.15
+            }
+
+            guard !notInterestedSeeds.isEmpty else { return 1.0 }
+
+            let candidateGenres = Set(candidate.genreIDs)
+            guard !candidateGenres.isEmpty else { return 1.0 }
+
+            for seed in notInterestedSeeds {
+                let seedGenres = Set(seed.genreIDs)
+                guard !seedGenres.isEmpty else { continue }
+                let overlap = candidateGenres.intersection(seedGenres).count
+                let union = candidateGenres.union(seedGenres).count
+                let similarity = union == 0 ? 0.0 : Double(overlap) / Double(union)
+                if similarity >= 0.75 && candidate.kind == seed.kind {
+                    return 0.75
+                }
+            }
+
+            return 1.0
+        }
+
         for record in rankedHistory {
             let weight = historyWeight(for: record)
-            
+
             do {
                 let rec = try await tmdb.recommendations(for: record.key)
-                
+
                 for (index, candidate) in rec.enumerated() {
                     guard !library.isWatched(candidate.key) else { continue }
                     guard !library.isNeverShowAgain(candidate.key) else { continue }
-                    
+
                     let positionScore = 1.0 / (1.0 + Double(index) * 0.08)
                     let similarityBoost = genreSimilarity(candidate, record) * (0.35 + normalizedStrength * 0.45)
-                    let score = (positionScore + similarityBoost) * weight
-                    
+                    let score = (positionScore + similarityBoost) * weight * notInterestedDownweight(for: candidate)
+
                     var entry = scoredRecommendations[candidate.key] ?? (candidate, 0)
                     entry.score += score
                     scoredRecommendations[candidate.key] = entry
                 }
-                
+
                 let related = try await tmdb.sameSeriesOrSimilar(for: record.key)
                 nextItems.append(contentsOf: related)
             } catch { }
@@ -3156,9 +3190,10 @@ private final class VestigoModel: ObservableObject {
         }
 
         if externalRatingsCache[item.key] == nil {
-            return "IMDb loading"
+            return item.voteAverage > 0 ? "IMDb loading" : ""
         }
 
+        guard item.voteAverage > 0 else { return "" }
         return "TMDb \(item.voteAverage.formatted(.number.precision(.fractionLength(1))))"
     }
 
@@ -3395,6 +3430,20 @@ private final class VestigoModel: ObservableObject {
         library.toggleNeverShowAgain(item)
 
         if library.isNeverShowAgain(item.key) {
+            removeFromForYouRecommendations(item)
+        }
+
+        saveLocalSoon()
+        objectWillChange.send()
+        Task { await loadSmartRecommendations() }
+    }
+
+    func toggleNotInterested(_ item: MediaItem) {
+        guard item.kind == .movie || item.kind == .tv else { return }
+
+        library.toggleNotInterested(item)
+
+        if library.isNotInterested(item.key) {
             removeFromForYouRecommendations(item)
         }
 
@@ -3937,23 +3986,35 @@ private struct HomeView: View {
                 if !model.searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     EmptyView()
                 } else {
-                    MediaSection(title: "Trending now", items: model.trending, hideWatchedForUpcoming: false, model: model) {
-                        model.homePath.append(.trending)
-                    }
-
-                    MediaSection(title: "New releases", items: model.newReleases, hideWatchedForUpcoming: false, model: model) {
-                        model.homePath.append(.newReleases)
-                    }
-
-                    if model.settings.showUpcomingReleases, !model.upcoming.isEmpty {
-                        MediaSection(title: "Upcoming releases", items: model.upcoming, hideWatchedForUpcoming: true, model: model) {
-                            model.homePath.append(.upcoming)
+                    ForEach(model.settings.homeCarouselOrder, id: \.self) { carousel in
+                        if !model.settings.homeCarouselHidden.contains(carousel) {
+                            homeCarouselView(for: carousel)
                         }
                     }
                 }
             }
         }
         .onChange(of: model.mediaFilter) { _, _ in Task { await model.loadHome() } }
+    }
+
+    @ViewBuilder
+    private func homeCarouselView(for carousel: HomeCarousel) -> some View {
+        switch carousel {
+        case .trending:
+            MediaSection(title: carousel.title, items: model.trending, hideWatchedForUpcoming: false, model: model) {
+                model.homePath.append(.trending)
+            }
+        case .newReleases:
+            MediaSection(title: carousel.title, items: model.newReleases, hideWatchedForUpcoming: false, model: model) {
+                model.homePath.append(.newReleases)
+            }
+        case .upcoming:
+            if model.settings.showUpcomingReleases, !model.upcoming.isEmpty {
+                MediaSection(title: carousel.title, items: model.upcoming, hideWatchedForUpcoming: true, model: model) {
+                    model.homePath.append(.upcoming)
+                }
+            }
+        }
     }
 }
 
@@ -4506,9 +4567,15 @@ private struct GenreResultsView: View {
     @ObservedObject var model: VestigoModel
     @State private var genreFilter: MediaFilter = .both
     @State private var genreSort: GenreSort = .tmdbRating
+    @State private var genreSortDirection: SortDirection = .descending
 
     private var cacheKey: String {
         model.genreCacheKey(genreID: route.genre.tmdbID, filter: genreFilter, sort: genreSort)
+    }
+
+    private var displayedItems: [MediaItem] {
+        let items = model.genreResults[cacheKey] ?? []
+        return genreSortDirection == .ascending ? Array(items.reversed()) : items
     }
 
     var body: some View {
@@ -4520,12 +4587,14 @@ private struct GenreResultsView: View {
                     Task { await model.loadGenre(route.genre, filter: genreFilter, sort: genreSort) }
                 }
 
-                GenreSortPicker(sort: $genreSort) {
-                    Task { await model.loadGenre(route.genre, filter: genreFilter, sort: genreSort) }
+                SortRow(direction: $genreSortDirection) {
+                    GenreSortPicker(sort: $genreSort) {
+                        Task { await model.loadGenre(route.genre, filter: genreFilter, sort: genreSort) }
+                    }
                 }
 
                 MediaGridOrList(
-                    items: model.genreResults[cacheKey] ?? [],
+                    items: displayedItems,
                     hideWatchedForUpcoming: false,
                     model: model
                 )
@@ -4591,57 +4660,9 @@ private struct ForYouView: View {
                         )
                     }
 
-                    if let recentWatchedItem, !filteredForYou(model.moreLikeLastWatched).isEmpty {
-                        let sectionTitle = "More like \(recentWatchedItem.title)"
-                        let sectionItems = filteredForYou(model.moreLikeLastWatched)
-
-                        MediaSection(title: sectionTitle, items: sectionItems, hideWatchedForUpcoming: false, model: model) {
-                            forYouPath.append(.section(ForYouSection(title: sectionTitle, items: sectionItems)))
-                        }
-                    }
-
-                    if let favouriteItem, !filteredForYou(model.moreLikeFavourite).isEmpty {
-                        let sectionTitle = "More like a favourite \(favouriteItem.kind.label.lowercased()): \(favouriteItem.title)"
-                        let sectionItems = filteredForYou(model.moreLikeFavourite)
-
-                        MediaSection(title: sectionTitle, items: sectionItems, hideWatchedForUpcoming: false, model: model) {
-                            forYouPath.append(.section(ForYouSection(title: sectionTitle, items: sectionItems)))
-                        }
-                    }
-
-                    if !watchlistPicks.isEmpty {
-                        let sectionTitle = "From your watchlist"
-                        let sectionItems = watchlistPicks
-
-                        MediaSection(title: sectionTitle, items: sectionItems, hideWatchedForUpcoming: false, model: model) {
-                            forYouPath.append(.section(ForYouSection(title: sectionTitle, items: sectionItems)))
-                        }
-                    }
-
-                    if !filteredForYou(model.seriesNext).isEmpty {
-                        let sectionTitle = "Continue with related series"
-                        let sectionItems = filteredForYou(model.seriesNext)
-
-                        MediaSection(title: sectionTitle, items: sectionItems, hideWatchedForUpcoming: false, model: model) {
-                            forYouPath.append(.section(ForYouSection(title: sectionTitle, items: sectionItems)))
-                        }
-                    }
-
-                    if !filteredForYou(model.fromTopGenre).isEmpty {
-                        let sectionTitle = "More from \(topGenreTitle)"
-                        let sectionItems = filteredForYou(model.fromTopGenre)
-
-                        MediaSection(title: sectionTitle, items: sectionItems, hideWatchedForUpcoming: false, model: model) {
-                            forYouPath.append(.section(ForYouSection(title: sectionTitle, items: sectionItems)))
-                        }
-                    }
-
-                    if !filteredForYou(model.trySomethingNewRecommendations).isEmpty {
-                        let sectionTitle = "Try something new"
-                        let sectionItems = filteredForYou(model.trySomethingNewRecommendations)
-
-                        MediaSection(title: sectionTitle, items: sectionItems, hideWatchedForUpcoming: false, model: model) {
-                            forYouPath.append(.section(ForYouSection(title: sectionTitle, items: sectionItems)))
+                    ForEach(model.settings.forYouCarouselOrder, id: \.self) { carousel in
+                        if !model.settings.forYouCarouselHidden.contains(carousel) {
+                            forYouCarouselView(for: carousel)
                         }
                     }
                 }
@@ -4694,6 +4715,72 @@ private struct ForYouView: View {
                 return item.kind == .tv
             case .both:
                 return true
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func forYouCarouselView(for carousel: ForYouCarousel) -> some View {
+        switch carousel {
+        case .forYou:
+            let sectionItems = filteredForYou(model.recommendations)
+            if !sectionItems.isEmpty {
+                let sectionTitle = "For you"
+                MediaSection(title: sectionTitle, items: sectionItems, hideWatchedForUpcoming: false, model: model) {
+                    forYouPath.append(.section(ForYouSection(title: sectionTitle, items: sectionItems)))
+                }
+            }
+        case .moreLikeLast:
+            if let recentWatchedItem {
+                let sectionItems = filteredForYou(model.moreLikeLastWatched)
+                if !sectionItems.isEmpty {
+                    let sectionTitle = "More like \(recentWatchedItem.title)"
+                    MediaSection(title: sectionTitle, items: sectionItems, hideWatchedForUpcoming: false, model: model) {
+                        forYouPath.append(.section(ForYouSection(title: sectionTitle, items: sectionItems)))
+                    }
+                }
+            }
+        case .moreLikeFavourite:
+            if let favouriteItem {
+                let sectionItems = filteredForYou(model.moreLikeFavourite)
+                if !sectionItems.isEmpty {
+                    let sectionTitle = "More like a favourite \(favouriteItem.kind.label.lowercased()): \(favouriteItem.title)"
+                    MediaSection(title: sectionTitle, items: sectionItems, hideWatchedForUpcoming: false, model: model) {
+                        forYouPath.append(.section(ForYouSection(title: sectionTitle, items: sectionItems)))
+                    }
+                }
+            }
+        case .watchlistPicks:
+            if !watchlistPicks.isEmpty {
+                let sectionTitle = "From your watchlist"
+                let sectionItems = watchlistPicks
+                MediaSection(title: sectionTitle, items: sectionItems, hideWatchedForUpcoming: false, model: model) {
+                    forYouPath.append(.section(ForYouSection(title: sectionTitle, items: sectionItems)))
+                }
+            }
+        case .seriesNext:
+            let sectionItems = filteredForYou(model.seriesNext)
+            if !sectionItems.isEmpty {
+                let sectionTitle = "Continue with related series"
+                MediaSection(title: sectionTitle, items: sectionItems, hideWatchedForUpcoming: false, model: model) {
+                    forYouPath.append(.section(ForYouSection(title: sectionTitle, items: sectionItems)))
+                }
+            }
+        case .fromTopGenre:
+            let sectionItems = filteredForYou(model.fromTopGenre)
+            if !sectionItems.isEmpty {
+                let sectionTitle = "More from \(topGenreTitle)"
+                MediaSection(title: sectionTitle, items: sectionItems, hideWatchedForUpcoming: false, model: model) {
+                    forYouPath.append(.section(ForYouSection(title: sectionTitle, items: sectionItems)))
+                }
+            }
+        case .trySomethingNew:
+            let sectionItems = filteredForYou(model.trySomethingNewRecommendations)
+            if !sectionItems.isEmpty {
+                let sectionTitle = "Try something new"
+                MediaSection(title: sectionTitle, items: sectionItems, hideWatchedForUpcoming: false, model: model) {
+                    forYouPath.append(.section(ForYouSection(title: sectionTitle, items: sectionItems)))
+                }
             }
         }
     }
@@ -5049,6 +5136,20 @@ private struct PickForMeView: View {
                 .disabled(item.isUpcoming)
                 .opacity(item.isUpcoming ? 0.45 : 1)
             }
+
+            Button {
+                toggleNotInterestedForCurrentResult(item)
+            } label: {
+                Label(
+                    model.library.isNotInterested(item.key) ? "Remove not interested" : "Not interested",
+                    systemImage: model.library.isNotInterested(item.key) ? "hand.thumbsup" : "hand.thumbsdown"
+                )
+                .font(.headline.bold())
+                .frame(maxWidth: .infinity)
+                .frame(height: 48)
+                .liquidGlass(cornerRadius: 24)
+            }
+            .buttonStyle(.plain)
 
             Button(role: model.library.isNeverShowAgain(item.key) ? nil : .destructive) {
                 toggleNeverShowAgainForCurrentResult(item)
@@ -5438,7 +5539,10 @@ private struct PickForMeView: View {
             parts.append(ageRating)
         }
 
-        parts.append(model.ratingDisplayText(for: item))
+        let ratingText = model.ratingDisplayText(for: item)
+        if !ratingText.isEmpty {
+            parts.append(ratingText)
+        }
         return parts.joined(separator: " • ")
     }
 
@@ -5505,6 +5609,20 @@ private struct PickForMeView: View {
         model.toggleNeverShowAgain(item)
 
         guard willHide else { return }
+        results.removeAll { $0.key == item.key }
+
+        if results.isEmpty {
+            editAnswers()
+        } else {
+            resultIndex = min(resultIndex, results.count - 1)
+        }
+    }
+
+    private func toggleNotInterestedForCurrentResult(_ item: MediaItem) {
+        let willMark = !model.library.isNotInterested(item.key)
+        model.toggleNotInterested(item)
+
+        guard willMark else { return }
         results.removeAll { $0.key == item.key }
 
         if results.isEmpty {
@@ -5608,7 +5726,8 @@ private struct PickForMeOptionButton: View {
                 using: model.sortOption,
                 ratings: model.library.ratings,
                 externalRatings: model.externalRatingsCache,
-                ratingSource: model.settings.preferredRatingSource
+                ratingSource: model.settings.preferredRatingSource,
+                direction: model.sortDirection
             )
         }
 
@@ -5625,8 +5744,10 @@ private struct PickForMeOptionButton: View {
                 await model.loadExternalRatings(for: model.library.watchlistItems, limit: 120)
             }) {
                 VStack(alignment: .leading, spacing: 14) {
-                    SortPicker(sort: $model.sortOption, includeMyRating: true, ratingSource: model.settings.preferredRatingSource)
-                    
+                    SortRow(direction: $model.sortDirection) {
+                        SortPicker(sort: $model.sortOption, includeMyRating: false, ratingSource: model.settings.preferredRatingSource)
+                    }
+
                     if sortedItems.isEmpty {
                         StatusBubble(title: "No saved items", text: "Saved movies and series will appear here.")
                     } else {
@@ -5649,6 +5770,11 @@ private struct PickForMeOptionButton: View {
             }
             .onChange(of: model.watchlistResetToken) { _, _ in
                 model.sortOption = .tmdbRating
+            }
+            .onAppear {
+                if model.sortOption == .myRating {
+                    model.sortOption = .tmdbRating
+                }
             }
         }
     }
@@ -6686,6 +6812,7 @@ private struct PickForMeOptionButton: View {
         let franchise: FranchiseCollection
         @ObservedObject var model: VestigoModel
         @State private var sort: SortOption = .tmdbRating
+        @State private var sortDirection: SortDirection = .descending
         @State private var mode: FranchiseDetailMode = .watched
         @State private var universeMediaFilter: MediaFilter = .both
         @State private var backendRecommendations: [MediaItem] = []
@@ -6703,7 +6830,8 @@ private struct PickForMeOptionButton: View {
                 using: sort,
                 library: model.library,
                 externalRatings: model.externalRatingsCache,
-                ratingSource: model.settings.preferredRatingSource
+                ratingSource: model.settings.preferredRatingSource,
+                direction: sortDirection
             )
         }
 
@@ -6725,7 +6853,8 @@ private struct PickForMeOptionButton: View {
                 using: sort,
                 library: model.library,
                 externalRatings: model.externalRatingsCache,
-                ratingSource: model.settings.preferredRatingSource
+                ratingSource: model.settings.preferredRatingSource,
+                direction: sortDirection
             )
         }
 
@@ -6746,7 +6875,8 @@ private struct PickForMeOptionButton: View {
                 using: sort,
                 library: model.library,
                 externalRatings: model.externalRatingsCache,
-                ratingSource: model.settings.preferredRatingSource
+                ratingSource: model.settings.preferredRatingSource,
+                direction: sortDirection
             )
         }
 
@@ -6908,12 +7038,14 @@ private struct PickForMeOptionButton: View {
                     .padding(14)
                     .liquidGlass(cornerRadius: 24)
 
-                    SortPicker(sort: $sort, includeMyRating: mode == .watched, ratingSource: model.settings.preferredRatingSource)
-                        .onChange(of: mode) { _, newMode in
-                            if newMode == .recommended && sort == .myRating {
-                                sort = .tmdbRating
+                    SortRow(direction: $sortDirection) {
+                        SortPicker(sort: $sort, includeMyRating: mode == .watched, ratingSource: model.settings.preferredRatingSource)
+                            .onChange(of: mode) { _, newMode in
+                                if newMode == .recommended && sort == .myRating {
+                                    sort = .tmdbRating
+                                }
                             }
-                        }
+                    }
 
                     if !isSeriesCollection && shouldShowModePicker {
                         FilterPills(filter: $universeMediaFilter, options: [.movie, .tv, .both]) {}
@@ -7134,10 +7266,11 @@ private struct PickForMeOptionButton: View {
             return tvdbExactMatch || tvdbPartialMatch || localAliasMatch
         }
 
-        static func sortedItems(_ items: [MediaItem], using sort: SortOption, library: UserLibrary, externalRatings: [MediaKey: ExternalRatings] = [:], ratingSource: RatingSource = .imdb) -> [MediaItem] {
-            items.sorted { lhs, rhs in
+        static func sortedItems(_ items: [MediaItem], using sort: SortOption, library: UserLibrary, externalRatings: [MediaKey: ExternalRatings] = [:], ratingSource: RatingSource = .imdb, direction: SortDirection = .descending) -> [MediaItem] {
+            let result = items.sorted { lhs, rhs in
                 comesBefore(lhs, rhs, using: sort, library: library, externalRatings: externalRatings, ratingSource: ratingSource)
             }
+            return direction == .ascending ? result.reversed() : result
         }
 
         private static func comesBefore(_ lhs: MediaItem, _ rhs: MediaItem, using sort: SortOption, library: UserLibrary, externalRatings: [MediaKey: ExternalRatings], ratingSource: RatingSource) -> Bool {
@@ -7217,6 +7350,7 @@ private struct PickForMeOptionButton: View {
         let collectionID: UUID
         @ObservedObject var model: VestigoModel
         @State private var sort: SortOption = .tmdbRating
+        @State private var sortDirection: SortDirection = .descending
         @State private var mode: CollectionDetailMode = .myList
         
         private var collection: MediaCollection? {
@@ -7229,14 +7363,15 @@ private struct PickForMeOptionButton: View {
                 using: sort,
                 ratings: model.library.ratings,
                 externalRatings: model.externalRatingsCache,
-                ratingSource: model.settings.preferredRatingSource
+                ratingSource: model.settings.preferredRatingSource,
+                direction: sortDirection
             )
         }
-        
+
         private var recommendedItems: [MediaItem] {
             guard let collection else { return [] }
             let existingKeys = Set(collection.itemKeys)
-            
+
             return (model.collectionRecommendations[collectionID] ?? [])
                 .filter { item in
                     !existingKeys.contains(item.key)
@@ -7247,7 +7382,8 @@ private struct PickForMeOptionButton: View {
                     using: sort,
                     ratings: model.library.ratings,
                     externalRatings: model.externalRatingsCache,
-                    ratingSource: model.settings.preferredRatingSource
+                    ratingSource: model.settings.preferredRatingSource,
+                    direction: sortDirection
                 )
         }
         
@@ -7257,13 +7393,15 @@ private struct PickForMeOptionButton: View {
                 await model.loadExternalRatings(for: items + recommendedItems, limit: 120)
             }) {
                 VStack(spacing: 14) {
-                    SortPicker(sort: $sort, includeMyRating: mode != .recommended, ratingSource: model.settings.preferredRatingSource)
-                        .onChange(of: mode) { _, newMode in
-                            if newMode == .recommended && sort == .myRating {
-                                sort = .tmdbRating
+                    SortRow(direction: $sortDirection) {
+                        SortPicker(sort: $sort, includeMyRating: mode != .recommended, ratingSource: model.settings.preferredRatingSource)
+                            .onChange(of: mode) { _, newMode in
+                                if newMode == .recommended && sort == .myRating {
+                                    sort = .tmdbRating
+                                }
                             }
-                        }
-                    
+                    }
+
                     CollectionDetailModePicker(mode: $mode)
                     
                     if mode == .myList {
@@ -7362,19 +7500,26 @@ private struct PickForMeOptionButton: View {
                         .sectionTitle()
                     
                     VStack(alignment: .leading, spacing: 10) {
-                        Toggle("Dark Mode", isOn: Binding(
-                            get: { model.settings.appearance == .dark },
-                            set: { model.settings.appearance = $0 ? .dark : .light }
-                        ))
-                        .font(.headline.bold())
-                        .tint(model.settings.accentColor)
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Display style")
+                                .font(.headline.bold())
+                                .frame(maxWidth: .infinity, alignment: .leading)
+
+                            Picker("Display style", selection: $model.settings.appearance) {
+                                ForEach(AppearanceMode.allCases) { mode in
+                                    Text(mode.title).tag(mode)
+                                }
+                            }
+                            .pickerStyle(.segmented)
+                            .labelsHidden()
+                        }
                         .settingBubble()
-                        
-                        Toggle("Plain black/white background", isOn: $model.settings.usePlainBackground)
+
+                        Toggle("Plain background", isOn: $model.settings.usePlainBackground)
                             .font(.headline.bold())
                             .tint(model.settings.accentColor)
                             .settingBubble()
-                        
+
                         ColorPicker(
                             "Accent Colour",
                             selection: Binding(
@@ -7386,6 +7531,20 @@ private struct PickForMeOptionButton: View {
                         .font(.headline.bold())
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .settingBubble()
+
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text("Home & For You carousels")
+                                .font(.headline.bold())
+                                .foregroundStyle(.primary)
+
+                            Text("Drag to reorder. Tap the eye to hide a carousel from its tab.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.top, 4)
+
+                        CarouselOrderContent(model: model)
                     }
                     }
                     
@@ -7797,7 +7956,37 @@ private struct PickForMeOptionButton: View {
                             }
                         }
                         .fileExporter(isPresented: $model.showExporter, document: model.exportDocument, contentType: model.exportFormat.contentType, defaultFilename: model.exportFormat.filename) { _ in }
-                        
+
+                        NavigationLink {
+                            HiddenItemsReviewView(model: model)
+                        } label: {
+                            HStack(alignment: .center, spacing: 10) {
+                                Image(systemName: "eye.slash.circle")
+                                    .font(.system(size: 17, weight: .semibold))
+                                    .frame(width: 22, height: 22, alignment: .center)
+
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("Review hidden items")
+                                        .font(.system(size: 15, weight: .semibold, design: .rounded))
+                                        .foregroundStyle(.primary)
+                                    Text("Restore \"Never show\" or \"Not interested\" items.")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+
+                                Spacer(minLength: 0)
+
+                                Image(systemName: "chevron.right")
+                                    .font(.caption.bold())
+                                    .foregroundStyle(.secondary)
+                            }
+                            .padding(.horizontal, 2)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .contentShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+                        }
+                        .buttonStyle(.plain)
+                        .settingBubble()
+
                         Button("Reset settings") {
                             model.settings = AppSettings()
                             model.searchFilter = model.settings.defaultSearchFilter
@@ -7931,6 +8120,330 @@ private struct PickForMeOptionButton: View {
             let fileExtension = url.pathExtension.lowercased()
             let format: WatchedImportEntry.ImportFormat = fileExtension == "csv" ? .commaSeparated : .automatic
             importWatchedData(text, format: format)
+        }
+    }
+
+    private struct CarouselOrderContent: View {
+        @ObservedObject var model: VestigoModel
+        @State private var draggingHome: HomeCarousel?
+        @State private var draggingForYou: ForYouCarousel?
+
+        var body: some View {
+            VStack(alignment: .leading, spacing: 18) {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Home")
+                        .font(.subheadline.bold())
+                        .foregroundStyle(.secondary)
+                        .padding(.leading, 4)
+
+                    VStack(spacing: 10) {
+                        ForEach(model.settings.homeCarouselOrder, id: \.self) { carousel in
+                            CarouselOrderRow(
+                                title: carousel.title,
+                                isHidden: model.settings.homeCarouselHidden.contains(carousel),
+                                isDragging: draggingHome == carousel,
+                                accentColor: model.settings.accentColor,
+                                toggle: {
+                                    if model.settings.homeCarouselHidden.contains(carousel) {
+                                        model.settings.homeCarouselHidden.remove(carousel)
+                                    } else {
+                                        model.settings.homeCarouselHidden.insert(carousel)
+                                    }
+                                }
+                            )
+                            .onDrag {
+                                draggingHome = carousel
+                                return NSItemProvider(object: carousel.rawValue as NSString)
+                            }
+                            .onDrop(
+                                of: [.text],
+                                delegate: CarouselDropDelegate(
+                                    target: carousel,
+                                    order: Binding(
+                                        get: { model.settings.homeCarouselOrder },
+                                        set: { model.settings.homeCarouselOrder = $0 }
+                                    ),
+                                    dragging: $draggingHome,
+                                    valueFromRaw: HomeCarousel.init(rawValue:)
+                                )
+                            )
+                        }
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("For You")
+                        .font(.subheadline.bold())
+                        .foregroundStyle(.secondary)
+                        .padding(.leading, 4)
+
+                    VStack(spacing: 10) {
+                        ForEach(model.settings.forYouCarouselOrder, id: \.self) { carousel in
+                            CarouselOrderRow(
+                                title: carousel.title,
+                                isHidden: model.settings.forYouCarouselHidden.contains(carousel),
+                                isDragging: draggingForYou == carousel,
+                                accentColor: model.settings.accentColor,
+                                toggle: {
+                                    if model.settings.forYouCarouselHidden.contains(carousel) {
+                                        model.settings.forYouCarouselHidden.remove(carousel)
+                                    } else {
+                                        model.settings.forYouCarouselHidden.insert(carousel)
+                                    }
+                                }
+                            )
+                            .onDrag {
+                                draggingForYou = carousel
+                                return NSItemProvider(object: carousel.rawValue as NSString)
+                            }
+                            .onDrop(
+                                of: [.text],
+                                delegate: CarouselDropDelegate(
+                                    target: carousel,
+                                    order: Binding(
+                                        get: { model.settings.forYouCarouselOrder },
+                                        set: { model.settings.forYouCarouselOrder = $0 }
+                                    ),
+                                    dragging: $draggingForYou,
+                                    valueFromRaw: ForYouCarousel.init(rawValue:)
+                                )
+                            )
+                        }
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private struct CarouselDropDelegate<Item: Hashable>: DropDelegate {
+        let target: Item
+        @Binding var order: [Item]
+        @Binding var dragging: Item?
+        let valueFromRaw: (String) -> Item?
+
+        func dropEntered(info: DropInfo) {
+            guard let dragging, dragging != target,
+                  let fromIndex = order.firstIndex(of: dragging),
+                  let toIndex = order.firstIndex(of: target),
+                  fromIndex != toIndex else { return }
+            withAnimation(.spring(response: 0.28, dampingFraction: 0.86)) {
+                order.move(fromOffsets: IndexSet(integer: fromIndex), toOffset: toIndex > fromIndex ? toIndex + 1 : toIndex)
+            }
+        }
+
+        func dropUpdated(info: DropInfo) -> DropProposal? {
+            DropProposal(operation: .move)
+        }
+
+        func performDrop(info: DropInfo) -> Bool {
+            dragging = nil
+            return true
+        }
+    }
+
+    private struct CarouselOrderRow: View {
+        let title: String
+        let isHidden: Bool
+        let isDragging: Bool
+        let accentColor: Color
+        let toggle: () -> Void
+
+        var body: some View {
+            HStack(spacing: 12) {
+                Text(title)
+                    .font(.headline.bold())
+                    .foregroundStyle(isHidden ? .secondary : .primary)
+
+                Spacer()
+
+                Button(action: toggle) {
+                    Image(systemName: isHidden ? "eye.slash" : "eye")
+                        .font(.system(size: 17, weight: .semibold))
+                        .foregroundStyle(isHidden ? .secondary : accentColor)
+                        .frame(width: 34, height: 34)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(isHidden ? "Show \(title)" : "Hide \(title)")
+
+                Image(systemName: "line.3.horizontal")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .padding(.leading, 2)
+            }
+            .padding(.vertical, 12)
+            .padding(.horizontal, 16)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .liquidGlass(cornerRadius: 20)
+            .opacity(isDragging ? 0.4 : 1.0)
+            .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+        }
+    }
+
+    private struct HiddenItemsReviewView: View {
+        @ObservedObject var model: VestigoModel
+
+        private var entries: [(item: MediaItem, status: HiddenStatus)] {
+            let neverShow = model.library.neverShowAgainItems.map { ($0, HiddenStatus.neverShow) }
+            let notInterested = model.library.notInterestedItems
+                .filter { !model.library.isNeverShowAgain($0.key) }
+                .map { ($0, HiddenStatus.notInterested) }
+            return (neverShow + notInterested)
+                .sorted { lhs, rhs in
+                    lhs.0.title.localizedCaseInsensitiveCompare(rhs.0.title) == .orderedAscending
+                }
+        }
+
+        var body: some View {
+            ZStack {
+                AppBackground(settings: model.settings)
+                    .ignoresSafeArea()
+
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 12) {
+                        if entries.isEmpty {
+                            StatusBubble(
+                                title: "No hidden items",
+                                text: "Items marked as \"Never show\" or \"Not interested\" show up here."
+                            )
+                        } else {
+                            ForEach(entries, id: \.item.key) { entry in
+                                HiddenItemRow(
+                                    item: entry.item,
+                                    status: entry.status,
+                                    accentColor: model.settings.accentColor,
+                                    onOpen: { model.selectedItem = entry.item },
+                                    onRestore: {
+                                        switch entry.status {
+                                        case .neverShow:
+                                            model.toggleNeverShowAgain(entry.item)
+                                        case .notInterested:
+                                            model.toggleNotInterested(entry.item)
+                                        }
+                                    }
+                                )
+                            }
+                        }
+                    }
+                    .padding(16)
+                    .padding(.bottom, 40)
+                }
+            }
+            .navigationTitle("Hidden items")
+            .navigationBarTitleDisplayMode(.inline)
+        }
+
+        enum HiddenStatus {
+            case neverShow
+            case notInterested
+
+            var label: String {
+                switch self {
+                case .neverShow: return "Never show"
+                case .notInterested: return "Not interested"
+                }
+            }
+
+            var iconName: String {
+                switch self {
+                case .neverShow: return "eye.slash"
+                case .notInterested: return "hand.thumbsdown"
+                }
+            }
+        }
+    }
+
+    private struct HiddenItemRow: View {
+        let item: MediaItem
+        let status: HiddenItemsReviewView.HiddenStatus
+        let accentColor: Color
+        let onOpen: () -> Void
+        let onRestore: () -> Void
+        @Environment(\.imageRefreshToken) private var imageRefreshToken
+
+        var body: some View {
+            HStack(alignment: .center, spacing: 12) {
+                Button(action: onOpen) {
+                    HStack(alignment: .center, spacing: 12) {
+                        posterThumbnail
+
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(item.title)
+                                .font(.headline.bold())
+                                .foregroundStyle(.primary)
+                                .lineLimit(2)
+
+                            Text(metadataLine)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+
+                            HStack(spacing: 6) {
+                                Image(systemName: status.iconName)
+                                    .font(.caption2.bold())
+                                Text(status.label)
+                                    .font(.caption.bold())
+                            }
+                            .foregroundStyle(accentColor)
+                            .padding(.top, 2)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+
+                Button(action: onRestore) {
+                    Image(systemName: "arrow.uturn.backward.circle.fill")
+                        .font(.system(size: 26, weight: .semibold))
+                        .foregroundStyle(accentColor)
+                        .frame(width: 42, height: 42)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Restore \(item.title)")
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .liquidGlass(cornerRadius: 22)
+        }
+
+        private var metadataLine: String {
+            var parts: [String] = [item.kind.label]
+            let yearText = item.releaseYearText
+            if yearText != "TBA" {
+                parts.append(yearText)
+            }
+            return parts.joined(separator: " • ")
+        }
+
+        private var posterThumbnail: some View {
+            ZStack {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(.white.opacity(0.08))
+
+                if let url = item.posterURL {
+                    AsyncImage(url: url.refreshedImageURL(token: imageRefreshToken)) { phase in
+                        switch phase {
+                        case .success(let image):
+                            image
+                                .resizable()
+                                .scaledToFill()
+                        default:
+                            Image(systemName: "film")
+                                .font(.system(size: 18, weight: .bold))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                } else {
+                    Image(systemName: "film")
+                        .font(.system(size: 18, weight: .bold))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .frame(width: 54, height: 78)
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         }
     }
 
@@ -8086,7 +8599,7 @@ private struct PickForMeOptionButton: View {
                     fallback
                 }
             }
-            .frame(width: provider.logoAssetName == nil ? 120 : 150, height: provider.hasLogo ? 36 : 0)
+            .frame(width: provider.logoAssetName == nil ? 120 : 150, height: provider.hasLogo ? provider.logoHeight : 0)
             .opacity(provider.hasLogo ? 1 : 0)
             .accessibilityHidden(true)
         }
@@ -8110,6 +8623,7 @@ private struct PickForMeOptionButton: View {
         let logoURL: URL?
         let logoAssetName: String?
         let logoText: String?
+        var logoHeight: CGFloat = 36
 
         var hasLogo: Bool {
             logoURL != nil || logoAssetName != nil || logoText != nil
@@ -8180,7 +8694,8 @@ private struct PickForMeOptionButton: View {
                 url: URL(string: "https://www.youtube.com/")!,
                 logoURL: nil,
                 logoAssetName: "YouTubeLogo",
-                logoText: nil
+                logoText: nil,
+                logoHeight: 30
             ),
             AttributionProvider(
                 id: "wikimedia",
@@ -8802,9 +9317,25 @@ private struct PickForMeOptionButton: View {
         }
         
         private var overviewSection: some View {
-            Text(item.overview.isEmpty ? "No overview available." : item.overview)
-                .font(.body)
-                .foregroundStyle(.primary.opacity(0.82))
+            VStack(alignment: .leading, spacing: 4) {
+                Text(item.overview.isEmpty ? "No overview available." : item.overview)
+                    .font(.body)
+                    .foregroundStyle(.primary.opacity(0.82))
+
+                ExternalLookupLink(
+                    searchQuery: item.title,
+                    imdbURL: mediaIMDbURL,
+                    accentColor: model.settings.accentColor,
+                    font: .body
+                )
+            }
+        }
+
+        private var mediaIMDbURL: URL? {
+            guard let imdbID = detail?.imdbID?.trimmingCharacters(in: .whitespacesAndNewlines), !imdbID.isEmpty else {
+                return nil
+            }
+            return URL(string: "https://www.imdb.com/title/\(imdbID)/")
         }
         
         private var actionSection: some View {
@@ -8884,8 +9415,7 @@ private struct PickForMeOptionButton: View {
         @ViewBuilder private var providerStatus: some View {
             if item.isUpcoming {
                 StatusBubble(title: "Theatrical status", text: "This release is upcoming. Streaming availability may not exist yet.")
-            }
-            if providers == nil {
+            } else if providers == nil {
                 LoadingBubble(title: "Checking availability", text: "Loading US streaming options and prices.")
             } else if visibleProviders?.isEmpty != false {
                 StatusBubble(title: "No streaming prices found", text: "No US provider data with price and quality was returned for this title.")
@@ -8933,8 +9463,11 @@ private struct PickForMeOptionButton: View {
             if let originalLanguage = item.originalLanguage, !originalLanguage.isEmpty {
                 parts.append("Original language: \(originalLanguage.uppercased())")
             }
-            
-            parts.append(model.ratingDisplayText(for: item))
+
+            let ratingText = model.ratingDisplayText(for: item)
+            if !ratingText.isEmpty {
+                parts.append(ratingText)
+            }
             return parts.joined(separator: " • ")
         }
         
@@ -9458,14 +9991,15 @@ private struct PickForMeOptionButton: View {
         @ObservedObject var model: VestigoModel
         @State private var selectedCreditItem: MediaItem?
         @State private var knownForSort: PersonKnownForSort = .rating
+        @State private var knownForSortDirection: SortDirection = .descending
         @State private var isBiographyExpanded = false
-        
+
         private var credits: [MediaItem] {
             model.personCreditsCache[person.id] ?? []
         }
-        
+
         private var sortedKnownForCredits: [MediaItem] {
-            credits.sorted { lhs, rhs in
+            let result = credits.sorted { lhs, rhs in
                 switch knownForSort {
                 case .rating:
                     let lhsRating = model.ratingSortValue(for: lhs)
@@ -9480,9 +10014,10 @@ private struct PickForMeOptionButton: View {
                         return lhsDate > rhsDate
                     }
                 }
-                
+
                 return (lhs.releaseDateValue ?? .distantPast) > (rhs.releaseDateValue ?? .distantPast)
             }
+            return knownForSortDirection == .ascending ? result.reversed() : result
         }
         
         var body: some View {
@@ -9518,7 +10053,9 @@ private struct PickForMeOptionButton: View {
                 VStack(alignment: .leading, spacing: 18) {
                     header
                     knownForTitle
-                    PersonKnownForSortPicker(sort: $knownForSort)
+                    SortRow(direction: $knownForSortDirection) {
+                        PersonKnownForSortPicker(sort: $knownForSort)
+                    }
                     
                     PersonCreditList(items: sortedKnownForCredits, model: model) { item in
                         selectedCreditItem = item
@@ -9568,7 +10105,7 @@ private struct PickForMeOptionButton: View {
                                 .foregroundStyle(.primary.opacity(0.82))
                                 .lineLimit(isBiographyExpanded ? nil : 3)
                                 .fixedSize(horizontal: false, vertical: true)
-                            
+
                             if detail.fullBiography != nil {
                                 Button(isBiographyExpanded ? "Show less" : "More") {
                                     withAnimation(.smooth(duration: 0.2)) {
@@ -9579,6 +10116,13 @@ private struct PickForMeOptionButton: View {
                                 .buttonStyle(.plain)
                                 .foregroundStyle(model.settings.accentColor)
                             }
+
+                            ExternalLookupLink(
+                                searchQuery: person.name,
+                                imdbURL: personIMDbURL(detail: detail),
+                                accentColor: model.settings.accentColor,
+                                font: .caption
+                            )
                         }
                         .padding(.top, 2)
                     }
@@ -9586,10 +10130,17 @@ private struct PickForMeOptionButton: View {
             }
             .frame(maxWidth: .infinity, alignment: .topLeading)
         }
-        
+
         private var knownForTitle: some View {
             Text("Known for")
                 .sectionTitle()
+        }
+
+        private func personIMDbURL(detail: PersonDetail) -> URL? {
+            guard let imdbID = detail.imdbID?.trimmingCharacters(in: .whitespacesAndNewlines), !imdbID.isEmpty else {
+                return nil
+            }
+            return URL(string: "https://www.imdb.com/name/\(imdbID)/")
         }
     }
     
@@ -9745,7 +10296,12 @@ private struct PickForMeOptionButton: View {
         }
         
         private var metadataLine: String {
-            "\(item.kind.label) • \(item.releaseDateReadable) • \(model.ratingDisplayText(for: item))"
+            var parts = [item.kind.label, item.releaseDateReadable]
+            let ratingText = model.ratingDisplayText(for: item)
+            if !ratingText.isEmpty {
+                parts.append(ratingText)
+            }
+            return parts.joined(separator: " • ")
         }
         
         private func openItemFromList() {
@@ -10347,6 +10903,15 @@ private struct PickForMeOptionButton: View {
                 }
             }
 
+            Button {
+                model.toggleNotInterested(item)
+            } label: {
+                Label(
+                    model.library.isNotInterested(item.key) ? "Remove not interested" : "Not interested",
+                    systemImage: model.library.isNotInterested(item.key) ? "hand.thumbsup" : "hand.thumbsdown"
+                )
+            }
+
             Button(role: model.library.isNeverShowAgain(item.key) ? nil : .destructive) {
                 model.toggleNeverShowAgain(item)
             } label: {
@@ -10355,7 +10920,7 @@ private struct PickForMeOptionButton: View {
                     systemImage: model.library.isNeverShowAgain(item.key) ? "eye" : "eye.slash"
                 )
             }
-            
+
             if case .collection(let id) = swipeContext {
                 Button(role: .destructive) {
                     model.removeFromCollection(item, collectionID: id)
@@ -10396,7 +10961,7 @@ private struct PickForMeOptionButton: View {
                     .frame(width: 148, alignment: .topLeading)
                     .frame(minHeight: 36, alignment: .topLeading)
                 
-                Text("\(item.releaseDateReadable) • \(model.ratingDisplayText(for: item))")
+                Text(tileMetadataText)
                     .font(.caption2.bold())
                     .foregroundStyle(.secondary)
                     .frame(width: 148, alignment: .leading)
@@ -10428,10 +10993,18 @@ private struct PickForMeOptionButton: View {
                 model.selectedItem = item
             }
         }
+
+        private var tileMetadataText: String {
+            let ratingText = model.ratingDisplayText(for: item)
+            if ratingText.isEmpty {
+                return item.releaseDateReadable
+            }
+            return "\(item.releaseDateReadable) • \(ratingText)"
+        }
     }
-    
-    
-    
+
+
+
     private struct PosterView: View {
         let item: MediaItem
         let width: CGFloat
@@ -10894,19 +11467,54 @@ private struct PickForMeOptionButton: View {
         @Binding var sort: SortOption
         let includeMyRating: Bool
         let ratingSource: RatingSource
-        
+
         var body: some View {
             Picker("Sort", selection: $sort) {
                 Text("Released").tag(SortOption.releaseDate)
-                
+
                 if includeMyRating {
                     Text("My rating").tag(SortOption.myRating)
                 }
-                
+
                 Text(ratingSource.title).tag(SortOption.tmdbRating)
             }
             .pickerStyle(.segmented)
             .liquidGlass(cornerRadius: 18)
+        }
+    }
+
+    private struct SortDirectionButton: View {
+        @Binding var direction: SortDirection
+
+        var body: some View {
+            Button {
+                withAnimation(.spring(response: 0.22, dampingFraction: 0.85)) {
+                    direction.toggle()
+                }
+            } label: {
+                Image(systemName: direction.iconName)
+                    .font(.system(size: 15, weight: .bold))
+                    .foregroundStyle(.primary)
+                    .frame(width: 42, height: 34)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .liquidGlass(cornerRadius: 18)
+            .accessibilityLabel(direction.accessibilityLabel)
+        }
+    }
+
+    private struct SortRow<Picker: View>: View {
+        @Binding var direction: SortDirection
+        @ViewBuilder let picker: Picker
+
+        var body: some View {
+            HStack(spacing: 8) {
+                picker
+                    .frame(maxWidth: .infinity)
+
+                SortDirectionButton(direction: $direction)
+            }
         }
     }
     
@@ -11306,6 +11914,48 @@ private struct PickForMeOptionButton: View {
             .padding(14)
             .liquidGlass(cornerRadius: 22)
             .appScrollTouchSafe()
+        }
+    }
+
+    private struct ExternalLookupLink: View {
+        let searchQuery: String
+        let imdbURL: URL?
+        let accentColor: Color
+        let font: Font
+        @Environment(\.openURL) private var openURL
+        @State private var isDialogPresented = false
+
+        var body: some View {
+            Button {
+                isDialogPresented = true
+            } label: {
+                Text("See more")
+                    .font(font.weight(.bold))
+                    .foregroundStyle(Color.blue)
+            }
+            .buttonStyle(.plain)
+            .confirmationDialog("", isPresented: $isDialogPresented, titleVisibility: .visible) {
+                if let imdbURL {
+                    Button("IMDb") {
+                        openURL(imdbURL)
+                    }
+                }
+                Button("Search") {
+                    if let searchURL {
+                        openURL(searchURL)
+                    }
+                }
+                Button("Cancel", role: .cancel) { }
+            }
+        }
+
+        private var searchURL: URL? {
+            let trimmed = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty,
+                  let encoded = trimmed.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) else {
+                return nil
+            }
+            return URL(string: "https://www.google.com/search?q=\(encoded)")
         }
     }
     
@@ -12482,7 +13132,8 @@ private struct PickForMeOptionButton: View {
         let deathday: String?
         let placeOfBirth: String?
         let knownForDepartment: String?
-        
+        let imdbID: String?
+
         enum CodingKeys: String, CodingKey {
             case id
             case biography
@@ -12490,6 +13141,7 @@ private struct PickForMeOptionButton: View {
             case deathday
             case placeOfBirth = "place_of_birth"
             case knownForDepartment = "known_for_department"
+            case imdbID = "imdb_id"
         }
     }
     
@@ -12911,14 +13563,16 @@ private struct PickForMeOptionButton: View {
         let deathday: String?
         let placeOfBirth: String?
         let knownForDepartment: String?
-        
+        let imdbID: String?
+
         nonisolated init(
             id: Int,
             biography: String,
             birthday: String? = nil,
             deathday: String? = nil,
             placeOfBirth: String? = nil,
-            knownForDepartment: String? = nil
+            knownForDepartment: String? = nil,
+            imdbID: String? = nil
         ) {
             self.id = id
             self.biography = biography
@@ -12926,8 +13580,9 @@ private struct PickForMeOptionButton: View {
             self.deathday = deathday
             self.placeOfBirth = placeOfBirth
             self.knownForDepartment = knownForDepartment
+            self.imdbID = imdbID
         }
-        
+
         init(response: TMDbPersonDetailResponse) {
             id = response.id
             biography = response.biography ?? ""
@@ -12935,6 +13590,7 @@ private struct PickForMeOptionButton: View {
             deathday = response.deathday
             placeOfBirth = response.placeOfBirth
             knownForDepartment = response.knownForDepartment
+            imdbID = response.imdbID
         }
         
         var lifespanText: String? {
@@ -14525,6 +15181,7 @@ private struct PickForMeOptionButton: View {
         var ratings: [MediaKey: Double] = [:]
         var favouriteKeys: Set<MediaKey> = []
         var neverShowAgain: Set<MediaKey> = []
+        var notInterested: Set<MediaKey> = []
         var watchedOrder: [MediaKey] = []
         var collections: [MediaCollection] = []
         var watchedEpisodes: Set<EpisodeKey> = []
@@ -14536,6 +15193,7 @@ private struct PickForMeOptionButton: View {
             case ratings
             case favouriteKeys
             case neverShowAgain
+            case notInterested
             case watchedOrder
             case collections
             case watchedEpisodes
@@ -14551,6 +15209,7 @@ private struct PickForMeOptionButton: View {
             ratings = try container.decodeIfPresent([MediaKey: Double].self, forKey: .ratings) ?? [:]
             favouriteKeys = try container.decodeIfPresent(Set<MediaKey>.self, forKey: .favouriteKeys) ?? []
             neverShowAgain = try container.decodeIfPresent(Set<MediaKey>.self, forKey: .neverShowAgain) ?? []
+            notInterested = try container.decodeIfPresent(Set<MediaKey>.self, forKey: .notInterested) ?? []
             watchedOrder = try container.decodeIfPresent([MediaKey].self, forKey: .watchedOrder) ?? []
             collections = try container.decodeIfPresent([MediaCollection].self, forKey: .collections) ?? []
             watchedEpisodes = try container.decodeIfPresent(Set<EpisodeKey>.self, forKey: .watchedEpisodes) ?? []
@@ -14564,6 +15223,7 @@ private struct PickForMeOptionButton: View {
             try container.encode(ratings, forKey: .ratings)
             try container.encode(favouriteKeys, forKey: .favouriteKeys)
             try container.encode(neverShowAgain, forKey: .neverShowAgain)
+            try container.encode(notInterested, forKey: .notInterested)
             try container.encode(watchedOrder, forKey: .watchedOrder)
             try container.encode(collections, forKey: .collections)
             try container.encode(watchedEpisodes, forKey: .watchedEpisodes)
@@ -14571,10 +15231,13 @@ private struct PickForMeOptionButton: View {
 
         var watchlistItems: [MediaItem] { watchlist.compactMap { items[$0] } }
         var watchedItems: [MediaItem] { watched.compactMap { items[$0] } }
+        var neverShowAgainItems: [MediaItem] { neverShowAgain.compactMap { items[$0] } }
+        var notInterestedItems: [MediaItem] { notInterested.compactMap { items[$0] } }
 
         func isInWatchlist(_ key: MediaKey) -> Bool { watchlist.contains(key) }
         func isWatched(_ key: MediaKey) -> Bool { watched.contains(key) }
         func isNeverShowAgain(_ key: MediaKey) -> Bool { neverShowAgain.contains(key) }
+        func isNotInterested(_ key: MediaKey) -> Bool { notInterested.contains(key) }
 
         mutating func toggleWatchlist(_ item: MediaItem) {
             items[item.key] = item
@@ -14653,6 +15316,17 @@ private struct PickForMeOptionButton: View {
                 neverShowAgain.remove(item.key)
             } else {
                 neverShowAgain.insert(item.key)
+                notInterested.remove(item.key)
+            }
+        }
+
+        mutating func toggleNotInterested(_ item: MediaItem) {
+            items[item.key] = item
+            if notInterested.contains(item.key) {
+                notInterested.remove(item.key)
+            } else {
+                notInterested.insert(item.key)
+                neverShowAgain.remove(item.key)
             }
         }
 
@@ -14760,6 +15434,10 @@ private struct PickForMeOptionButton: View {
         var promptToRateAfterMarkingWatched = true
         var preferredRatingSource: RatingSource = .imdb
         var notificationPreferences = NotificationPreferences()
+        var homeCarouselOrder: [HomeCarousel] = HomeCarousel.allCases
+        var homeCarouselHidden: Set<HomeCarousel> = []
+        var forYouCarouselOrder: [ForYouCarousel] = ForYouCarousel.allCases
+        var forYouCarouselHidden: Set<ForYouCarousel> = []
 
         enum CodingKeys: String, CodingKey {
             case recommendationStrength
@@ -14796,6 +15474,10 @@ private struct PickForMeOptionButton: View {
             case promptToRateAfterMarkingWatched
             case preferredRatingSource
             case notificationPreferences
+            case homeCarouselOrder
+            case homeCarouselHidden
+            case forYouCarouselOrder
+            case forYouCarouselHidden
         }
 
         init() {}
@@ -14837,6 +15519,22 @@ private struct PickForMeOptionButton: View {
             promptToRateAfterMarkingWatched = try container.decodeIfPresent(Bool.self, forKey: .promptToRateAfterMarkingWatched) ?? promptToRateAfterMarkingWatched
             preferredRatingSource = try container.decodeIfPresent(RatingSource.self, forKey: .preferredRatingSource) ?? preferredRatingSource
             notificationPreferences = try container.decodeIfPresent(NotificationPreferences.self, forKey: .notificationPreferences) ?? notificationPreferences
+
+            let savedHomeOrder = try container.decodeIfPresent([HomeCarousel].self, forKey: .homeCarouselOrder) ?? []
+            homeCarouselOrder = Self.mergedOrder(saved: savedHomeOrder, defaults: HomeCarousel.allCases)
+            homeCarouselHidden = try container.decodeIfPresent(Set<HomeCarousel>.self, forKey: .homeCarouselHidden) ?? homeCarouselHidden
+
+            let savedForYouOrder = try container.decodeIfPresent([ForYouCarousel].self, forKey: .forYouCarouselOrder) ?? []
+            forYouCarouselOrder = Self.mergedOrder(saved: savedForYouOrder, defaults: ForYouCarousel.allCases)
+            forYouCarouselHidden = try container.decodeIfPresent(Set<ForYouCarousel>.self, forKey: .forYouCarouselHidden) ?? forYouCarouselHidden
+        }
+
+        private static func mergedOrder<T: Hashable>(saved: [T], defaults: [T]) -> [T] {
+            let known = Set(defaults)
+            var result = saved.filter { known.contains($0) }
+            let present = Set(result)
+            result.append(contentsOf: defaults.filter { !present.contains($0) })
+            return result
         }
     }
     
@@ -14865,7 +15563,52 @@ private struct PickForMeOptionButton: View {
         }
     }
     
-    private enum AppearanceMode: String, Codable, CaseIterable, Identifiable { case dark, light; var id: String { rawValue }; var title: String { rawValue.capitalized } }
+    private enum AppearanceMode: String, Codable, CaseIterable, Identifiable {
+        case system, light, dark
+        var id: String { rawValue }
+        var title: String {
+            switch self {
+            case .system: return "System"
+            case .light: return "Light"
+            case .dark: return "Dark"
+            }
+        }
+        var preferredColorScheme: ColorScheme? {
+            switch self {
+            case .system: return nil
+            case .light: return .light
+            case .dark: return .dark
+            }
+        }
+    }
+
+    private enum HomeCarousel: String, Codable, CaseIterable, Identifiable, Hashable {
+        case trending, newReleases, upcoming
+        var id: String { rawValue }
+        var title: String {
+            switch self {
+            case .trending: return "Trending now"
+            case .newReleases: return "New releases"
+            case .upcoming: return "Upcoming releases"
+            }
+        }
+    }
+
+    private enum ForYouCarousel: String, Codable, CaseIterable, Identifiable, Hashable {
+        case forYou, moreLikeLast, moreLikeFavourite, watchlistPicks, seriesNext, fromTopGenre, trySomethingNew
+        var id: String { rawValue }
+        var title: String {
+            switch self {
+            case .forYou: return "For you"
+            case .moreLikeLast: return "More like recent watched"
+            case .moreLikeFavourite: return "More like a favourite"
+            case .watchlistPicks: return "From your watchlist"
+            case .seriesNext: return "Continue with related series"
+            case .fromTopGenre: return "More from top genre"
+            case .trySomethingNew: return "Try something new"
+            }
+        }
+    }
     private enum RatingSource: String, Codable, CaseIterable, Identifiable, Hashable {
         case tmdb
         case imdb
@@ -14997,6 +15740,15 @@ private struct PickForMeOptionButton: View {
     private extension MediaFilter { var title: String { self == .both ? "Both" : (self == .movie ? "Movies" : "Series") }; var tmdbPath: String { self == .both ? "all" : (self == .movie ? "movie" : "tv") } }
     private enum ViewMode: String, Codable { case tile, list }
     private enum SortOption: String, CaseIterable, Identifiable { case releaseDate, myRating, tmdbRating; var id: String { rawValue } }
+
+    private enum SortDirection: String, CaseIterable, Codable, Hashable {
+        case ascending, descending
+        var iconName: String { self == .ascending ? "arrow.up" : "arrow.down" }
+        var accessibilityLabel: String { self == .ascending ? "Ascending" : "Descending" }
+        mutating func toggle() {
+            self = (self == .ascending) ? .descending : .ascending
+        }
+    }
     private enum GenreSort: String, Codable, CaseIterable, Identifiable { case tmdbRating, releaseDate; var id: String { rawValue }; var title: String { self == .tmdbRating ? "IMDb rating" : "Released" }; var tmdbSort: String { self == .tmdbRating ? "popularity.desc" : "primary_release_date.desc" } }
     private enum SwipeContext { case none, watchlist, collection(UUID) }
     private enum SectionRoute: String, Hashable {
@@ -15452,7 +16204,8 @@ private struct PickForMeOptionButton: View {
             using option: SortOption,
             ratings: [MediaKey: Double],
             externalRatings: [MediaKey: ExternalRatings] = [:],
-            ratingSource: RatingSource = .tmdb
+            ratingSource: RatingSource = .tmdb,
+            direction: SortDirection = .descending
         ) -> [MediaItem] {
             func ratingValue(for item: MediaItem) -> Double {
                 if ratingSource == .imdb,
@@ -15463,7 +16216,7 @@ private struct PickForMeOptionButton: View {
                 return -1
             }
 
-            return sorted { a, b in
+            let result = sorted { a, b in
                 switch option {
                 case .releaseDate:
                     let av = a.releaseDateValue ?? .distantPast
@@ -15480,6 +16233,7 @@ private struct PickForMeOptionButton: View {
                 }
                 return (a.releaseDateValue ?? .distantPast) > (b.releaseDateValue ?? .distantPast)
             }
+            return direction == .ascending ? result.reversed() : result
         }
         
         func sortedByCategoryRank() -> [MediaItem] {
@@ -15519,25 +16273,25 @@ private struct PickForMeOptionButton: View {
                     .background(.clear, in: shape)
                     .glassEffect(.regular, in: shape)
                     .overlay {
-                        shape.fill(colorScheme == .light ? .black.opacity(0.055) : .clear)
+                        shape.fill(colorScheme == .light ? .black.opacity(0.11) : .clear)
                     }
                     .overlay {
-                        shape.stroke(colorScheme == .light ? .black.opacity(0.12) : .clear, lineWidth: 1)
+                        shape.stroke(colorScheme == .light ? .black.opacity(0.22) : .clear, lineWidth: 1)
                     }
                     .clipShape(shape)
-                    .shadow(color: .black.opacity(colorScheme == .light ? 0.12 : 0.18), radius: 16, x: 0, y: 9)
+                    .shadow(color: .black.opacity(colorScheme == .light ? 0.18 : 0.18), radius: 16, x: 0, y: 9)
             } else {
                 content
                     .background {
                         shape
                             .fill(.ultraThinMaterial)
                             .background(
-                                shape.fill(colorScheme == .light ? .black.opacity(0.075) : .white.opacity(0.10))
+                                shape.fill(colorScheme == .light ? .black.opacity(0.13) : .white.opacity(0.10))
                             )
                             .overlay {
-                                shape.stroke(colorScheme == .light ? .black.opacity(0.12) : .white.opacity(0.16), lineWidth: 1)
+                                shape.stroke(colorScheme == .light ? .black.opacity(0.22) : .white.opacity(0.16), lineWidth: 1)
                             }
-                            .shadow(color: .black.opacity(colorScheme == .light ? 0.10 : 0.22), radius: 18, x: 0, y: 10)
+                            .shadow(color: .black.opacity(colorScheme == .light ? 0.16 : 0.22), radius: 18, x: 0, y: 10)
                     }
                     .clipShape(shape)
             }
@@ -16363,7 +17117,6 @@ private struct PickForMeOptionButton: View {
             else {
                 return true
             }
-
             return actualRank <= maximumAllowedRank
         }
 
