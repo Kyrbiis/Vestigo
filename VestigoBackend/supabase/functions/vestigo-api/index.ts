@@ -187,16 +187,13 @@ async function tasteDiveSimilar(query: string, type: string, limit: string) {
     .filter((name: string) => name.length > 0)
 }
 
-async function fetchOMDb(params: Record<string, string>) {
-  const configuredOMDbKey = Deno.env.get("OMDB_API_KEY")
-  const emergencyOMDbKey = Deno.env.get("OMDB_EMERGENCY_API_KEY")
-  const keys = [
-    configuredOMDbKey ? { key: configuredOMDbKey, label: "OMDB_API_KEY", isEmergency: false } : null,
-    emergencyOMDbKey ? { key: emergencyOMDbKey, label: "OMDB_EMERGENCY_API_KEY", isEmergency: true } : null
-  ].filter((attempt): attempt is { key: string; label: string; isEmergency: boolean } => attempt !== null)
+async function fetchOMDb(params: Record<string, string>, userKeys: string[]) {
+  const keys = userKeys
+    .map((k, i) => ({ key: k.trim(), label: i === 0 ? "user-primary" : "user-backup" }))
+    .filter(a => a.key.length > 0)
 
   if (keys.length === 0) {
-    throw new Error("Missing OMDB_API_KEY and OMDB_EMERGENCY_API_KEY")
+    return null
   }
 
   let rateLimitError: string | null = null
@@ -217,7 +214,7 @@ async function fetchOMDb(params: Record<string, string>) {
       const text = await response.text()
       const loweredText = text.toLowerCase()
 
-      if (loweredText.includes("request limit reached") && !attempt.isEmergency) {
+      if (loweredText.includes("request limit reached")) {
         rateLimitError = `OMDb request limit reached for ${attempt.label}`
         continue
       }
@@ -230,12 +227,7 @@ async function fetchOMDb(params: Record<string, string>) {
 
     if (data?.Response === "False" && errorText.toLowerCase().includes("request limit reached")) {
       rateLimitError = `OMDb request limit reached for ${attempt.label}`
-
-      if (!attempt.isEmergency) {
-        continue
-      }
-
-      throw new Error(rateLimitError)
+      continue
     }
 
     if (data?.Response === "False") return null
@@ -243,7 +235,7 @@ async function fetchOMDb(params: Record<string, string>) {
     return data
   }
 
-  throw new Error(rateLimitError ?? "Missing OMDB_API_KEY")
+  throw new Error(rateLimitError ?? "No valid OMDb key provided")
 }
 
 function parseOMDbNumber(value: unknown) {
@@ -274,7 +266,9 @@ function normalizeOMDbRatings(data: any) {
   }
 }
 
-async function omdbRatingsForTMDbID(tmdbID: number, kind: "movie" | "tv", title: string | null, year: string | null = null) {
+async function omdbRatingsForTMDbID(tmdbID: number, kind: "movie" | "tv", title: string | null, year: string | null = null, userKeys: string[] = []) {
+  if (userKeys.filter(k => k.trim().length > 0).length === 0) return null
+
   let imdbID: string | null = null
 
   try {
@@ -286,7 +280,7 @@ async function omdbRatingsForTMDbID(tmdbID: number, kind: "movie" | "tv", title:
   }
 
   if (imdbID) {
-    const data = await fetchOMDb({ i: imdbID, plot: "short" })
+    const data = await fetchOMDb({ i: imdbID, plot: "short" }, userKeys)
     const ratings = normalizeOMDbRatings(data)
     if (ratings?.imdbRating || ratings?.rottenTomatoesRating || ratings?.rottenTomatoesText) {
       return ratings
@@ -305,7 +299,7 @@ async function omdbRatingsForTMDbID(tmdbID: number, kind: "movie" | "tv", title:
       : [baseParams]
 
     for (const params of attempts) {
-      const data = await fetchOMDb(params)
+      const data = await fetchOMDb(params, userKeys)
       const ratings = normalizeOMDbRatings(data)
       if (ratings?.imdbRating || ratings?.rottenTomatoesRating || ratings?.rottenTomatoesText) {
         return ratings
@@ -1079,8 +1073,6 @@ Deno.serve(async (req) => {
           TMDB_API_KEY: previewSecret("TMDB_API_KEY"),
           MOVIE_OF_THE_NIGHT_KEY: previewSecret("MOVIE_OF_THE_NIGHT_KEY"),
           WATCHMODE_API_KEY: previewSecret("WATCHMODE_API_KEY"),
-          OMDB_API_KEY: previewSecret("OMDB_API_KEY"),
-          OMDB_EMERGENCY_API_KEY: previewSecret("OMDB_EMERGENCY_API_KEY"),
           TASTEDIVE_API_KEY: previewSecret("TASTEDIVE_API_KEY")
         }
       })
@@ -1202,6 +1194,9 @@ Deno.serve(async (req) => {
       const rawKind = String(url.searchParams.get("kind") ?? "movie").toLowerCase()
       const title = url.searchParams.get("title")
       const year = releaseYear(url.searchParams.get("year"))
+      const userPrimaryKey = (url.searchParams.get("userKey") ?? "").trim()
+      const userBackupKey = (url.searchParams.get("userBackupKey") ?? "").trim()
+      const userKeys = [userPrimaryKey, userBackupKey].filter(k => k.length > 0)
 
       if (!Number.isFinite(tmdbID) || tmdbID <= 0) {
         return Response.json(
@@ -1217,7 +1212,11 @@ Deno.serve(async (req) => {
         )
       }
 
-      const ratings = await omdbRatingsForTMDbID(tmdbID, rawKind, title, year)
+      if (userKeys.length === 0) {
+        return Response.json({ ok: true, source: "omdb", tmdbID, kind: rawKind, ratings: null })
+      }
+
+      const ratings = await omdbRatingsForTMDbID(tmdbID, rawKind, title, year, userKeys)
 
       return Response.json({
         ok: true,
