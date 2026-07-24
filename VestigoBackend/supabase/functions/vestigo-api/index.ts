@@ -1,3 +1,16 @@
+function normalizeAMCFormat(raw: string | null): string | null {
+  if (!raw) return null
+  const s = raw.toLowerCase()
+  if (s.includes("imax")) return "IMAX"
+  if (s.includes("dolby")) return "Dolby Cinema"
+  if (s.includes("plf") || s.includes("premium large")) return "PLF"
+  if (s.includes("laser")) return "Laser at AMC"
+  if (s.includes("3d")) return "3D"
+  if (s.includes("dine") || s.includes("fork")) return "Dine-In"
+  if (s === "standard" || s === "digital") return null
+  return raw
+}
+
 function normalizeTitle(value: string) {
   return value
     .normalize("NFD")
@@ -1073,7 +1086,8 @@ Deno.serve(async (req) => {
           TMDB_API_KEY: previewSecret("TMDB_API_KEY"),
           MOVIE_OF_THE_NIGHT_KEY: previewSecret("MOVIE_OF_THE_NIGHT_KEY"),
           WATCHMODE_API_KEY: previewSecret("WATCHMODE_API_KEY"),
-          TASTEDIVE_API_KEY: previewSecret("TASTEDIVE_API_KEY")
+          TASTEDIVE_API_KEY: previewSecret("TASTEDIVE_API_KEY"),
+          AMC_API_KEY: previewSecret("AMC_API_KEY")
         }
       })
     }
@@ -1403,6 +1417,114 @@ Deno.serve(async (req) => {
           results: uniqueResults
         })
       }
+
+    if (url.pathname.endsWith("/amc-showtimes")) {
+      const amcKey = Deno.env.get("AMC_API_KEY")
+      if (!amcKey) {
+        return Response.json({ ok: false, error: "AMC_API_KEY not configured" }, { status: 500 })
+      }
+
+      const filmTitle = (url.searchParams.get("title") ?? "").trim()
+      const date = (url.searchParams.get("date") ?? "").trim()
+      const lat = (url.searchParams.get("lat") ?? "").trim()
+      const lon = (url.searchParams.get("lon") ?? "").trim()
+
+      if (!filmTitle || !date || !lat || !lon) {
+        return Response.json({ ok: false, error: "Missing required params: title, date, lat, lon" }, { status: 400 })
+      }
+
+      const amcURL = `https://api.amctheatres.com/v2/showtimes/views/current-location/${encodeURIComponent(date)}/${encodeURIComponent(lat)}/${encodeURIComponent(lon)}?page-size=100`
+
+      // ?probe=1 hits a simple catalogue endpoint to check if the key has any access at all
+      if (url.searchParams.get("probe") === "1") {
+        const probeResp = await fetchWithTimeout("https://api.amctheatres.com/v2/theatres?page-size=1", {
+          headers: { "X-AMC-Vendor-Key": amcKey, "Accept": "application/json" }
+        }, 8000)
+        const probeBody = await probeResp.text().catch(() => "(unreadable)")
+        return Response.json({ ok: probeResp.ok, status: probeResp.status, body: probeBody })
+      }
+
+      const amcResp = await fetchWithTimeout(amcURL, {
+        headers: {
+          "X-AMC-Vendor-Key": amcKey,
+          "Accept": "application/json"
+        }
+      }, 10000)
+
+      if (!amcResp.ok) {
+        const errBody = await amcResp.text().catch(() => "(unreadable)")
+        return Response.json({ ok: false, error: `AMC API error: ${amcResp.status}`, amcBody: errBody }, { status: 502 })
+      }
+
+      const amcData = await amcResp.json()
+
+      // Pass ?debug=1 to see the raw AMC response for response shape diagnosis
+      if (url.searchParams.get("debug") === "1") {
+        return Response.json({ ok: true, raw: amcData })
+      }
+
+      const allShowtimes: any[] = amcData?._embedded?.showtimes ?? []
+
+      // Filter to only showtimes for the requested film
+      const matching = allShowtimes.filter(st => {
+        const name = st._embedded?.movie?.name ?? st.movieName ?? ""
+        return matchScore(name, filmTitle) >= 60
+      })
+
+      // Group by theatre
+      const theatreMap = new Map<string, { name: string; lat: number | null; lon: number | null; entries: any[] }>()
+
+      for (const st of matching) {
+        const theatreName: string = st._embedded?.theatre?.name ?? "AMC Theatre"
+        if (!theatreMap.has(theatreName)) {
+          const loc = st._embedded?.theatre?.location
+          theatreMap.set(theatreName, {
+            name: theatreName,
+            lat: typeof loc?.latitude === "number" ? loc.latitude : null,
+            lon: typeof loc?.longitude === "number" ? loc.longitude : null,
+            entries: []
+          })
+        }
+
+        // AMC returns local time without timezone; convert to a UTC-anchored ISO string
+        // by treating the local time as-is (display only, not timezone-sensitive)
+        const rawTime: string = st.showDateTimeLocal ?? st.showDateTime ?? ""
+
+        // Format: AMC uses _embedded.movieVisitType.name or top-level movieVisitType
+        const formatRaw: string | null =
+          st._embedded?.movieVisitType?.name ??
+          (typeof st.movieVisitType === "string" ? st.movieVisitType : null) ??
+          null
+
+        // Normalise common format names to short labels
+        const format = normalizeAMCFormat(formatRaw)
+
+        // Accessibility from attributes array (objects with `code` or `description`)
+        const attrCodes: string[] = (st.attributes ?? [])
+          .map((a: any) => (a.code ?? a.description ?? "").toString().toUpperCase())
+          .filter((c: string) => c.length > 0)
+
+        const knownAccessibility = ["CC", "OC", "AD", "AS", "HH", "HL"]
+        const accessibility = attrCodes.filter(c => knownAccessibility.some(k => c.includes(k)))
+
+        theatreMap.get(theatreName)!.entries.push({
+          id: String(st.id ?? ""),
+          startTime: rawTime,
+          format,
+          accessibility: accessibility.length > 0 ? accessibility : null,
+          bookingURL: st.purchaseUrl ?? st._links?.["amc:purchase"]?.href ?? null
+        })
+      }
+
+      const theaters = Array.from(theatreMap.values()).map(t => ({
+        name: t.name,
+        lat: t.lat,
+        lon: t.lon,
+        showtimes: t.entries.sort((a, b) => a.startTime.localeCompare(b.startTime))
+      }))
+
+      return Response.json({ ok: true, totalShowtimes: allShowtimes.length, matchedShowtimes: matching.length, theaters })
+    }
 
     if (url.pathname.endsWith("/brand-logo")) {
       const domain = url.searchParams.get("domain") ?? ""

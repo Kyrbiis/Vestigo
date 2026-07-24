@@ -587,9 +587,6 @@ final class CinemaSearchService: NSObject, ObservableObject, CLLocationManagerDe
     }
 
     private func enrichAMCShowtimes(filmTitle: String, date: Date, userCoordinate: CLLocationCoordinate2D) async {
-        let amcTheaters = theaters.filter { $0.chain == .amc }
-        guard !amcTheaters.isEmpty else { return }
-
         let result = await AMCShowtimesService.fetchShowtimes(
             filmTitle: filmTitle,
             date: date,
@@ -597,22 +594,36 @@ final class CinemaSearchService: NSObject, ObservableObject, CLLocationManagerDe
             lon: userCoordinate.longitude
         )
 
-        // If the backend request failed, leave AMC pins as `.checkAtChain` (users still see them + deep link).
         guard result.succeeded else { return }
 
-        // Backend responded successfully. Upgrade AMC pins that have showtimes,
-        // and remove AMC pins whose theatre came back with no showtimes for this film + date.
-        theaters = theaters.compactMap { theater in
-            guard theater.chain == .amc else { return theater }
-            let matched = result.theaters[normalizedName(theater.name)] ?? []
-            if matched.isEmpty {
-                return nil
+        // Remove any existing AMC entries — we'll rebuild from the API response.
+        let nonAMC = theaters.filter { $0.chain != .amc }
+
+        // Build CinemaTheater entries from the API response, using API coordinates
+        // or falling back to the user's location if the API didn't return them.
+        let apiTheaters: [CinemaTheater] = result.entries.compactMap { entry in
+            guard !entry.showtimes.isEmpty else { return nil }
+            let coord: CLLocationCoordinate2D
+            if let lat = entry.lat, let lon = entry.lon {
+                coord = CLLocationCoordinate2D(latitude: lat, longitude: lon)
+            } else {
+                coord = userCoordinate
             }
-            var updated = theater
-            updated.availability = .showtimesConfirmed
-            updated.showtimes = matched
-            return updated
+            let identifier = "amc|\(entry.name)"
+            return CinemaTheater(
+                id: identifier,
+                name: entry.name,
+                chain: .amc,
+                coordinate: coord,
+                address: nil,
+                phone: nil,
+                mapItem: nil,
+                availability: .showtimesConfirmed,
+                showtimes: entry.showtimes
+            )
         }
+
+        theaters = nonAMC + apiTheaters
     }
 
     private func normalizedName(_ name: String) -> String {
@@ -687,15 +698,20 @@ final class CinemaSearchService: NSObject, ObservableObject, CLLocationManagerDe
 }
 
 enum AMCShowtimesService {
-    struct Result {
-        let theaters: [String: [CinemaShowtime]]
-        let succeeded: Bool
+    struct TheaterResult {
+        let name: String
+        let lat: Double?
+        let lon: Double?
+        let showtimes: [CinemaShowtime]
     }
 
-    // Fetches AMC showtimes via the Vestigo backend proxy.
-    // `succeeded == true` means the backend responded 2xx with a valid body,
-    // even if that body's `theaters` was empty (film not playing at nearby AMCs).
-    // `succeeded == false` means transport error, non-2xx, or malformed JSON — treat as "no data" and don't hide pins.
+    struct Result {
+        let entries: [TheaterResult]
+        let succeeded: Bool
+
+        static let failed = Result(entries: [], succeeded: false)
+    }
+
     static func fetchShowtimes(filmTitle: String, date: Date, lat: Double, lon: Double) async -> Result {
         let base = "https://mtttuyvpjyugudkevchj.supabase.co/functions/v1/vestigo-api"
         var comps = URLComponents(string: base + "/amc-showtimes")
@@ -708,22 +724,28 @@ enum AMCShowtimesService {
             URLQueryItem(name: "lon", value: String(lon))
         ]
 
-        guard let url = comps?.url else { return Result(theaters: [:], succeeded: false) }
+        guard let url = comps?.url else { return .failed }
         do {
             let (data, response) = try await URLSession.shared.data(for: URLRequest(url: url))
             if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
-                return Result(theaters: [:], succeeded: false)
+                return .failed
             }
             let decoded = try JSONDecoder().decode(AMCShowtimesResponse.self, from: data)
-            var map: [String: [CinemaShowtime]] = [:]
+
             let iso = ISO8601DateFormatter()
             iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
             let isoFallback = ISO8601DateFormatter()
             isoFallback.formatOptions = [.withInternetDateTime]
-            for entry in decoded.theaters {
-                let key = normalizedName(entry.name)
+            // AMC returns bare local times ("2026-07-24T19:30:00") with no timezone designator
+            let localFmt = DateFormatter()
+            localFmt.locale = Locale(identifier: "en_US_POSIX")
+            localFmt.dateFormat = "yyyy-MM-dd'T'HH:mm:ss"
+
+            let entries: [TheaterResult] = decoded.theaters.compactMap { entry in
                 let times = entry.showtimes.compactMap { dto -> CinemaShowtime? in
-                    let start = iso.date(from: dto.startTime) ?? isoFallback.date(from: dto.startTime)
+                    let start = iso.date(from: dto.startTime)
+                        ?? isoFallback.date(from: dto.startTime)
+                        ?? localFmt.date(from: dto.startTime)
                     guard let start else { return nil }
                     return CinemaShowtime(
                         id: dto.id,
@@ -733,22 +755,14 @@ enum AMCShowtimesService {
                         bookingURL: dto.bookingURL.flatMap(URL.init(string:))
                     )
                 }
-                if !times.isEmpty {
-                    map[key] = times
-                }
+                guard !times.isEmpty else { return nil }
+                return TheaterResult(name: entry.name, lat: entry.lat, lon: entry.lon, showtimes: times)
             }
-            return Result(theaters: map, succeeded: decoded.ok)
-        } catch {
-            return Result(theaters: [:], succeeded: false)
-        }
-    }
 
-    private static func normalizedName(_ name: String) -> String {
-        name
-            .lowercased()
-            .components(separatedBy: CharacterSet.alphanumerics.inverted)
-            .filter { !$0.isEmpty }
-            .joined(separator: " ")
+            return Result(entries: entries, succeeded: decoded.ok)
+        } catch {
+            return .failed
+        }
     }
 }
 
@@ -759,6 +773,8 @@ struct AMCShowtimesResponse: Decodable {
 
 struct AMCTheaterEntry: Decodable {
     let name: String
+    let lat: Double?
+    let lon: Double?
     let showtimes: [AMCShowtimeEntry]
 }
 

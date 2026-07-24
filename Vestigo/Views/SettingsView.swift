@@ -2086,9 +2086,8 @@ private struct DevToolsPanel: View {
     @State private var showSettingsImportPicker = false
     @State private var importResult: String = ""
 
-    @State private var isDryRunning = false
-    @State private var dryRunLibraryResults: [NotifSimResult] = []
-    @State private var dryRunArtificialResults: [NotifSimResult] = []
+    @State private var isRestartingConnection = false
+    @State private var restartResult: String = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -2221,63 +2220,6 @@ private struct DevToolsPanel: View {
             }
             .settingBubble()
 
-            // MARK: Notification Dry Run
-            devSectionLabel("Notification Dry Run")
-
-            VStack(alignment: .leading, spacing: 10) {
-                Text("Simulates whether notifications would fire for events in your library and for artificial test cases. Read-only — nothing is actually sent or stored.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-
-                HStack(spacing: 10) {
-                    Button(isDryRunning ? "Scanning…" : "Scan library") {
-                        isDryRunning = true
-                        dryRunLibraryResults = []
-                        dryRunArtificialResults = []
-                        Task {
-                            await MainActor.run {
-                                dryRunLibraryResults = NotificationScheduler.shared.dryRunLibraryScenarios(
-                                    library: model.library,
-                                    preferences: model.settings.notificationPreferences
-                                )
-                                isDryRunning = false
-                            }
-                        }
-                    }
-                    .disabled(isDryRunning)
-
-                    Button("Run artificial scenarios") {
-                        dryRunArtificialResults = NotificationScheduler.shared.dryRunArtificialScenarios(
-                            preferences: model.settings.notificationPreferences
-                        )
-                    }
-                }
-                .font(.subheadline)
-
-                if !dryRunLibraryResults.isEmpty {
-                    dryRunSummaryLine(results: dryRunLibraryResults, label: "Library")
-                    ForEach(dryRunLibraryResults) { result in
-                        dryRunRow(result)
-                    }
-                }
-
-                if !dryRunArtificialResults.isEmpty {
-                    if !dryRunLibraryResults.isEmpty {
-                        Divider()
-                    }
-                    dryRunSummaryLine(results: dryRunArtificialResults, label: "Artificial")
-                    Text("Artificial scenarios use controlled fixtures — the first three always use fully-on preferences to test pure logic, regardless of your real settings. The last two always inject broken prefs to show what each blocked state looks like.")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .padding(.top, 2)
-                    ForEach(dryRunArtificialResults) { result in
-                        dryRunRow(result)
-                    }
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .settingBubble()
-
             // MARK: Diagnostics
             devSectionLabel("Diagnostics")
 
@@ -2335,7 +2277,22 @@ private struct DevToolsPanel: View {
             .settingBubble()
 
             VStack(alignment: .leading, spacing: 6) {
-                Button(isCheckingBackend ? "Checking..." : "Check backend connection") {
+                Button(isRestartingConnection ? "Restarting…" : "Restart backend connection") {
+                    restartBackendConnection()
+                }
+                .disabled(isRestartingConnection)
+
+                if !restartResult.isEmpty {
+                    Text(restartResult)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .settingBubble()
+
+            VStack(alignment: .leading, spacing: 6) {
+                Button(isCheckingBackend ? "Checking…" : "Check backend secrets") {
                     checkBackend()
                 }
                 .disabled(isCheckingBackend)
@@ -2417,58 +2374,6 @@ private struct DevToolsPanel: View {
                 .font(.caption.bold())
                 .foregroundStyle(.red)
         }
-    }
-
-    @ViewBuilder
-    private func dryRunSummaryLine(results: [NotifSimResult], label: String) -> some View {
-        let fires = results.filter { $0.outcome == .fires }.count
-        let possible = results.filter { $0.wouldHaveHappenedWithAllEnabled && $0.outcome != .fires }.count
-        let noBase = results.filter { $0.outcome == .noBaseline }.count
-        let sent = results.filter { $0.outcome == .alreadySent }.count
-        let parts: [String] = [
-            fires > 0   ? "\(fires) would fire" : nil,
-            possible > 0 ? "\(possible) need settings change" : nil,
-            noBase > 0  ? "\(noBase) no baseline" : nil,
-            sent > 0    ? "\(sent) already sent" : nil,
-        ].compactMap { $0 }
-        Text("\(label): \(parts.isEmpty ? "no scenarios" : parts.joined(separator: " · "))")
-            .font(.caption.bold())
-            .foregroundStyle(.secondary)
-    }
-
-    @ViewBuilder
-    private func dryRunRow(_ result: NotifSimResult) -> some View {
-        let color: Color = {
-            switch result.outcome {
-            case .fires:               return .green
-            case .firesIfKindEnabled,
-                 .firesIfGlobalEnabled: return .orange
-            case .noBaseline:          return Color(.secondaryLabel)
-            case .alreadySent:         return .blue
-            }
-        }()
-        VStack(alignment: .leading, spacing: 2) {
-            HStack(alignment: .firstTextBaseline, spacing: 6) {
-                Image(systemName: result.outcome.symbolName)
-                    .foregroundStyle(color)
-                    .font(.caption)
-                Text(result.itemTitle)
-                    .font(.caption.bold())
-                    .lineLimit(1)
-                Spacer(minLength: 4)
-                Text(result.outcome.label)
-                    .font(.caption2.bold())
-                    .foregroundStyle(color)
-                    .padding(.horizontal, 5)
-                    .padding(.vertical, 2)
-                    .background(color.opacity(0.12), in: Capsule())
-            }
-            Text(result.scenario)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .padding(.leading, 18)
-        }
-        .padding(.vertical, 2)
     }
 
     @ViewBuilder
@@ -2584,6 +2489,38 @@ private struct DevToolsPanel: View {
 #endif
     }
 
+    private func restartBackendConnection() {
+        isRestartingConnection = true
+        restartResult = ""
+        URLCache.shared.removeAllCachedResponses()
+        model.clearAllCaches()
+        Task {
+            let urlString = "https://mtttuyvpjyugudkevchj.supabase.co/functions/v1/vestigo-api/health"
+            guard let url = URL(string: urlString) else {
+                await MainActor.run { isRestartingConnection = false }
+                return
+            }
+            let start = Date()
+            do {
+                var req = URLRequest(url: url)
+                req.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+                let (_, response) = try await URLSession.shared.data(for: req)
+                let ms = Int(Date().timeIntervalSince(start) * 1000)
+                let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+                await MainActor.run {
+                    restartResult = status == 200 ? "✓ Reconnected (\(ms)ms)" : "⚠ HTTP \(status) (\(ms)ms)"
+                    isRestartingConnection = false
+                }
+            } catch {
+                let ms = Int(Date().timeIntervalSince(start) * 1000)
+                await MainActor.run {
+                    restartResult = "✗ \(error.localizedDescription) (\(ms)ms)"
+                    isRestartingConnection = false
+                }
+            }
+        }
+    }
+
     private func checkBackend() {
         let urlString = "https://mtttuyvpjyugudkevchj.supabase.co/functions/v1/vestigo-api/secrets-check"
         guard let url = URL(string: urlString) else { return }
@@ -2594,13 +2531,23 @@ private struct DevToolsPanel: View {
             defer { Task { @MainActor in isCheckingBackend = false } }
             let start = Date()
             do {
-                let (_, response) = try await URLSession.shared.data(for: URLRequest(url: url))
+                let (data, response) = try await URLSession.shared.data(for: URLRequest(url: url))
                 let ms = Int(Date().timeIntervalSince(start) * 1000)
                 let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+                guard status == 200,
+                      let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let secrets = json["secrets"] as? [String: Any] else {
+                    await MainActor.run {
+                        backendResult = "⚠ HTTP \(status) (\(ms)ms)"
+                    }
+                    return
+                }
+                let lines = secrets.sorted(by: { $0.key < $1.key }).map { key, val -> String in
+                    let present = (val as? [String: Any])?["exists"] as? Bool ?? false
+                    return present ? "✓  \(key)" : "✗  \(key)  ← missing"
+                }
                 await MainActor.run {
-                    backendResult = status == 200
-                        ? "✓ Connected (\(ms)ms)"
-                        : "⚠ HTTP \(status) (\(ms)ms)"
+                    backendResult = lines.joined(separator: "\n") + "\n(\(ms)ms)"
                 }
             } catch {
                 let ms = Int(Date().timeIntervalSince(start) * 1000)
