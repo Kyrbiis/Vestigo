@@ -126,21 +126,11 @@ struct SettingsView: View {
                 Text("Content")
                     .sectionTitle()
                     .padding(.top, 6)
-                
+
+                StreamingServicesSettingsSection(model: model)
+
                 VStack(alignment: .leading, spacing: 10) {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Stepper(value: $model.settings.recommendationStrength, in: 1...5, step: 0.5) {
-                            let strengthStr = model.settings.recommendationStrength.formatted(.number.precision(.fractionLength(1)))
-                            Text("Recommendation Strength: \(strengthStr)")
-                                .font(.headline.bold())
-                        }
-                        
-                        Text("Lower strength uses more of your watched history and may create broader suggestions. Higher strength mainly uses items you rated well, which should make recommendations stricter but less varied. Recommendations appear after you have marked enough items as watched, and improve when you rate them.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    .settingBubble()
-                    
+
                     VStack(alignment: .leading, spacing: 6) {
                         Toggle("Prefer IMDb ratings", isOn: Binding(
                             get: { model.settings.preferredRatingSource == .imdb },
@@ -726,8 +716,7 @@ struct SettingsView: View {
             }
         }
         .onChange(of: model.settings) { _, _ in
-            Storage.save(model.settings, key: "Vestigo.settings")
-            Storage.saveNotificationPreferences(model.settings.notificationPreferences)
+            model.saveSettings()
         }
         .task {
             while !Task.isCancelled {
@@ -1428,52 +1417,290 @@ struct AttributionProvider: Identifiable {
     ]
 }
 
+// MARK: - Streaming Services Setup Sheet
+
+struct StreamingServicesSetupSheet: View {
+    @ObservedObject var model: VestigoModel
+    let isOnboarding: Bool
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Capsule()
+                .fill(.white.opacity(0.46))
+                .frame(width: 48, height: 5)
+                .padding(.top, 12)
+                .padding(.bottom, 8)
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 24) {
+                    HStack(alignment: .center) {
+                        if isOnboarding {
+                            Image(systemName: "play.tv.fill")
+                                .font(.title3)
+                                .foregroundStyle(model.settings.accentColor)
+                        }
+                        Text(isOnboarding ? "Your Streaming Services" : "Streaming Services")
+                            .font(.title2.bold())
+                        Spacer()
+                        if isOnboarding {
+                            HStack(spacing: 16) {
+                                Button("Skip") { model.completeStreamingSetup() }
+                                    .foregroundStyle(.secondary)
+                                Button("Done") { model.completeStreamingSetup() }
+                                    .fontWeight(.semibold)
+                                    .foregroundStyle(model.settings.accentColor)
+                            }
+                        }
+                    }
+
+                    if isOnboarding {
+                        Text("Select what you subscribe to. Vestigo will put these at the top of where-to-watch lists and can alert you when your saved titles arrive on them.")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    StreamingServicesPicker(model: model)
+
+                    if isOnboarding {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Toggle(isOn: Binding(
+                                get: { model.settings.notificationPreferences.notifyOnlyForSubscribedServices },
+                                set: { model.settings.notificationPreferences.notifyOnlyForSubscribedServices = $0; model.saveSettings() }
+                            )) {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("Only notify for my services")
+                                        .font(.headline.bold())
+                                    Text("Streaming availability alerts will only fire when a saved title arrives on one of your selected services.")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                            .tint(model.settings.accentColor)
+                        }
+                        .settingBubble()
+                    }
+                }
+                .padding(18)
+                .padding(.bottom, 110)
+            }
+            .scrollDismissesKeyboard(.immediately)
+            .scrollIndicators(.hidden)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .sheetLiquidGlass(cornerRadius: 48)
+        .ignoresSafeArea(edges: .bottom)
+        .presentationBackground(.clear)
+        .presentationCornerRadius(54)
+    }
+}
+
+private struct StreamingServicesPicker: View {
+    @ObservedObject var model: VestigoModel
+
+    private let columns = Array(repeating: GridItem(.flexible(), spacing: 16), count: 3)
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            let subscribed = model.settings.subscribedServiceNames
+            let paid = KnownStreamingService.catalog.filter { !$0.isFree }
+            let free = KnownStreamingService.catalog.filter { $0.isFree }
+
+            serviceGrid(title: "Subscription", services: paid, subscribed: subscribed)
+            serviceGrid(title: "Free", services: free, subscribed: subscribed)
+
+            if !subscribed.isEmpty {
+                Button("Clear all") {
+                    for svc in KnownStreamingService.catalog {
+                        model.settings.subscribedServiceNames.remove(svc.id)
+                    }
+                    model.saveSettings()
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func serviceGrid(title: String, services: [KnownStreamingService], subscribed: Set<String>) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(title.uppercased())
+                .font(.caption.bold())
+                .foregroundStyle(.secondary)
+                .tracking(0.5)
+                .padding(.leading, 2)
+
+            LazyVGrid(columns: columns, spacing: 20) {
+                ForEach(services) { service in
+                    ServiceIconButton(
+                        service: service,
+                        isSelected: subscribed.contains(service.id),
+                        accentColor: model.settings.accentColor
+                    ) {
+                        model.toggleSubscribedService(service.id)
+                    }
+                }
+            }
+        }
+    }
+}
+
+private struct ServiceIconButton: View {
+    let service: KnownStreamingService
+    let isSelected: Bool
+    let accentColor: Color
+    let action: () -> Void
+
+    private let iconSize: CGFloat = 72
+
+    var body: some View {
+        Button(action: action) {
+            VStack(spacing: 6) {
+                ZStack(alignment: .topTrailing) {
+                    iconTile
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                .stroke(isSelected ? accentColor : Color.white.opacity(0.08), lineWidth: isSelected ? 3 : 1)
+                        )
+
+                    if isSelected {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 22))
+                            .foregroundStyle(.white, accentColor)
+                            .offset(x: 8, y: -8)
+                    }
+                }
+
+                Text(service.displayName)
+                    .font(.caption2)
+                    .foregroundStyle(.primary)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: iconSize + 10)
+            }
+        }
+        .buttonStyle(.plain)
+    }
+
+    @ViewBuilder
+    private var iconTile: some View {
+        RoundedRectangle(cornerRadius: 16, style: .continuous)
+            .fill(Color(hex: service.brandColorHex))
+            .frame(width: iconSize, height: iconSize)
+            .overlay {
+                AsyncImage(url: service.logoURL) { phase in
+                    if case .success(let image) = phase {
+                        image
+                            .resizable()
+                            .scaledToFill()
+                    } else {
+                        textLabel
+                    }
+                }
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+    }
+
+    private var textLabel: some View {
+        Text(service.iconLabel)
+            .font(.system(size: service.iconLabel.count > 4 ? 13 : 16, weight: .heavy, design: .rounded))
+            .foregroundStyle(service.lightText ? Color.white : Color.black)
+            .minimumScaleFactor(0.6)
+            .padding(6)
+    }
+}
+
+
+private struct StreamingServicesSettingsSection: View {
+    @ObservedObject var model: VestigoModel
+    @State private var showSheet = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Streaming Services")
+                        .font(.headline.bold())
+                    let count = model.settings.subscribedServiceNames.count
+                    Text(count == 0 ? "None selected — showing all services" : "\(count) service\(count == 1 ? "" : "s") selected")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("Manage") { showSheet = true }
+                    .font(.subheadline)
+                    .foregroundStyle(model.settings.accentColor)
+            }
+
+            if !model.settings.subscribedServiceNames.isEmpty {
+                Toggle(isOn: Binding(
+                    get: { model.settings.notificationPreferences.notifyOnlyForSubscribedServices },
+                    set: { model.settings.notificationPreferences.notifyOnlyForSubscribedServices = $0; model.saveSettings() }
+                )) {
+                    Text("Only notify for my services")
+                        .font(.subheadline)
+                }
+                .tint(model.settings.accentColor)
+            }
+        }
+        .settingBubble()
+        .sheet(isPresented: $showSheet) {
+            StreamingServicesSetupSheet(model: model, isOnboarding: false)
+        }
+    }
+}
+
 struct NotificationPreferencesSheet: View {
     @ObservedObject var model: VestigoModel
     @Environment(\.dismiss) private var dismiss
     let isOnboarding: Bool
 
     var body: some View {
-        NavigationStack {
-            ZStack {
-                AppBackground(settings: model.settings)
-                    .ignoresSafeArea()
+        VStack(spacing: 0) {
+            Capsule()
+                .fill(.white.opacity(0.46))
+                .frame(width: 48, height: 5)
+                .padding(.top, 12)
+                .padding(.bottom, 8)
 
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 16) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    HStack(alignment: .center) {
                         Text("Notifications")
-                            .font(.system(size: 34, weight: .heavy, design: .rounded))
-                            .foregroundStyle(.primary)
-
-                        Text("Vestigo can alert you about releases, trailers, where-to-watch updates, new seasons, and franchise continuations. You can enable, disable, or tune each notification type anytime in Settings.")
-                            .font(.subheadline)
+                            .font(.title2.bold())
+                        Spacer()
+                        HStack(spacing: 16) {
+                            Button(isOnboarding ? "Not now" : "Cancel") {
+                                if isOnboarding { model.markNotificationPromptSeen() }
+                                dismiss()
+                            }
                             .foregroundStyle(.secondary)
-
-                        NotificationPreferencesContent(model: model, isOnboarding: isOnboarding)
-                    }
-                    .padding(20)
-                }
-            }
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button(isOnboarding ? "Not now" : "Cancel") {
-                        if isOnboarding {
-                            model.markNotificationPromptSeen()
+                            Button("Done") {
+                                model.markNotificationPromptSeen()
+                                dismiss()
+                            }
+                            .fontWeight(.semibold)
+                            .foregroundStyle(model.settings.accentColor)
                         }
-                        dismiss()
                     }
-                }
 
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("Done") {
-                        model.markNotificationPromptSeen()
-                        dismiss()
-                    }
-                    .fontWeight(.semibold)
+                    Text("Vestigo can alert you about releases, trailers, where-to-watch updates, new seasons, and franchise continuations. You can enable, disable, or tune each notification type anytime in Settings.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+
+                    NotificationPreferencesContent(model: model, isOnboarding: isOnboarding)
                 }
+                .padding(18)
+                .padding(.bottom, 110)
             }
+            .scrollDismissesKeyboard(.immediately)
+            .scrollIndicators(.hidden)
         }
-        .presentationDetents([.large])
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .sheetLiquidGlass(cornerRadius: 48)
+        .ignoresSafeArea(edges: .bottom)
+        .presentationBackground(.clear)
+        .presentationCornerRadius(54)
         .onChange(of: model.notificationOnboardingDismissToken) { _, _ in
             guard isOnboarding else { return }
             dismiss()
@@ -1507,21 +1734,49 @@ struct NotificationPreferencesContent: View {
 
             VStack(alignment: .leading, spacing: 10) {
                 ForEach(NotificationKind.allCases) { kind in
-                    Toggle(isOn: Binding(
-                        get: { preferences.enabledKinds.contains(kind) },
-                        set: { model.setNotificationKind(kind, isEnabled: $0) }
-                    )) {
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text(kind.title)
-                                .font(.subheadline.bold())
-
-                            Text(kind.description)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 0) {
+                        Toggle(isOn: Binding(
+                            get: { preferences.enabledKinds.contains(kind) },
+                            set: { model.setNotificationKind(kind, isEnabled: $0) }
+                        )) {
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(kind.title)
+                                    .font(.subheadline.bold())
+                                Text(kind.description)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
                         }
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .tint(model.settings.accentColor)
+
+                        if kind == .watchlistRelease && preferences.enabledKinds.contains(.watchlistRelease) {
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text("Remind me:")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .padding(.top, 8)
+
+                                ForEach(NotificationLeadTime.allCases) { leadTime in
+                                    Button {
+                                        model.setNotificationLeadTime(leadTime, isEnabled: !preferences.watchlistLeadTimes.contains(leadTime))
+                                    } label: {
+                                        HStack(spacing: 8) {
+                                            Image(systemName: preferences.watchlistLeadTimes.contains(leadTime) ? "checkmark.square.fill" : "square")
+                                                .foregroundStyle(preferences.watchlistLeadTimes.contains(leadTime) ? model.settings.accentColor : .secondary)
+                                            Text(leadTime.label)
+                                                .font(.caption)
+                                                .foregroundStyle(.primary)
+                                            Spacer()
+                                        }
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                            }
+                            .padding(.top, 4)
+                            .padding(.leading, 4)
+                        }
                     }
-                    .tint(model.settings.accentColor)
                 }
             }
             .disabled(!preferences.isEnabled)
@@ -1824,9 +2079,16 @@ private struct DevToolsPanel: View {
     @State private var iCloudPushResult: String = ""
     @State private var pendingNotificationsText: String = ""
     @State private var isFetchingNotifications = false
+    @State private var notifStatusText: String = ""
+    @State private var notifAuthStatus: UNAuthorizationStatus = .notDetermined
+
     @State private var showLibraryImportPicker = false
     @State private var showSettingsImportPicker = false
     @State private var importResult: String = ""
+
+    @State private var isDryRunning = false
+    @State private var dryRunLibraryResults: [NotifSimResult] = []
+    @State private var dryRunArtificialResults: [NotifSimResult] = []
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -1920,6 +2182,12 @@ private struct DevToolsPanel: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .settingBubble()
 
+            Button("Reset notification deduplication store") {
+                NotificationScheduler.shared.resetDeduplicationStore()
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .settingBubble()
+
             Button("Send test notification") {
                 model.postDevTestNotification(
                     title: "Vestigo test notification",
@@ -1935,14 +2203,125 @@ private struct DevToolsPanel: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .settingBubble()
 
+            // MARK: Simulate notifications
+            devSectionLabel("Simulate Notifications")
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Fires each kind immediately, bypassing all guards. Check Notification Centre after tapping.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .padding(.bottom, 2)
+
+                ForEach(NotificationKind.allCases) { kind in
+                    Button("Fire: \(kind.title)") {
+                        NotificationScheduler.shared.fireTestNotification(for: kind)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+            .settingBubble()
+
+            // MARK: Notification Dry Run
+            devSectionLabel("Notification Dry Run")
+
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Simulates whether notifications would fire for events in your library and for artificial test cases. Read-only — nothing is actually sent or stored.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                HStack(spacing: 10) {
+                    Button(isDryRunning ? "Scanning…" : "Scan library") {
+                        isDryRunning = true
+                        dryRunLibraryResults = []
+                        dryRunArtificialResults = []
+                        Task {
+                            await MainActor.run {
+                                dryRunLibraryResults = NotificationScheduler.shared.dryRunLibraryScenarios(
+                                    library: model.library,
+                                    preferences: model.settings.notificationPreferences
+                                )
+                                isDryRunning = false
+                            }
+                        }
+                    }
+                    .disabled(isDryRunning)
+
+                    Button("Run artificial scenarios") {
+                        dryRunArtificialResults = NotificationScheduler.shared.dryRunArtificialScenarios(
+                            preferences: model.settings.notificationPreferences
+                        )
+                    }
+                }
+                .font(.subheadline)
+
+                if !dryRunLibraryResults.isEmpty {
+                    dryRunSummaryLine(results: dryRunLibraryResults, label: "Library")
+                    ForEach(dryRunLibraryResults) { result in
+                        dryRunRow(result)
+                    }
+                }
+
+                if !dryRunArtificialResults.isEmpty {
+                    if !dryRunLibraryResults.isEmpty {
+                        Divider()
+                    }
+                    dryRunSummaryLine(results: dryRunArtificialResults, label: "Artificial")
+                    Text("Artificial scenarios use controlled fixtures — the first three always use fully-on preferences to test pure logic, regardless of your real settings. The last two always inject broken prefs to show what each blocked state looks like.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .padding(.top, 2)
+                    ForEach(dryRunArtificialResults) { result in
+                        dryRunRow(result)
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .settingBubble()
+
             // MARK: Diagnostics
             devSectionLabel("Diagnostics")
+
+            VStack(alignment: .leading, spacing: 8) {
+                Button("Check notification status") {
+                    checkNotificationStatus()
+                }
+                if !notifStatusText.isEmpty {
+                    Text(notifStatusText)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                        .lineLimit(nil)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    if notifAuthStatus == .notDetermined {
+                        Button("Request system permission now") {
+                            model.setNotificationsEnabled(true, source: .settings)
+                            Task {
+                                try? await Task.sleep(nanoseconds: 500_000_000)
+                                checkNotificationStatus()
+                            }
+                        }
+                        .font(.caption.bold())
+                        .foregroundStyle(model.settings.accentColor)
+                    } else if notifAuthStatus == .denied {
+                        Button("Open system Settings to enable") {
+                            #if canImport(UIKit)
+                            UIApplication.shared.openNotificationSettings()
+                            #endif
+                        }
+                        .font(.caption.bold())
+                        .foregroundStyle(.orange)
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .settingBubble()
 
             VStack(alignment: .leading, spacing: 6) {
                 Button(isFetchingNotifications ? "Fetching..." : "Fetch pending notifications") {
                     fetchPendingNotifications()
                 }
                 .disabled(isFetchingNotifications)
+
 
                 if !pendingNotificationsText.isEmpty {
                     Text(pendingNotificationsText)
@@ -2041,6 +2420,58 @@ private struct DevToolsPanel: View {
     }
 
     @ViewBuilder
+    private func dryRunSummaryLine(results: [NotifSimResult], label: String) -> some View {
+        let fires = results.filter { $0.outcome == .fires }.count
+        let possible = results.filter { $0.wouldHaveHappenedWithAllEnabled && $0.outcome != .fires }.count
+        let noBase = results.filter { $0.outcome == .noBaseline }.count
+        let sent = results.filter { $0.outcome == .alreadySent }.count
+        let parts: [String] = [
+            fires > 0   ? "\(fires) would fire" : nil,
+            possible > 0 ? "\(possible) need settings change" : nil,
+            noBase > 0  ? "\(noBase) no baseline" : nil,
+            sent > 0    ? "\(sent) already sent" : nil,
+        ].compactMap { $0 }
+        Text("\(label): \(parts.isEmpty ? "no scenarios" : parts.joined(separator: " · "))")
+            .font(.caption.bold())
+            .foregroundStyle(.secondary)
+    }
+
+    @ViewBuilder
+    private func dryRunRow(_ result: NotifSimResult) -> some View {
+        let color: Color = {
+            switch result.outcome {
+            case .fires:               return .green
+            case .firesIfKindEnabled,
+                 .firesIfGlobalEnabled: return .orange
+            case .noBaseline:          return Color(.secondaryLabel)
+            case .alreadySent:         return .blue
+            }
+        }()
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Image(systemName: result.outcome.symbolName)
+                    .foregroundStyle(color)
+                    .font(.caption)
+                Text(result.itemTitle)
+                    .font(.caption.bold())
+                    .lineLimit(1)
+                Spacer(minLength: 4)
+                Text(result.outcome.label)
+                    .font(.caption2.bold())
+                    .foregroundStyle(color)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 2)
+                    .background(color.opacity(0.12), in: Capsule())
+            }
+            Text(result.scenario)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .padding(.leading, 18)
+        }
+        .padding(.vertical, 2)
+    }
+
+    @ViewBuilder
     private func devSectionLabel(_ title: String) -> some View {
         Text(title)
             .font(.caption.bold())
@@ -2091,6 +2522,35 @@ private struct DevToolsPanel: View {
                 importResult = "✗ \(error.localizedDescription)"
             }
         }
+    }
+
+    private func checkNotificationStatus() {
+#if canImport(UserNotifications)
+        Task {
+            let sysSettings = await UNUserNotificationCenter.current().notificationSettings()
+            let status = sysSettings.authorizationStatus
+            let authLabel: String
+            switch status {
+            case .authorized:    authLabel = "✓ authorized"
+            case .denied:        authLabel = "✗ denied — fix in Settings app"
+            case .notDetermined: authLabel = "⚠ not determined — permission never requested"
+            case .provisional:   authLabel = "provisional"
+            case .ephemeral:     authLabel = "ephemeral"
+            @unknown default:    authLabel = "unknown"
+            }
+            let prefs = model.settings.notificationPreferences
+            let upcomingWatchlist = model.library.watchlistItems.filter { $0.isUpcoming }.count
+            await MainActor.run {
+                notifAuthStatus = status
+                notifStatusText = """
+                system: \(authLabel)
+                app enabled: \(prefs.isEnabled)
+                kinds enabled: \(prefs.enabledKinds.count)/\(NotificationKind.allCases.count)
+                upcoming watchlist: \(upcomingWatchlist) item(s)
+                """
+            }
+        }
+#endif
     }
 
     private func fetchPendingNotifications() {

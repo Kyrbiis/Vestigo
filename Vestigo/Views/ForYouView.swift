@@ -89,7 +89,7 @@ struct ForYouView: View {
                             }
                         }
                         .padding(14)
-                        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                        .liquidGlass(cornerRadius: 24)
                     }
 
                     if model.library.watchedItems.count < 3 {

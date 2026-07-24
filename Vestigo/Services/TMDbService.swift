@@ -764,6 +764,33 @@ struct TMDbService {
     }
     
     
+    // MARK: - Lightweight fetches for background notifications
+
+    func seasonCount(forTVShowID id: Int) async throws -> Int {
+        struct LightResponse: Decodable {
+            let numberOfSeasons: Int?
+            enum CodingKeys: String, CodingKey { case numberOfSeasons = "number_of_seasons" }
+        }
+        let response: LightResponse = try await fetch(path: "/tv/\(id)", query: [])
+        return response.numberOfSeasons ?? 0
+    }
+
+    func trailerCount(for item: MediaItem) async throws -> Int {
+        struct LightResponse: Decodable {
+            struct VideosResponse: Decodable {
+                let results: [VideoResult]
+                struct VideoResult: Decodable { let type: String; let site: String }
+            }
+            let videos: VideosResponse?
+            enum CodingKeys: String, CodingKey { case videos }
+        }
+        let response: LightResponse = try await fetch(
+            path: "/\(item.kind.tmdbPath)/\(item.id)",
+            query: [URLQueryItem(name: "append_to_response", value: "videos")]
+        )
+        return response.videos?.results.filter { $0.type == "Trailer" && $0.site == "YouTube" }.count ?? 0
+    }
+
     private func fetchList(path: String, query: [URLQueryItem]) async throws -> [MediaItem] {
         let response: TMDbListResponse = try await fetch(path: path, query: query)
         return response.results.map(MediaItem.init).filter { !$0.title.isEmpty }

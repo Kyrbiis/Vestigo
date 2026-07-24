@@ -218,9 +218,59 @@ enum NotificationKind: String, Codable, CaseIterable, Identifiable, Hashable {
     }
 }
 
+enum NotificationLeadTime: String, Codable, CaseIterable, Identifiable, Hashable {
+    case onReleaseDay = "day0"
+    case oneDay = "1d"
+    case threeDays = "3d"
+    case oneWeek = "1w"
+    case twoWeeks = "2w"
+    case oneMonth = "1mo"
+    case twoMonths = "2mo"
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .onReleaseDay: return "On release day"
+        case .oneDay:       return "1 day before"
+        case .threeDays:    return "3 days before"
+        case .oneWeek:      return "1 week before"
+        case .twoWeeks:     return "2 weeks before"
+        case .oneMonth:     return "1 month before"
+        case .twoMonths:    return "2 months before"
+        }
+    }
+
+    var daysOffset: Int {
+        switch self {
+        case .onReleaseDay: return 0
+        case .oneDay:       return -1
+        case .threeDays:    return -3
+        case .oneWeek:      return -7
+        case .twoWeeks:     return -14
+        case .oneMonth:     return -30
+        case .twoMonths:    return -60
+        }
+    }
+
+    var relativeText: String {
+        switch self {
+        case .onReleaseDay: return "today"
+        case .oneDay:       return "tomorrow"
+        case .threeDays:    return "3 days"
+        case .oneWeek:      return "1 week"
+        case .twoWeeks:     return "2 weeks"
+        case .oneMonth:     return "1 month"
+        case .twoMonths:    return "2 months"
+        }
+    }
+}
+
 struct NotificationPreferences: Codable, Hashable {
     var isEnabled = false
     var enabledKinds: Set<NotificationKind> = Set(NotificationKind.allCases)
+    var watchlistLeadTimes: Set<NotificationLeadTime> = [.onReleaseDay, .oneWeek]
     var hasSeenPrompt = false
     var deviceToken: String?
+    var notifyOnlyForSubscribedServices: Bool = true
 }

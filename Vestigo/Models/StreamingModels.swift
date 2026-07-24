@@ -351,3 +351,101 @@ struct StreamingOption: Codable, Hashable, Identifiable {
         self.openURL = openURL
     }
 }
+
+struct KnownStreamingService: Identifiable, Hashable {
+    let id: String          // used for matching against StreamingOption.serviceName
+    let displayName: String
+    let isFree: Bool
+    let iconLabel: String   // short text shown inside the icon tile
+    let brandColorHex: String
+    let lightText: Bool     // false = use dark text (for bright brand colors)
+    let domain: String      // used to build the Brandfetch logo CDN URL
+    let aliases: [String]   // alternative API names (e.g. "Amazon" for "Prime Video")
+
+    var logoURL: URL? {
+        URL(string: "https://mtttuyvpjyugudkevchj.supabase.co/functions/v1/vestigo-api/brand-logo?domain=\(domain)&w=128&h=128")
+    }
+
+    func matches(_ serviceName: String) -> Bool {
+        let b = serviceName.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        let a = id.lowercased()
+        if b.contains(a) || a.contains(b) { return true }
+        return aliases.contains { alias in
+            let c = alias.lowercased()
+            return b.contains(c) || c.contains(b)
+        }
+    }
+
+    private static func s(
+        _ id: String, _ display: String, _ icon: String, _ hex: String, _ domain: String,
+        free: Bool = false, dark: Bool = false, aliases: [String] = []
+    ) -> KnownStreamingService {
+        KnownStreamingService(id: id, displayName: display, isFree: free, iconLabel: icon,
+                              brandColorHex: hex, lightText: !dark, domain: domain, aliases: aliases)
+    }
+
+    static let catalog: [KnownStreamingService] = [
+        // Subscription
+        s("Netflix",              "Netflix",          "N",      "#E50914",  "netflix.com"),
+        s("Prime Video",          "Prime Video",      "prime",  "#00A8E1",  "primevideo.com",     aliases: ["Amazon", "Amazon Prime", "Amazon Prime Video"]),
+        s("Apple TV+",            "Apple TV+",        "TV+",    "#1C1C1E",  "tv.apple.com",       aliases: ["Apple TV", "AppleTV"]),
+        s("Disney+",              "Disney+",          "D+",     "#113ECF",  "disneyplus.com"),
+        s("Hulu",                 "Hulu",             "hulu",   "#1CE783",  "hulu.com",           dark: true),
+        s("Max",                  "Max",              "max",    "#002BE7",  "max.com",            aliases: ["HBO Max"]),
+        s("Peacock",              "Peacock",          "P",      "#1D1D1B",  "peacocktv.com"),
+        s("Paramount+",           "Paramount+",       "P+",     "#0064FF",  "paramountplus.com",  aliases: ["Paramount Plus"]),
+        s("YouTube TV",           "YouTube TV",       "YT",     "#FF0000",  "tv.youtube.com"),
+        s("Fubo",                 "Fubo",             "fubo",   "#E8173B",  "fubo.tv",            aliases: ["FuboTV"]),
+        s("Sling TV",             "Sling TV",         "SLING",  "#1B6BFF",  "sling.com"),
+        s("DirecTV Stream",       "DirecTV",          "DTV",    "#00A8E0",  "directv.com",        aliases: ["DirecTV"]),
+        s("Starz",                "Starz",            "STARZ",  "#141414",  "starz.com"),
+        s("Epix",                 "MGM+",             "MGM+",   "#1A1A1A",  "mgmplus.com",        aliases: ["MGM Plus", "MGM+"]),
+        s("Crunchyroll",          "Crunchyroll",      "CR",     "#F47521",  "crunchyroll.com"),
+        s("Funimation",           "Funimation",       "FUN",    "#410099",  "funimation.com"),
+        s("Discovery+",           "Discovery+",       "D+",     "#0D4296",  "discoveryplus.com",  aliases: ["Discovery Plus"]),
+        s("ESPN+",                "ESPN+",            "E+",     "#CC0001",  "espn.com",           aliases: ["ESPN Plus"]),
+        s("MUBI",                 "MUBI",             "MUBI",   "#2B2B2B",  "mubi.com"),
+        s("BritBox",              "BritBox",          "BB",     "#13294B",  "britbox.com"),
+        s("AMC+",                 "AMC+",             "AMC+",   "#002366",  "amcplus.com",        aliases: ["AMC Plus"]),
+        s("Shudder",              "Shudder",          "SHD",    "#1E1E1E",  "shudder.com"),
+        s("Criterion Channel",    "Criterion",        "CC",     "#CC1411",  "criterionchannel.com"),
+        s("Acorn TV",             "Acorn TV",         "acorn",  "#1D6B2E",  "acorn.tv"),
+        s("Hallmark Movies Now",  "Hallmark",         "HMN",    "#8B1A1A",  "hallmarkchannel.com"),
+        s("Lifetime Movie Club",  "Lifetime",         "LMC",    "#8B008B",  "mylifetime.com"),
+        s("CuriosityStream",      "Curiosity",        "CS",     "#FF6B00",  "curiositystream.com"),
+        s("Magellan TV",          "Magellan",         "MAG",    "#1A1A2E",  "magellantv.com"),
+        s("Screambox",            "Screambox",        "SCR",    "#8B0000",  "screambox.com"),
+        s("Arrow",                "Arrow",            "ARR",    "#E50914",  "arrow-player.com"),
+        s("Spectrum",             "Spectrum",         "SPEC",   "#003DA5",  "spectrum.net",       aliases: ["Spectrum TV", "Spectrum On Demand"]),
+        s("Fandango at Home",     "Fandango",         "FAN",    "#3D0C96",  "fandango.com",       aliases: ["Vudu", "FandangoNOW"]),
+        // Free
+        s("Tubi",                 "Tubi",             "tubi",   "#FA4706",  "tubitv.com",         free: true),
+        s("Pluto TV",             "Pluto TV",         "pluto",  "#006EFF",  "pluto.tv",           free: true),
+        s("Kanopy",               "Kanopy",           "K",      "#6B0CB0",  "kanopy.com",         free: true),
+        s("Plex",                 "Plex",             "PLEX",   "#E5A00D",  "plex.tv",            free: true),
+        s("Peacock Free",         "Peacock Free",     "P",      "#1D1D1B",  "peacocktv.com",      free: true),
+        s("The Roku Channel",     "Roku Channel",     "ROKU",   "#6C1D45",  "therokuchannel.com", free: true),
+        s("Crackle",              "Crackle",          "CKL",    "#C0392B",  "crackle.com",        free: true),
+        s("YouTube",              "YouTube",          "YT",     "#FF0000",  "youtube.com",        free: true),
+    ]
+}
+
+extension StreamingOption {
+    func isSubscribed(in serviceNames: Set<String>) -> Bool {
+        guard !serviceNames.isEmpty else { return false }
+        let name = serviceName.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Direct name overlap with subscribed service IDs
+        if serviceNames.contains(where: { let s = $0.lowercased(); return name.contains(s) || s.contains(name) }) {
+            return true
+        }
+
+        // Catalog-mediated match: handles cases where the API name differs from the catalog ID
+        // e.g. "Amazon" → "Prime Video", "AppleTV" → "Apple TV+"
+        if let knownService = KnownStreamingService.catalog.first(where: { $0.matches(serviceName) }) {
+            return serviceNames.contains(knownService.id)
+        }
+
+        return false
+    }
+}

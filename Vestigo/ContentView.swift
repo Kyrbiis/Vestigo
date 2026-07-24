@@ -89,6 +89,9 @@ struct ContentView: View {
         .sheet(item: $model.selectedPerson) { person in
             PersonDetailView(person: person, model: model)
         }
+        .sheet(isPresented: $model.showStreamingSetup) {
+            StreamingServicesSetupSheet(model: model, isOnboarding: true)
+        }
         .sheet(isPresented: $model.showNotificationOnboarding) {
             NotificationPreferencesSheet(model: model, isOnboarding: true)
         }

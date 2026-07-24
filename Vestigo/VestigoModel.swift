@@ -70,6 +70,7 @@ final class VestigoModel: ObservableObject {
     @Published var collectionsResetToken = UUID()
     @Published var imageRefreshToken = 0
     @Published var showNotificationOnboarding = false
+    @Published var showStreamingSetup = false
     @Published var notificationOnboardingDismissToken = UUID()
     @Published var calendarEventIDs: [MediaKey: String] = [:]
     @Published var showOMDbLimitAlert = false
@@ -310,7 +311,7 @@ final class VestigoModel: ObservableObject {
     
     func bootstrap() async {
         loadLocal()
-        offerNotificationOnboardingIfNeeded()
+        offerStreamingSetupIfNeeded()
 
         NotificationCenter.default.addObserver(
             forName: NSUbiquitousKeyValueStore.didChangeExternallyNotification,
@@ -322,10 +323,22 @@ final class VestigoModel: ObservableObject {
 
         await loadHome()
 
+        scheduleWatchlistNotificationsOnStartup()
+        NotificationScheduler.shared.scheduleNextBackgroundCheck()
+
         Task {
             await syncFromCloudOnLaunch()
             await loadHome()
         }
+    }
+
+    private func scheduleWatchlistNotificationsOnStartup() {
+        let upcoming = library.watchlistItems.filter { $0.isUpcoming }
+        guard !upcoming.isEmpty else { return }
+        NotificationScheduler.shared.scheduleWatchlistNotifications(
+            for: upcoming,
+            preferences: settings.notificationPreferences
+        )
     }
 
     func markNotificationPromptSeen() {
@@ -352,6 +365,18 @@ final class VestigoModel: ObservableObject {
         saveLocalSoon()
     }
 
+    func setNotificationLeadTime(_ leadTime: NotificationLeadTime, isEnabled: Bool) {
+        if isEnabled {
+            settings.notificationPreferences.watchlistLeadTimes.insert(leadTime)
+        } else {
+            // Always keep at least one lead time selected
+            guard settings.notificationPreferences.watchlistLeadTimes.count > 1 else { return }
+            settings.notificationPreferences.watchlistLeadTimes.remove(leadTime)
+        }
+        scheduleWatchlistNotificationsOnStartup()
+        saveLocalSoon()
+    }
+
     func clearExternalRatingsCache() {
         externalRatingsCache = [:]
         UserDefaults.standard.removeObject(forKey: "Vestigo.externalRatings")
@@ -368,13 +393,13 @@ final class VestigoModel: ObservableObject {
         Task { await loadExternalRatings(for: visible) }
     }
 
-    func postDevTestNotification(title: String, body: String) {
+    func postDevTestNotification(title: String, body: String, delay: TimeInterval = 1) {
 #if canImport(UserNotifications)
         let content = UNMutableNotificationContent()
         content.title = title
         content.body = body
         content.sound = .default
-        let trigger = UNTimeIntervalNotificationTrigger(timeInterval: 1, repeats: false)
+        let trigger = UNTimeIntervalNotificationTrigger(timeInterval: max(1, delay), repeats: false)
         let request = UNNotificationRequest(identifier: "vestigo.dev.\(UUID().uuidString)", content: content, trigger: trigger)
         UNUserNotificationCenter.current().add(request) { _ in }
 #endif
@@ -809,6 +834,13 @@ final class VestigoModel: ObservableObject {
             hideShortFilms: settings.hideShortFilmsFromRecommended,
             hideExtrasAndPromos: settings.hideExtrasAndPromosFromRecommended
         )
+
+        let prefs = settings.notificationPreferences
+        if prefs.isEnabled {
+            for item in recommendations where item.isUpcoming {
+                NotificationScheduler.shared.scheduleIfSimilarUpcoming(item, preferences: prefs)
+            }
+        }
     }
 
     func loadTopRated(kind: MediaKind) async {
@@ -2413,16 +2445,53 @@ final class VestigoModel: ObservableObject {
             }
         }
         if relatedMediaCache[item.key] == nil {
-            guard let imdbID = detailsCache[item.key]?.imdbID else {
+            if let imdbID = detailsCache[item.key]?.imdbID {
+                do {
+                    relatedMediaCache[item.key] = try await relatedMedia.sections(imdbID: imdbID)
+                } catch {
+                    relatedMediaCache[item.key] = []
+                }
+            } else {
                 relatedMediaCache[item.key] = []
-                return
+            }
+        }
+        checkNotificationsAfterDetailLoad(item)
+    }
+
+    private func checkNotificationsAfterDetailLoad(_ item: MediaItem) {
+        let prefs = settings.notificationPreferences
+        guard prefs.isEnabled else { return }
+
+        let isWatchlisted = library.isInWatchlist(item.key)
+        let isWatched = library.isWatched(item.key)
+
+        if let detail = detailsCache[item.key] {
+            if isWatchlisted {
+                NotificationScheduler.shared.checkNewTrailer(
+                    for: item, trailerCount: detail.trailers.count, preferences: prefs
+                )
             }
 
-            do {
-                relatedMediaCache[item.key] = try await relatedMedia.sections(imdbID: imdbID)
-            } catch {
-                relatedMediaCache[item.key] = []
+            if isWatched && item.kind == .tv {
+                NotificationScheduler.shared.checkNewSeason(
+                    for: item, seasons: detail.seasons, preferences: prefs
+                )
             }
+
+            // Notify if this is an unwatched installment in a franchise the user has seen
+            if !isWatched {
+                let hasWatchedFranchisePeer = detail.sameFranchiseKeys.contains { library.isWatched($0) }
+                if hasWatchedFranchisePeer {
+                    NotificationScheduler.shared.notifyFranchiseInstallment(item, preferences: prefs)
+                }
+            }
+        }
+
+        if isWatchlisted, let providers = providerCache[item.key] {
+            NotificationScheduler.shared.checkProviderChange(
+                for: item, providers: providers, preferences: prefs,
+                subscribedServiceNames: settings.subscribedServiceNames
+            )
         }
     }
 
@@ -2665,7 +2734,8 @@ final class VestigoModel: ObservableObject {
     }
 
     func simulateFirstLaunch() {
-        settings.notificationPreferences.hasSeenPrompt = false
+        showStreamingSetup = true
+        showNotificationOnboarding = true
     }
 
     func loadExternalRatings(for items: [MediaItem], limit: Int = 80) async {
@@ -2715,8 +2785,16 @@ final class VestigoModel: ObservableObject {
     }
     
     func toggleWatchlist(_ item: MediaItem) {
+        let wasInWatchlist = library.isInWatchlist(item.key)
         library.toggleWatchlist(item)
         saveLocalSoon()
+
+        let prefs = settings.notificationPreferences
+        if library.isInWatchlist(item.key) && !wasInWatchlist {
+            NotificationScheduler.shared.scheduleWatchlistNotifications(for: [item], preferences: prefs)
+        } else if !library.isInWatchlist(item.key) && wasInWatchlist {
+            NotificationScheduler.shared.cancelWatchlistNotifications(for: item)
+        }
     }
     
     func toggleWatched(_ item: MediaItem, showsRatingPrompt: Bool = true) {
@@ -3241,6 +3319,30 @@ final class VestigoModel: ObservableObject {
         showNotificationOnboarding = true
     }
 
+    private func offerStreamingSetupIfNeeded() {
+        if !settings.hasSeenStreamingSetup {
+            showStreamingSetup = true
+        } else {
+            offerNotificationOnboardingIfNeeded()
+        }
+    }
+
+    func completeStreamingSetup() {
+        settings.hasSeenStreamingSetup = true
+        showStreamingSetup = false
+        saveLocalSoon()
+        offerNotificationOnboardingIfNeeded()
+    }
+
+    func toggleSubscribedService(_ serviceID: String) {
+        if settings.subscribedServiceNames.contains(serviceID) {
+            settings.subscribedServiceNames.remove(serviceID)
+        } else {
+            settings.subscribedServiceNames.insert(serviceID)
+        }
+        saveLocalSoon()
+    }
+
     private func requestNotificationPermission(source: NotificationToggleSource) {
         #if canImport(UserNotifications) && os(iOS)
         Task {
@@ -3293,6 +3395,10 @@ final class VestigoModel: ObservableObject {
         #endif
     }
     
+    func saveSettings() {
+        saveLocalSoon()
+    }
+
     private func saveLocalSoon() {
         saveTask?.cancel()
         saveTask = Task { [weak self] in

@@ -1404,6 +1404,33 @@ Deno.serve(async (req) => {
         })
       }
 
+    if (url.pathname.endsWith("/brand-logo")) {
+      const domain = url.searchParams.get("domain") ?? ""
+      const w = url.searchParams.get("w") ?? "128"
+      const h = url.searchParams.get("h") ?? "128"
+      const clientId = Deno.env.get("BRANDFETCH_CLIENT_ID")
+
+      if (!clientId) {
+        return new Response("Missing BRANDFETCH_CLIENT_ID", { status: 500 })
+      }
+
+      if (!domain) {
+        return new Response("Missing domain", { status: 400 })
+      }
+
+      const upstream = await fetchWithTimeout(
+        `https://cdn.brandfetch.io/${domain}/w/${w}/h/${h}/fallback/404?c=${clientId}`
+      )
+
+      return new Response(upstream.body, {
+        status: upstream.status,
+        headers: {
+          "Content-Type": upstream.headers.get("Content-Type") ?? "image/png",
+          "Cache-Control": "public, max-age=86400",
+        },
+      })
+    }
+
     return Response.json(
       {
         error: "Not found",

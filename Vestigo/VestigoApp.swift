@@ -9,10 +9,12 @@ import SwiftUI
 #if os(iOS)
 import UIKit
 import UserNotifications
+import BackgroundTasks
 
 final class AppDelegate: NSObject, UIApplicationDelegate {
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
         UNUserNotificationCenter.current().delegate = self
+        NotificationScheduler.registerBackgroundTask()
         return true
     }
 

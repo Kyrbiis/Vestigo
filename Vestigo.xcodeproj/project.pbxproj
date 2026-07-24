@@ -29,9 +29,22 @@
 		620094DB2FB15C86000C2463 /* VestigoUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = VestigoUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		62F767E93012D5D7001A848B /* Exceptions for "Vestigo" folder in "Vestigo" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = 620094C32FB15C85000C2463 /* Vestigo */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
+
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		620094C62FB15C85000C2463 /* Vestigo */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				62F767E93012D5D7001A848B /* Exceptions for "Vestigo" folder in "Vestigo" target */,
+			);
 			path = Vestigo;
 			sourceTree = "<group>";
 		};
@@ -400,6 +413,7 @@
 				DEVELOPMENT_TEAM = H5YGR6U5A4;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Vestigo/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Vestigo;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.entertainment";
 				INFOPLIST_KEY_NSCalendarsWriteOnlyAccessUsageDescription = "Vestigo uses calendar access to add release dates for upcoming movies and seasons.";
@@ -414,7 +428,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.7;
+				MARKETING_VERSION = 1.8;
 				PRODUCT_BUNDLE_IDENTIFIER = com.jojovestigo;
 				PRODUCT_NAME = Vestigo;
 				PROVISIONING_PROFILE_SPECIFIER = "";
@@ -440,6 +454,7 @@
 				DEVELOPMENT_TEAM = H5YGR6U5A4;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Vestigo/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Vestigo;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.entertainment";
 				INFOPLIST_KEY_NSCalendarsWriteOnlyAccessUsageDescription = "Vestigo uses calendar access to add release dates for upcoming movies and seasons.";
@@ -454,7 +469,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.7;
+				MARKETING_VERSION = 1.8;
 				PRODUCT_BUNDLE_IDENTIFIER = com.jojovestigo;
 				PRODUCT_NAME = Vestigo;
 				PROVISIONING_PROFILE_SPECIFIER = "";

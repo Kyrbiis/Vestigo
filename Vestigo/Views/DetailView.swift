@@ -35,8 +35,14 @@ struct DetailView: View {
     private var detail: MediaDetail? { model.detailsCache[item.key] }
     private var providers: [StreamingOption]? { model.providerCache[item.key] }
     private var visibleProviders: [StreamingOption]? {
-        providers?.filter { provider in
-            !provider.serviceName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        guard let filtered = providers?.filter({ !$0.serviceName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) else { return nil }
+        let subscribed = model.settings.subscribedServiceNames
+        guard !subscribed.isEmpty else { return filtered }
+        return filtered.sorted { a, b in
+            let aIn = a.isSubscribed(in: subscribed)
+            let bIn = b.isSubscribed(in: subscribed)
+            if aIn != bIn { return aIn }
+            return false
         }
     }
     private var relatedMediaSections: [RelatedMediaSection] { model.relatedMediaCache[item.key] ?? [] }
@@ -1426,22 +1432,20 @@ struct AddToCollectionSheet: View {
     let item: MediaItem
     @ObservedObject var model: VestigoModel
     @State private var newName = ""
-    
+
     var body: some View {
-        ZStack {
-            AppBackground(settings: model.settings)
+        VStack(spacing: 0) {
+            Capsule()
+                .fill(.white.opacity(0.46))
+                .frame(width: 48, height: 5)
+                .padding(.top, 12)
+                .padding(.bottom, 8)
+
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
-                    Capsule()
-                        .fill(.white.opacity(0.36))
-                        .frame(width: 46, height: 5)
-                        .padding(.top, 10)
-                        .padding(.bottom, 6)
-                        .frame(maxWidth: .infinity, alignment: .center)
-                    
                     Text("Add to collection")
                         .font(.title2.bold())
-                    
+
                     HStack {
                         TextField("New collection", text: $newName)
                             .padding(12)
@@ -1456,7 +1460,7 @@ struct AddToCollectionSheet: View {
                         .frame(width: 86, height: 44)
                         .liquidGlass(cornerRadius: 18)
                     }
-                    
+
                     ForEach(model.library.collections) { collection in
                         let alreadyIn = collection.itemKeys.contains(item.key)
                         Button {
@@ -1480,18 +1484,17 @@ struct AddToCollectionSheet: View {
                     }
                 }
                 .padding(18)
-                .frame(maxWidth: .infinity, minHeight: 820, alignment: .topLeading)
-                .liquidGlass(cornerRadius: 36)
-                .padding(.horizontal, 6)
-                .padding(.top, 8)
-                .ignoresSafeArea(edges: .bottom)
+                .padding(.bottom, 110)
             }
             .scrollDismissesKeyboard(.immediately)
             .scrollIndicators(.hidden)
             .scrollViewTouchTuning()
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .sheetLiquidGlass(cornerRadius: 48)
+        .ignoresSafeArea(edges: .bottom)
         .presentationBackground(.clear)
-        .presentationCornerRadius(36)
+        .presentationCornerRadius(54)
     }
 }
 

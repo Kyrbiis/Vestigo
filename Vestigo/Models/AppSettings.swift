@@ -45,6 +45,8 @@ struct AppSettings: Codable, Hashable {
     var omdbDailyRequestCount: Int = 0
     var omdbTotalRequestCount: Int = 0
     var omdbLastRequestDate: String = ""
+    var subscribedServiceNames: Set<String> = []
+    var hasSeenStreamingSetup: Bool = false
     enum CodingKeys: String, CodingKey {
         case recommendationStrength
         case appearance
@@ -90,6 +92,8 @@ struct AppSettings: Codable, Hashable {
         case omdbDailyRequestCount
         case omdbTotalRequestCount
         case omdbLastRequestDate
+        case subscribedServiceNames
+        case hasSeenStreamingSetup
     }
 
     init() {}
@@ -145,6 +149,8 @@ struct AppSettings: Codable, Hashable {
         omdbDailyRequestCount = try container.decodeIfPresent(Int.self, forKey: .omdbDailyRequestCount) ?? omdbDailyRequestCount
         omdbTotalRequestCount = try container.decodeIfPresent(Int.self, forKey: .omdbTotalRequestCount) ?? omdbTotalRequestCount
         omdbLastRequestDate = try container.decodeIfPresent(String.self, forKey: .omdbLastRequestDate) ?? omdbLastRequestDate
+        subscribedServiceNames = try container.decodeIfPresent(Set<String>.self, forKey: .subscribedServiceNames) ?? subscribedServiceNames
+        hasSeenStreamingSetup = try container.decodeIfPresent(Bool.self, forKey: .hasSeenStreamingSetup) ?? hasSeenStreamingSetup
     }
 
     private static func mergedOrder<T: Hashable>(saved: [T], defaults: [T]) -> [T] {

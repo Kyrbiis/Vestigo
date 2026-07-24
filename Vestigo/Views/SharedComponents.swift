@@ -468,10 +468,11 @@ struct ProviderRow: View {
     }
     
     private var providerLogo: some View {
-        ZStack {
+        let catalogService = option.matchedCatalogService
+        return ZStack {
             RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(.white.opacity(0.13))
-            
+                .fill(catalogService.map { Color(hex: $0.brandColorHex) } ?? .white.opacity(0.13))
+
             if let url = option.logoURL {
                 AsyncImage(url: url.refreshedImageURL(token: imageRefreshToken)) { phase in
                     switch phase {
@@ -482,18 +483,22 @@ struct ProviderRow: View {
                             .frame(width: 52, height: 52)
                             .clipped()
                     default:
-                        Text(option.serviceShort)
-                            .font(.caption.bold())
+                        providerFallbackText(lightText: catalogService?.lightText ?? true)
                     }
                 }
             } else {
-                Text(option.serviceShort)
-                    .font(.caption.bold())
+                providerFallbackText(lightText: catalogService?.lightText ?? true)
             }
         }
         .frame(width: 52, height: 52)
         .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+    }
+
+    private func providerFallbackText(lightText: Bool) -> some View {
+        Text(option.serviceShort)
+            .font(.caption.bold())
+            .foregroundStyle(lightText ? Color.white : Color.black)
     }
 }
 
@@ -543,18 +548,25 @@ extension StreamingOption {
         return trimmed
     }
     
+    var matchedCatalogService: KnownStreamingService? {
+        KnownStreamingService.catalog.first { $0.matches(serviceName) }
+    }
+
     var logoURL: URL? {
+        // Prefer Brandfetch via catalog — higher quality than favicons
+        if let domain = matchedCatalogService?.domain {
+            return URL(string: "https://mtttuyvpjyugudkevchj.supabase.co/functions/v1/vestigo-api/brand-logo?domain=\(domain)&w=128&h=128")
+        }
+        // Fallback: Google favicon for services not yet in catalog
         guard let domain = serviceLogoDomain else { return nil }
-        
         var components = URLComponents(string: "https://www.google.com/s2/favicons")
         components?.queryItems = [
             URLQueryItem(name: "sz", value: "128"),
             URLQueryItem(name: "domain", value: domain)
         ]
-        
         return components?.url
     }
-    
+
     private var serviceLogoDomain: String? {
         let normalized = cleanedServiceName
             .lowercased()
@@ -562,33 +574,13 @@ extension StreamingOption {
             .replacingOccurrences(of: "+", with: "plus")
             .replacingOccurrences(of: ".", with: "")
             .replacingOccurrences(of: "-", with: "")
-        
-        if normalized.contains("netflix") { return "netflix.com" }
-        if normalized.contains("primevideo") || normalized.contains("amazon") { return "primevideo.com" }
-        if normalized.contains("disney") { return "disneyplus.com" }
-        if normalized.contains("hulu") { return "hulu.com" }
-        if normalized.contains("max") || normalized.contains("hbomax") { return "max.com" }
-        if normalized.contains("appletv") || normalized.contains("itunes") { return "tv.apple.com" }
-        if normalized.contains("paramount") { return "paramountplus.com" }
-        if normalized.contains("peacock") { return "peacocktv.com" }
-        if normalized.contains("starz") { return "starz.com" }
+
         if normalized.contains("showtime") { return "showtime.com" }
-        if normalized.contains("youtube") { return "youtube.com" }
         if normalized.contains("googleplay") { return "play.google.com" }
-        if normalized.contains("vudu") || normalized.contains("fandango") { return "athome.fandango.com" }
         if normalized.contains("microsoft") { return "microsoft.com" }
-        if normalized.contains("amc") { return "amcplus.com" }
-        if normalized.contains("crunchyroll") { return "crunchyroll.com" }
-        if normalized.contains("tubi") { return "tubitv.com" }
-        if normalized.contains("pluto") { return "pluto.tv" }
-        if normalized.contains("roku") { return "therokuchannel.roku.com" }
-        if normalized.contains("kanopy") { return "kanopy.com" }
-        if normalized.contains("plex") { return "plex.tv" }
-        if normalized.contains("mubi") { return "mubi.com" }
-        if normalized.contains("criterion") { return "criterionchannel.com" }
         if normalized.contains("hoopla") { return "hoopladigital.com" }
         if normalized.contains("freevee") { return "amazon.com" }
-        
+
         return nil
     }
 }
@@ -1478,5 +1470,19 @@ struct PersonSearchResultRow: View {
         }
         .buttonStyle(.plain)
         .task { await model.loadPersonDetailIfNeeded(person) }
+    }
+}
+
+// MARK: - Color Helpers
+
+extension Color {
+    init(hex: String) {
+        let hex = hex.trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
+        var int: UInt64 = 0
+        Scanner(string: hex).scanHexInt64(&int)
+        let r = Double((int >> 16) & 0xFF) / 255
+        let g = Double((int >> 8)  & 0xFF) / 255
+        let b = Double(int & 0xFF) / 255
+        self.init(red: r, green: g, blue: b)
     }
 }
