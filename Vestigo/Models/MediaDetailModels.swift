@@ -182,6 +182,8 @@ struct MediaDetail: Hashable {
     let ageRating: String?
     let tmdbCollectionID: Int?
     let keywordIDs: [Int]
+    let keywordNames: [String]
+    let networkNames: [String]
     let trailers: [TrailerVideo]
     let imdbID: String?
     let tmdbProviders: [StreamingOption]
@@ -201,6 +203,8 @@ struct MediaDetail: Hashable {
         ageRating = response.usAgeRating
         let allKeywords: [TMDbKeyword] = response.keywords?.keywords ?? response.keywords?.results ?? []
         keywordIDs = allKeywords.map(\.id)
+        keywordNames = allKeywords.map(\.name)
+        networkNames = (response.networks ?? []).map(\.name)
         trailers = TrailerVideo.ranked(from: response.videos?.results ?? [])
         imdbID = response.externalIDs?.imdbID
         tmdbProviders = response.watchProviders?.usStreamingOptions ?? []
@@ -292,7 +296,8 @@ struct MediaDetail: Hashable {
         sameFranchiseKeys: Set<MediaKey> = [],
         strongAPISimilarityKeys: Set<MediaKey> = [],
         mediumAPISimilarityKeys: Set<MediaKey> = [],
-        sharedContributorKeys: Set<MediaKey> = []
+        sharedContributorKeys: Set<MediaKey> = [],
+        externalRatings: [MediaKey: ExternalRatings] = [:]
     ) -> MediaDetail {
         let mergedSameFranchiseKeys = self.sameFranchiseKeys.union(sameFranchiseKeys)
         let mergedStrongAPISimilarityKeys = self.strongAPISimilarityKeys.union(strongAPISimilarityKeys)
@@ -311,7 +316,8 @@ struct MediaDetail: Hashable {
                 sameFranchiseKeys: mergedSameFranchiseKeys,
                 strongAPISimilarityKeys: mergedStrongAPISimilarityKeys,
                 mediumAPISimilarityKeys: mergedMediumAPISimilarityKeys,
-                sharedContributorKeys: mergedSharedContributorKeys
+                sharedContributorKeys: mergedSharedContributorKeys,
+                externalRatings: externalRatings
             ),
             firstAirDate: firstAirDate,
             lastAirDate: lastAirDate,
@@ -320,6 +326,8 @@ struct MediaDetail: Hashable {
             ageRating: ageRating,
             tmdbCollectionID: tmdbCollectionID,
             keywordIDs: keywordIDs,
+            keywordNames: keywordNames,
+            networkNames: networkNames,
             trailers: trailers,
             imdbID: imdbID,
             tmdbProviders: tmdbProviders,
@@ -334,7 +342,7 @@ struct MediaDetail: Hashable {
         trailers.first
     }
 
-    private init(director: PersonSummary?, creator: PersonSummary?, cast: [PersonSummary], castAndKeyCrew: [PersonSummary], seasons: [SeasonInfo], similar: [MediaItem], firstAirDate: String?, lastAirDate: String?, status: String?, runtime: Int?, ageRating: String?, tmdbCollectionID: Int?, keywordIDs: [Int], trailers: [TrailerVideo], imdbID: String?, tmdbProviders: [StreamingOption], sameFranchiseKeys: Set<MediaKey>, strongAPISimilarityKeys: Set<MediaKey>, mediumAPISimilarityKeys: Set<MediaKey>, sharedContributorKeys: Set<MediaKey>) {
+    private init(director: PersonSummary?, creator: PersonSummary?, cast: [PersonSummary], castAndKeyCrew: [PersonSummary], seasons: [SeasonInfo], similar: [MediaItem], firstAirDate: String?, lastAirDate: String?, status: String?, runtime: Int?, ageRating: String?, tmdbCollectionID: Int?, keywordIDs: [Int], keywordNames: [String], networkNames: [String], trailers: [TrailerVideo], imdbID: String?, tmdbProviders: [StreamingOption], sameFranchiseKeys: Set<MediaKey>, strongAPISimilarityKeys: Set<MediaKey>, mediumAPISimilarityKeys: Set<MediaKey>, sharedContributorKeys: Set<MediaKey>) {
         self.director = director
         self.creator = creator
         self.cast = cast
@@ -348,6 +356,8 @@ struct MediaDetail: Hashable {
         self.ageRating = ageRating
         self.tmdbCollectionID = tmdbCollectionID
         self.keywordIDs = keywordIDs
+        self.keywordNames = keywordNames
+        self.networkNames = networkNames
         self.trailers = trailers
         self.imdbID = imdbID
         self.tmdbProviders = tmdbProviders
@@ -363,12 +373,13 @@ struct MediaDetail: Hashable {
         sameFranchiseKeys: Set<MediaKey> = [],
         strongAPISimilarityKeys: Set<MediaKey> = [],
         mediumAPISimilarityKeys: Set<MediaKey> = [],
-        sharedContributorKeys: Set<MediaKey> = []
+        sharedContributorKeys: Set<MediaKey> = [],
+        externalRatings: [MediaKey: ExternalRatings] = [:]
     ) -> [MediaItem] {
         let sourceGenres = Set(source.genreIDs)
         let sourceLanguage = source.originalLanguage
         let sourceYear = source.releaseYearNumber
-        let sourceVote = source.voteAverage
+        let sourceVote = externalRatings[source.key]?.imdbRating ?? source.voteAverage
         let sourceTokens = recommendationTokens(for: source)
         let sourceTone = genreVector(for: source)
 
@@ -401,6 +412,15 @@ struct MediaDetail: Hashable {
                 }
 
                 if isCrossKindForTVSource && !sameFranchise && !strongAPISimilarity {
+                    return nil
+                }
+
+                // Dynamic quality floor: medium-API-only items must be within 2 points of the source's rating.
+                // If the source is low-rated, the floor is low too — no artificial floor for low-quality browsing.
+                let candidateRating = externalRatings[item.key]?.imdbRating ?? item.voteAverage
+                if mediumAPISimilarity && !strongAPISimilarity && !sameFranchise && !sharedContributor
+                    && sharedSpecificTokens.count < 2
+                    && sourceVote > 0 && candidateRating > 0 && candidateRating < max(0, sourceVote - 2.0) {
                     return nil
                 }
 
@@ -460,21 +480,26 @@ struct MediaDetail: Hashable {
                     score -= 1.2
                 }
 
-                if sourceVote > 0, item.voteAverage > 0 {
-                    let voteDelta = abs(sourceVote - item.voteAverage)
+                if sourceVote > 0, candidateRating > 0 {
+                    let voteDelta = abs(sourceVote - candidateRating)
                     if voteDelta <= 0.5 {
                         score += 2.0
                     } else if voteDelta <= 1.0 {
                         score += 1.0
+                    } else if voteDelta >= 2.0, !sameFranchise, !strongAPISimilarity {
+                        // Penalise large quality gaps — scales with gap, capped at -4.5
+                        score -= min((voteDelta - 1.0) * 2.0, 4.5)
                     }
                 }
 
-                if item.voteAverage >= 7.5 {
+                if candidateRating >= 7.5 {
                     score += 2.0
-                } else if item.voteAverage >= 6.5 {
+                } else if candidateRating >= 6.5 {
                     score += 0.8
-                } else if item.voteAverage > 0 {
+                } else if candidateRating >= 5.5 {
                     score -= 2.5
+                } else if candidateRating > 0 {
+                    score -= 5.0
                 }
 
                 if let voteCount = item.voteCount {
@@ -482,6 +507,8 @@ struct MediaDetail: Hashable {
                         score += 1.4
                     } else if voteCount < 25, !sameFranchise {
                         score -= 3.0
+                    } else if voteCount < 300, !sameFranchise, !strongAPISimilarity {
+                        score -= 1.5
                     }
                 }
 

@@ -15,6 +15,7 @@ import UserNotifications
 struct SearchView: View {
     @ObservedObject var model: VestigoModel
     @State private var searchHistory: [String] = []
+    @State private var showingThematicSearch = false
     @FocusState private var searchIsFocused: Bool
     private let maxSearchHistoryCount = 8
     
@@ -54,29 +55,40 @@ struct SearchView: View {
                         }
                     }
 
-                    VStack(alignment: .leading, spacing: 14) {
-                        Text("Charts")
-                            .sectionTitle()
-                        VStack(spacing: 10) {
+                    if #available(iOS 26.0, macOS 26.0, *) {
+                        if ThematicSearchService.isAvailable {
                             Button {
                                 searchIsFocused = false
                                 model.searchFieldIsFocused = false
-                                model.searchPath.append(.chart(.movie))
+                                showingThematicSearch = true
                             } label: {
-                                ChartTile(title: "Top Rated Movies", icon: "trophy.fill", colors: [Color(red: 0.55, green: 0.43, blue: 0.08), Color(red: 0.28, green: 0.20, blue: 0.04)])
-                            }
-                            .buttonStyle(.plain)
-                            .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                                HStack(spacing: 12) {
+                                    Image(systemName: "sparkles")
+                                        .font(.title3.bold())
+                                        .foregroundStyle(.primary)
 
-                            Button {
-                                searchIsFocused = false
-                                model.searchFieldIsFocused = false
-                                model.searchPath.append(.chart(.tv))
-                            } label: {
-                                ChartTile(title: "Top Rated TV", icon: "trophy.fill", colors: [Color(red: 0.12, green: 0.35, blue: 0.55), Color(red: 0.06, green: 0.16, blue: 0.30)])
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text("Don't know the name?")
+                                            .font(.subheadline.bold())
+                                            .foregroundStyle(.primary)
+                                        Text("Describe it and we'll find it")
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
+
+                                    Spacer()
+
+                                    Image(systemName: "chevron.right")
+                                        .font(.caption.bold())
+                                        .foregroundStyle(.secondary)
+                                }
+                                .padding(14)
+                                .liquidGlass(cornerRadius: 24)
                             }
                             .buttonStyle(.plain)
-                            .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                            .sheet(isPresented: $showingThematicSearch) {
+                                ThematicSearchView(model: model)
+                            }
                         }
                     }
 

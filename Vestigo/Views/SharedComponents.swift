@@ -109,26 +109,32 @@ struct MediaSection: View {
     @ObservedObject var model: VestigoModel
     var oneLineOnly = true
     var openItem: ((MediaItem) -> Void)? = nil
-    let openFull: () -> Void
-    
+    var openFull: (() -> Void)? = nil
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Button {
-                openFull()
-            } label: {
-                HStack(spacing: 8) {
-                    Text(title)
-                        .sectionTitle()
-                    
-                    Spacer(minLength: 0)
-                    
-                    Image(systemName: "chevron.right")
-                        .font(.caption.bold())
-                        .foregroundStyle(.secondary)
+            if let openFull {
+                Button {
+                    openFull()
+                } label: {
+                    HStack(spacing: 8) {
+                        Text(title)
+                            .sectionTitle()
+
+                        Spacer(minLength: 0)
+
+                        Image(systemName: "chevron.right")
+                            .font(.caption.bold())
+                            .foregroundStyle(.secondary)
+                    }
+                    .contentShape(Rectangle())
                 }
-                .contentShape(Rectangle())
+                .buttonStyle(.plain)
+            } else {
+                Text(title)
+                    .sectionTitle()
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .buttonStyle(.plain)
             
             if items.isEmpty {
                 if model.isLoading {

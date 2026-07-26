@@ -46,6 +46,7 @@ final class VestigoModel: ObservableObject {
     @Published var relatedMediaCache: [MediaKey: [RelatedMediaSection]] = [:]
     @Published var personCreditsCache: [Int: [MediaItem]] = [:]
     @Published var personDetails: [Int: PersonDetail] = [:]
+    private var archetypeInferenceCache: [MediaKey: ArchetypeInference] = [:]
     @Published var collectionRecommendations: [UUID: [MediaItem]] = [:]
     @Published var pendingRatingPromptItem: MediaItem?
     @Published var pendingRatingPromptValue: Double = 0
@@ -1072,10 +1073,13 @@ final class VestigoModel: ObservableObject {
             switch archetype {
             case .thriller:
                 append([53])
-            case .mystery, .mindBending:
+            case .mystery:
                 append([9648])
-                append([878])
                 append([53])
+            case .mindBending:
+                append([9648, 878])  // Mystery AND SciFi — more specific than either alone
+                append([9648, 53])   // Mystery AND Thriller
+                append([878])
             case .heist:
                 append([80])
                 append([53])
@@ -1084,8 +1088,8 @@ final class VestigoModel: ObservableObject {
                 append([28])
                 append([53])
             case .smartProblems:
-                append([18])
-                append([53])
+                append([18, 53])  // Drama AND Thriller — filters out pure romance/soap dramas
+                append([18, 80])  // Drama AND Crime — catches procedurals and legal dramas
             case .adventure:
                 append([12])
             case .thoughtfulSciFi:
@@ -1406,74 +1410,90 @@ final class VestigoModel: ObservableObject {
         return score
     }
 
+    private func cachedArchetypeInference(for item: MediaItem) -> ArchetypeInference? {
+        guard let detail = detailsCache[item.key], !detail.keywordNames.isEmpty else { return nil }
+        if let cached = archetypeInferenceCache[item.key] { return cached }
+        let input = ArchetypeInferenceInput(
+            genreIDs: item.genreIDs,
+            keywordNames: detail.keywordNames,
+            networkNames: detail.networkNames,
+            numberOfSeasons: detail.seasons.isEmpty ? nil : detail.seasons.count,
+            runtime: detail.runtime,
+            isInCollection: detail.tmdbCollectionID != nil,
+            isTV: item.kind == .tv
+        )
+        let inference = ArchetypeInferenceEngine.infer(from: input)
+        archetypeInferenceCache[item.key] = inference
+        return inference
+    }
+
     private func pickForMeArchetypeScore(item: MediaItem, archetype: PickForMeArchetype) -> Double {
         let genres = Set(item.genreIDs)
         let text = pickForMeSearchableText(for: item)
+        let inferenceBonus = (cachedArchetypeInference(for: item)?.confidence(for: archetype) ?? 0) * 5.0
 
+        let base: Double
         switch archetype {
         case .feelGood:
-            return pickForMeKeywordScore(text, ["optimistic", "heartwarming", "friendship", "family", "personal growth", "inspiring", "uplifting", "feel-good", "new beginning"]) * 1.8 +
+            base = pickForMeKeywordScore(text, ["optimistic", "heartwarming", "friendship", "family", "personal growth", "inspiring", "uplifting", "feel-good", "new beginning"]) * 1.8 +
                 (genres.intersection([35, 10751, 18, 12]).isEmpty ? 0 : 4.2) -
                 (genres.intersection([27, 10752]).isEmpty ? 0 : 1.8)
         case .comedy:
-            return pickForMeKeywordScore(text, ["satire", "buddy comedy", "workplace comedy", "funny", "comedian", "laugh"]) * 1.7 +
+            base = pickForMeKeywordScore(text, ["satire", "buddy comedy", "workplace comedy", "funny", "comedian", "laugh"]) * 1.7 +
                 (genres.contains(35) ? 5.0 : 0)
         case .mystery:
-            return pickForMeKeywordScore(text, ["detective", "investigation", "conspiracy", "murder mystery", "whodunnit", "clue", "secret"]) * 2.0 +
+            base = pickForMeKeywordScore(text, ["detective", "investigation", "conspiracy", "murder mystery", "whodunnit", "clue", "secret"]) * 2.0 +
                 (genres.intersection([9648, 53, 80]).isEmpty ? 0 : 4.6)
         case .thriller:
-            return pickForMeKeywordScore(text, ["danger", "survival", "suspense", "pursuit", "fugitive", "threat", "uncertainty", "crime"]) * 1.8 +
+            base = pickForMeKeywordScore(text, ["danger", "survival", "suspense", "pursuit", "fugitive", "threat", "uncertainty", "crime"]) * 1.8 +
                 (genres.intersection([53, 80, 28]).isEmpty ? 0 : 4.5)
         case .smartProblems:
-            var score = pickForMeKeywordScore(text, ["investigation", "journalist", "scientist", "engineer", "rescue mission", "courtroom", "legal", "historical event", "based on true", "expert", "team"]) * 2.0
-            score += genres.intersection([18, 53, 36]).isEmpty ? 0 : 4.0
-            if genres.contains(14) || genres.contains(27) { score -= 2.5 }
-            if genres.contains(35) && !genres.contains(18) { score -= 1.2 }
-            return score
+            let kwScore = pickForMeKeywordScore(text, ["investigation", "journalist", "scientist", "engineer", "rescue mission", "courtroom", "legal", "historical event", "based on true", "expert", "team", "strategic", "intelligence"]) * 2.0
+            var s = kwScore
+            let hasGenreMatch = !genres.intersection([18, 53, 36]).isEmpty
+            // Genre alone (no keyword signal) gives reduced credit — drama is too broad otherwise
+            s += hasGenreMatch ? (kwScore > 0 ? 4.0 : 1.5) : 0
+            if genres.contains(14) || genres.contains(27) { s -= 2.5 }
+            if genres.contains(35) && !genres.contains(18) { s -= 1.2 }
+            base = s
         case .mission:
-            return pickForMeKeywordScore(text, ["mission", "operation", "rescue", "espionage", "military objective", "survival objective", "special operations", "spy", "objective"]) * 2.0 +
+            base = pickForMeKeywordScore(text, ["mission", "operation", "rescue", "espionage", "military objective", "survival objective", "special operations", "spy", "objective"]) * 2.0 +
                 (genres.intersection([53, 28, 10752, 80, 36]).isEmpty ? 0 : 4.2)
         case .heist:
-            return pickForMeKeywordScore(text, ["heist", "robbery", "con artist", "con man", "con woman", "theft", "casino", "caper", "scheme", "steal"]) * 2.4 +
+            base = pickForMeKeywordScore(text, ["heist", "robbery", "con artist", "con man", "con woman", "theft", "casino", "caper", "scheme", "steal"]) * 2.4 +
                 (genres.intersection([80, 53, 35, 28]).isEmpty ? 0 : 4.0)
         case .adventure:
-            return pickForMeKeywordScore(text, ["treasure", "expedition", "exploration", "archaeology", "quest", "journey", "travel"]) * 2.0 +
+            base = pickForMeKeywordScore(text, ["treasure", "expedition", "exploration", "archaeology", "quest", "journey", "travel"]) * 2.0 +
                 (genres.intersection([12, 28, 10759]).isEmpty ? 0 : 4.4)
         case .characterRelationships:
-            return pickForMeKeywordScore(text, ["family", "friendship", "relationship", "relationships", "coming of age", "personal growth", "love"]) * 1.7 +
+            base = pickForMeKeywordScore(text, ["family", "friendship", "relationship", "relationships", "coming of age", "personal growth", "love"]) * 1.7 +
                 (genres.intersection([18, 35, 10749]).isEmpty ? 0 : 4.0)
         case .humanTriumph:
-            return pickForMeKeywordScore(text, pickForMeHumanTriumphSignals) * 2.1 +
+            base = pickForMeKeywordScore(text, pickForMeHumanTriumphSignals) * 2.1 +
                 (genres.intersection([18, 36]).isEmpty ? 0 : 3.2) -
                 (genres.intersection([27, 878, 14]).isEmpty ? 0 : 2.0)
         case .documentary:
-            return pickForMeKeywordScore(text, ["documentary", "docuseries", "true story", "real-life", "real life", "interview", "archive", "behind the scenes"]) * 2.1 +
+            base = pickForMeKeywordScore(text, ["documentary", "docuseries", "true story", "real-life", "real life", "interview", "archive", "behind the scenes"]) * 2.1 +
                 (genres.contains(99) ? 6.0 : 0)
         case .historical:
-            return pickForMeHistoricalEventScore(genres: genres, text: text) * 1.65
+            base = pickForMeHistoricalEventScore(genres: genres, text: text) * 1.65
         case .war:
-            return pickForMeKeywordScore(text, pickForMeWarDealBreakerSignals) * 2.1 +
+            base = pickForMeKeywordScore(text, pickForMeWarDealBreakerSignals) * 2.1 +
                 (genres.intersection(pickForMeWarGenreIDs).isEmpty ? 0 : 6.0)
         case .epicSpectacle:
-            var score = pickForMeKeywordScore(text, pickForMeEpicSpectacleSignals) * 2.4
-            if genres.contains(878) || genres.contains(10752) || genres.contains(10768) {
-                score += 4.8
-            }
-            if genres.contains(12) || genres.contains(14) {
-                score += 3.4
-            }
-            if genres.contains(28) {
-                score += text.containsAny(pickForMeEpicSpectacleSignals) ? 2.4 : 0.8
-            }
-            return score
+            var s = pickForMeKeywordScore(text, pickForMeEpicSpectacleSignals) * 2.4
+            if genres.contains(878) || genres.contains(10752) || genres.contains(10768) { s += 4.8 }
+            if genres.contains(12) || genres.contains(14) { s += 3.4 }
+            if genres.contains(28) { s += text.containsAny(pickForMeEpicSpectacleSignals) ? 2.4 : 0.8 }
+            base = s
         case .mindBending:
-            return pickForMeKeywordScore(text, ["memory", "nonlinear", "alternate reality", "twist", "puzzle", "mind-bending", "reality", "dream"]) * 2.1 +
+            base = pickForMeKeywordScore(text, ["memory", "nonlinear", "alternate reality", "twist", "puzzle", "mind-bending", "reality", "dream"]) * 2.1 +
                 (genres.intersection([9648, 878, 53]).isEmpty ? 0 : 4.0)
         case .horror:
-            return pickForMeKeywordScore(text, ["supernatural", "monster", "possession", "slasher", "psychological horror", "terror", "dread", "haunted"]) * 2.0 +
+            base = pickForMeKeywordScore(text, ["supernatural", "monster", "possession", "slasher", "psychological horror", "terror", "dread", "haunted"]) * 2.0 +
                 (genres.contains(27) ? 5.0 : 0)
         case .thoughtfulSciFi:
-            return pickForMeKeywordScore(text, ["artificial intelligence", "ethics", "future society", "technology", "consciousness", "philosophical", "experiment"]) * 2.1 +
+            base = pickForMeKeywordScore(text, ["artificial intelligence", "ethics", "future society", "technology", "consciousness", "philosophical", "experiment"]) * 2.1 +
                 (genres.intersection([878, 18]).isEmpty ? 0 : 4.1) -
                 (genres.intersection([28, 10752]).isEmpty ? 0 : 1.0)
         case .surprise:
@@ -1481,6 +1501,7 @@ final class VestigoModel: ObservableObject {
         case .noPreference:
             return 0
         }
+        return base + inferenceBonus
     }
 
     private func pickForMeArchetypeCombinationBonus(primaryScores: [Double]) -> Double {
@@ -1725,6 +1746,48 @@ final class VestigoModel: ObservableObject {
             }
         }
 
+        // Children's/family animation (Pixar, Disney kids, etc.) is a poor fit for deeper archetypes.
+        // Adult animation (Ghost in the Shell, Paprika, Waking Life) is fine and should not be penalized.
+        // Family/Kids genre (10751, 10762) combined with Animation (16) reliably identifies children's content.
+        let isChildrenAnimation = genres.contains(16) && !genres.intersection([10751, 10762]).isEmpty
+
+        // Thoughtful SciFi: kids animation almost never fits
+        if answers.archetypes.contains(.thoughtfulSciFi) || answers.secondaryArchetypes.contains(.thoughtfulSciFi) {
+            if isChildrenAnimation {
+                penalty += 12.0
+            }
+            let isHighAction = !genres.intersection([28, 10752]).isEmpty && !genres.contains(18) && !genres.contains(9648)
+            if isHighAction && !text.containsAny(["artificial intelligence", "consciousness", "ethics", "philosophical", "society", "human nature", "future of"]) {
+                penalty += 4.0
+            }
+        }
+
+        // Mind-Bending: kids animation and superhero blockbusters without specific mind-bending signals
+        if answers.archetypes.contains(.mindBending) || answers.secondaryArchetypes.contains(.mindBending) {
+            if isChildrenAnimation {
+                penalty += 8.0
+            }
+            // Action + Adventure without Mystery genre and no specific mind-bending text → likely a superhero blockbuster.
+            // "reality" and "mind" excluded — appear in nearly every blockbuster ("his will on all of reality", "Mind Stone").
+            if genres.contains(28) && genres.contains(12) && !genres.contains(9648) &&
+                !text.containsAny(["nonlinear", "alternate reality", "illusion", "paradox", "consciousness", "surreal", "mind-bending", "time loop", "unreliable"]) {
+                penalty += 7.0
+            }
+        }
+
+        // Smart Problems: romance content and kids animation without intellectual signals don't fit
+        if answers.archetypes.contains(.smartProblems) || answers.secondaryArchetypes.contains(.smartProblems) {
+            if genres.contains(10749) {
+                penalty += 5.0
+            }
+            if text.containsAny(["forbidden love", "telenovela", "second chance at love", "love triangle", "star-crossed lovers"]) {
+                penalty += 4.0
+            }
+            if isChildrenAnimation && !text.containsAny(["investigat", "scientist", "engineer", "journalist", "legal", "court", "expert"]) {
+                penalty += 4.5
+            }
+        }
+
         return penalty
     }
 
@@ -1814,6 +1877,7 @@ final class VestigoModel: ObservableObject {
         case .foreignLanguage:
             return item.originalLanguage != nil && item.originalLanguage != "en"
         case .longRuntime:
+            guard item.kind == .movie else { return false }
             let minutes = detailsCache[item.key]?.runtime ?? item.runtime
             return (minutes ?? 0) >= 180
         case .none:
@@ -2405,7 +2469,8 @@ final class VestigoModel: ObservableObject {
                 detailsCache[item.key] = detail.addingSimilarCandidates(
                     collectionItems,
                     source: item,
-                    sameFranchiseKeys: Set(collectionItems.map(\.key))
+                    sameFranchiseKeys: Set(collectionItems.map(\.key)),
+                    externalRatings: externalRatingsCache
                 )
             } catch { }
         }
@@ -2415,7 +2480,8 @@ final class VestigoModel: ObservableObject {
                 detailsCache[item.key] = detail.addingSimilarCandidates(
                     franchiseItems,
                     source: item,
-                    sameFranchiseKeys: Set(franchiseItems.map(\.key))
+                    sameFranchiseKeys: Set(franchiseItems.map(\.key)),
+                    externalRatings: externalRatingsCache
                 )
             } catch { }
         }
@@ -2427,7 +2493,8 @@ final class VestigoModel: ObservableObject {
                 detailsCache[item.key] = detail.addingSimilarCandidates(
                     franchiseItems,
                     source: item,
-                    sameFranchiseKeys: franchiseKeys
+                    sameFranchiseKeys: franchiseKeys,
+                    externalRatings: externalRatingsCache
                 )
             } catch { }
         }
@@ -2551,7 +2618,8 @@ final class VestigoModel: ObservableObject {
             sameFranchiseKeys: sameFranchiseKeys,
             strongAPISimilarityKeys: strongKeys,
             mediumAPISimilarityKeys: mediumKeys,
-            sharedContributorKeys: sharedContributorKeys
+            sharedContributorKeys: sharedContributorKeys,
+            externalRatings: externalRatingsCache
         )
 
         return Array(ranked.prefix(limit))
@@ -3428,5 +3496,11 @@ final class VestigoModel: ObservableObject {
         searchFilter = settings.defaultSearchFilter
         mediaFilter = settings.defaultHomeFilter
         saveLocal()
+    }
+
+    @available(iOS 26.0, macOS 26.0, *)
+    func thematicSearch(query: String, filter: MediaFilter) async throws -> [ThematicSearchResult] {
+        let service = ThematicSearchService(tmdb: tmdb)
+        return try await service.search(rawQuery: query, filter: filter)
     }
 }

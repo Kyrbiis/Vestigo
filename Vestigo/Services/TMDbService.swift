@@ -437,6 +437,54 @@ struct TMDbService {
         return []
     }
 
+    // MARK: - Thematic search support
+
+    func personIDs(for name: String) async throws -> [Int] {
+        let people = try await searchPeople(query: name)
+        return Array(people.prefix(3).map(\.id))
+    }
+
+    func keywordIDs(for term: String) async throws -> [Int] {
+        let response: TMDbKeywordsResponse = try await fetch(path: "/search/keyword", query: [
+            URLQueryItem(name: "query", value: term)
+        ])
+        return Array((response.results ?? []).prefix(3).map(\.id))
+    }
+
+    func discoverThematic(personIDs: [Int], keywordIDs: [Int], genreIDs: Set<Int>, filter: MediaFilter) async throws -> [MediaItem] {
+        switch filter {
+        case .movie:
+            return try await discoverThematicSingleMedia(media: "movie", personIDs: personIDs, keywordIDs: keywordIDs, genreIDs: genreIDs)
+        case .tv:
+            return try await discoverThematicSingleMedia(media: "tv", personIDs: personIDs, keywordIDs: keywordIDs, genreIDs: genreIDs)
+        case .both:
+            async let movies = discoverThematicSingleMedia(media: "movie", personIDs: personIDs, keywordIDs: keywordIDs, genreIDs: genreIDs)
+            async let series = discoverThematicSingleMedia(media: "tv", personIDs: personIDs, keywordIDs: keywordIDs, genreIDs: genreIDs)
+            return try await (movies + series).uniqued()
+        }
+    }
+
+    private func discoverThematicSingleMedia(media: String, personIDs: [Int], keywordIDs: [Int], genreIDs: Set<Int>) async throws -> [MediaItem] {
+        guard !personIDs.isEmpty || !keywordIDs.isEmpty || !genreIDs.isEmpty else { return [] }
+        var query: [URLQueryItem] = [
+            URLQueryItem(name: "sort_by", value: "vote_average.desc"),
+            URLQueryItem(name: "include_adult", value: "false"),
+            URLQueryItem(name: "include_video", value: "false"),
+            URLQueryItem(name: "vote_count.gte", value: media == "movie" ? "80" : "50"),
+            URLQueryItem(name: "region", value: "US")
+        ]
+        if !personIDs.isEmpty {
+            query.append(URLQueryItem(name: "with_people", value: personIDs.prefix(8).map(String.init).joined(separator: "|")))
+        }
+        if !keywordIDs.isEmpty {
+            query.append(URLQueryItem(name: "with_keywords", value: keywordIDs.prefix(8).map(String.init).joined(separator: "|")))
+        }
+        if !genreIDs.isEmpty {
+            query.append(URLQueryItem(name: "with_genres", value: genreIDs.map(String.init).sorted().joined(separator: ",")))
+        }
+        return try await fetchListPages(path: "/discover/\(media)", query: query, pages: 2)
+    }
+
     func discoverPickForMe(filter: MediaFilter, genreIDs: Set<Int>, runtime: PickForMeRuntime?, minimumRating: Double, includeAdult: Bool, sortBy: String) async throws -> [MediaItem] {
         switch filter {
         case .movie:
@@ -674,7 +722,7 @@ struct TMDbService {
             name: "append_to_response",
             value: item.kind == .movie
             ? "credits,similar,recommendations,keywords,watch/providers,release_dates,videos,external_ids"
-            : "credits,similar,recommendations,keywords,watch/providers,content_ratings,videos,external_ids"
+            : "credits,similar,recommendations,keywords,watch/providers,content_ratings,videos,external_ids,networks"
         )])
         
         guard item.kind == .tv else {

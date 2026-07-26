@@ -367,7 +367,7 @@ struct DetailView: View {
     
     @ViewBuilder private var similarSection: some View {
         if let similar = detail?.similar, !similar.isEmpty {
-            MediaSection(title: "Movies and series like this", items: similar, hideWatchedForUpcoming: false, model: model, oneLineOnly: true, openItem: openNestedItem) { }
+            MediaSection(title: "Movies and series like this", items: similar, hideWatchedForUpcoming: false, model: model, oneLineOnly: true, openItem: openNestedItem)
         }
     }
 

@@ -140,7 +140,8 @@ struct TMDbDetailResponse: Decodable {
     let videos: TMDbVideosResponse?
     let externalIDs: TMDbExternalIDsResponse?
     let watchProviders: TMDbWatchProvidersResponse?
-    
+    let networks: [TMDbNetworkDTO]?
+
     enum CodingKeys: String, CodingKey {
         case runtime
         case numberOfSeasons = "number_of_seasons"
@@ -160,8 +161,9 @@ struct TMDbDetailResponse: Decodable {
         case videos
         case externalIDs = "external_ids"
         case watchProviders = "watch/providers"
+        case networks
     }
-    
+
     init(
         runtime: Int?,
         numberOfSeasons: Int?,
@@ -180,7 +182,8 @@ struct TMDbDetailResponse: Decodable {
         keywords: TMDbKeywordsResponse?,
         videos: TMDbVideosResponse?,
         externalIDs: TMDbExternalIDsResponse?,
-        watchProviders: TMDbWatchProvidersResponse?
+        watchProviders: TMDbWatchProvidersResponse?,
+        networks: [TMDbNetworkDTO]? = nil
     ) {
         self.runtime = runtime
         self.numberOfSeasons = numberOfSeasons
@@ -200,8 +203,9 @@ struct TMDbDetailResponse: Decodable {
         self.videos = videos
         self.externalIDs = externalIDs
         self.watchProviders = watchProviders
+        self.networks = networks
     }
-    
+
     func replacingSeasons(_ hydratedSeasons: [SeasonDTO]) -> TMDbDetailResponse {
         TMDbDetailResponse(
             runtime: runtime,
@@ -221,7 +225,8 @@ struct TMDbDetailResponse: Decodable {
             keywords: keywords,
             videos: videos,
             externalIDs: externalIDs,
-            watchProviders: watchProviders
+            watchProviders: watchProviders,
+            networks: networks
         )
     }
     
@@ -246,12 +251,21 @@ struct TMDbDetailResponse: Decodable {
     }
 }
 
+struct TMDbNetworkDTO: Decodable {
+    let id: Int
+    let name: String
+}
+
 struct TMDbKeywordsResponse: Decodable {
     let keywords: [TMDbKeyword]?
     let results: [TMDbKeyword]?
 
     var keywordIDs: [Int] {
         (keywords ?? results ?? []).map(\.id)
+    }
+
+    var keywordNames: [String] {
+        (keywords ?? results ?? []).map(\.name)
     }
 }
 
