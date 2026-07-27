@@ -81,18 +81,23 @@ struct DetailView: View {
     }
     
     private var detailSheetSurface: some View {
-        VStack(spacing: 0) {
-            Capsule()
-                .fill(.white.opacity(0.46))
-                .frame(width: 48, height: 5)
-                .padding(.top, 12)
-                .padding(.bottom, 8)
-            
-            detailScroll
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .sheetLiquidGlass(cornerRadius: 48)
-        .ignoresSafeArea(edges: .bottom)
+        detailScroll
+            .safeAreaInset(edge: .top, spacing: 0) {
+                sheetGrabBar
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            .sheetLiquidGlass(cornerRadius: 48)
+            .ignoresSafeArea(edges: .bottom)
+    }
+
+    private var sheetGrabBar: some View {
+        Capsule()
+            .fill(.white.opacity(0.46))
+            .frame(width: 48, height: 5)
+            .frame(maxWidth: .infinity)
+            .padding(.top, 12)
+            .padding(.bottom, 8)
+            .background(.clear)
     }
     
     private var detailScroll: some View {
@@ -118,7 +123,7 @@ struct DetailView: View {
             .padding(.top, 18)
             .padding(.bottom, 110)
         }
-        .scrollClipDisabled(false)
+        .scrollClipDisabled()
         .scrollBounceBehavior(.basedOnSize, axes: .vertical)
         .scrollDismissesKeyboard(.immediately)
         .scrollIndicators(.hidden)
@@ -864,18 +869,19 @@ struct PersonDetailView: View {
     }
     
     private var personSheetSurface: some View {
-        VStack(spacing: 0) {
-            Capsule()
-                .fill(.white.opacity(0.46))
-                .frame(width: 48, height: 5)
-                .padding(.top, 12)
-                .padding(.bottom, 8)
-            
-            scrollContent
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .sheetLiquidGlass(cornerRadius: 54)
-        .ignoresSafeArea(edges: .bottom)
+        scrollContent
+            .safeAreaInset(edge: .top, spacing: 0) {
+                Capsule()
+                    .fill(.white.opacity(0.46))
+                    .frame(width: 48, height: 5)
+                    .frame(maxWidth: .infinity)
+                    .padding(.top, 12)
+                    .padding(.bottom, 8)
+                    .background(.clear)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            .sheetLiquidGlass(cornerRadius: 54)
+            .ignoresSafeArea(edges: .bottom)
     }
     
     private var scrollContent: some View {
@@ -1434,61 +1440,63 @@ struct AddToCollectionSheet: View {
     @State private var newName = ""
 
     var body: some View {
-        VStack(spacing: 0) {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                Text("Add to collection")
+                    .font(.title2.bold())
+
+                HStack {
+                    TextField("New collection", text: $newName)
+                        .padding(12)
+                        .liquidGlass(cornerRadius: 18)
+                    Button("Create") {
+                        model.createCollection(named: newName, with: item)
+                        newName = ""
+                    }
+                    .buttonStyle(.plain)
+                    .font(.subheadline.bold())
+                    .foregroundStyle(.primary)
+                    .frame(width: 86, height: 44)
+                    .liquidGlass(cornerRadius: 18)
+                }
+
+                ForEach(model.library.collections) { collection in
+                    let alreadyIn = collection.itemKeys.contains(item.key)
+                    Button {
+                        if alreadyIn { model.removeFromCollection(item, collectionID: collection.id) }
+                        else { model.addToCollection(item, collectionID: collection.id) }
+                    } label: {
+                        HStack {
+                            VStack(alignment: .leading) {
+                                Text(collection.name).font(.headline)
+                                Text(alreadyIn ? "Already in collection" : "Tap to add")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Image(systemName: alreadyIn ? "checkmark.circle.fill" : "plus.circle")
+                        }
+                        .padding(14)
+                        .liquidGlass(cornerRadius: 18)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(18)
+            .padding(.bottom, 110)
+        }
+        .scrollClipDisabled()
+        .scrollDismissesKeyboard(.immediately)
+        .scrollIndicators(.hidden)
+        .scrollViewTouchTuning()
+        .safeAreaInset(edge: .top, spacing: 0) {
             Capsule()
                 .fill(.white.opacity(0.46))
                 .frame(width: 48, height: 5)
+                .frame(maxWidth: .infinity)
                 .padding(.top, 12)
                 .padding(.bottom, 8)
-
-            ScrollView {
-                VStack(alignment: .leading, spacing: 14) {
-                    Text("Add to collection")
-                        .font(.title2.bold())
-
-                    HStack {
-                        TextField("New collection", text: $newName)
-                            .padding(12)
-                            .liquidGlass(cornerRadius: 18)
-                        Button("Create") {
-                            model.createCollection(named: newName, with: item)
-                            newName = ""
-                        }
-                        .buttonStyle(.plain)
-                        .font(.subheadline.bold())
-                        .foregroundStyle(.primary)
-                        .frame(width: 86, height: 44)
-                        .liquidGlass(cornerRadius: 18)
-                    }
-
-                    ForEach(model.library.collections) { collection in
-                        let alreadyIn = collection.itemKeys.contains(item.key)
-                        Button {
-                            if alreadyIn { model.removeFromCollection(item, collectionID: collection.id) }
-                            else { model.addToCollection(item, collectionID: collection.id) }
-                        } label: {
-                            HStack {
-                                VStack(alignment: .leading) {
-                                    Text(collection.name).font(.headline)
-                                    Text(alreadyIn ? "Already in collection" : "Tap to add")
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                }
-                                Spacer()
-                                Image(systemName: alreadyIn ? "checkmark.circle.fill" : "plus.circle")
-                            }
-                            .padding(14)
-                            .liquidGlass(cornerRadius: 18)
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-                .padding(18)
-                .padding(.bottom, 110)
-            }
-            .scrollDismissesKeyboard(.immediately)
-            .scrollIndicators(.hidden)
-            .scrollViewTouchTuning()
+                .background(.clear)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .sheetLiquidGlass(cornerRadius: 48)

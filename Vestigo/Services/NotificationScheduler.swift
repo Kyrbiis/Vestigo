@@ -205,6 +205,15 @@ final class NotificationScheduler {
         UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: ids)
     }
 
+    func cancelAllPendingNotifications(for item: MediaItem) {
+        cancelWatchlistNotifications(for: item)
+        let stableID = item.key.stableID
+        UNUserNotificationCenter.current().getPendingNotificationRequests { requests in
+            let ids = requests.filter { $0.identifier.contains(stableID) }.map(\.identifier)
+            UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: ids)
+        }
+    }
+
     // MARK: - New season (watched TV shows)
 
     func checkNewSeason(for item: MediaItem, seasons: [SeasonInfo], preferences: NotificationPreferences) {
@@ -371,8 +380,8 @@ final class NotificationScheduler {
             }
             scheduleCalendar(
                 id: notifID,
-                title: "\(item.title) is coming",
-                body: "A new installment from a franchise you follow releases \(relLabel).",
+                title: "New from a franchise you follow",
+                body: "\(item.title) releases \(relLabel).",
                 on: releaseDate, hour: 9,
                 deepLink: "vestigo://\(item.kind.rawValue)/\(item.id)",
                 center: UNUserNotificationCenter.current()
@@ -380,8 +389,8 @@ final class NotificationScheduler {
         } else {
             fireNow(
                 id: notifID,
-                title: "\(item.title) is out now",
-                body: "A new installment from a franchise you follow is available.",
+                title: "New from a franchise you follow",
+                body: "\(item.title) is now available.",
                 deepLink: "vestigo://\(item.kind.rawValue)/\(item.id)"
             )
         }
@@ -609,7 +618,7 @@ final class NotificationScheduler {
         content.sound = .default
         content.userInfo = ["deepLink": deepLink]
 
-        let trigger = UNTimeIntervalNotificationTrigger(timeInterval: 2, repeats: false)
+        let trigger = UNTimeIntervalNotificationTrigger(timeInterval: 1, repeats: false)
         UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: id, content: content, trigger: trigger))
     }
 }

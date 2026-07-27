@@ -440,8 +440,13 @@ struct TMDbService {
     // MARK: - Thematic search support
 
     func personIDs(for name: String) async throws -> [Int] {
-        let people = try await searchPeople(query: name)
-        return Array(people.prefix(3).map(\.id))
+        let response: TMDbPersonSearchResponse = try await fetch(path: "/search/person", query: [
+            URLQueryItem(name: "query", value: name),
+            URLQueryItem(name: "include_adult", value: "false")
+        ])
+        // Filter by popularity to avoid matching obscure people who share a name with well-known figures
+        let qualified = response.results.filter { ($0.popularity ?? 0) > 5.0 }
+        return Array(qualified.prefix(2).map(\.id))
     }
 
     func keywordIDs(for term: String) async throws -> [Int] {
@@ -451,20 +456,20 @@ struct TMDbService {
         return Array((response.results ?? []).prefix(3).map(\.id))
     }
 
-    func discoverThematic(personIDs: [Int], keywordIDs: [Int], genreIDs: Set<Int>, filter: MediaFilter) async throws -> [MediaItem] {
+    func discoverThematic(personIDs: [Int], keywordIDs: [Int], genreIDs: Set<Int>, filter: MediaFilter, releaseYear: Int? = nil) async throws -> [MediaItem] {
         switch filter {
         case .movie:
-            return try await discoverThematicSingleMedia(media: "movie", personIDs: personIDs, keywordIDs: keywordIDs, genreIDs: genreIDs)
+            return try await discoverThematicSingleMedia(media: "movie", personIDs: personIDs, keywordIDs: keywordIDs, genreIDs: genreIDs, releaseYear: releaseYear)
         case .tv:
-            return try await discoverThematicSingleMedia(media: "tv", personIDs: personIDs, keywordIDs: keywordIDs, genreIDs: genreIDs)
+            return try await discoverThematicSingleMedia(media: "tv", personIDs: personIDs, keywordIDs: keywordIDs, genreIDs: genreIDs, releaseYear: releaseYear)
         case .both:
-            async let movies = discoverThematicSingleMedia(media: "movie", personIDs: personIDs, keywordIDs: keywordIDs, genreIDs: genreIDs)
-            async let series = discoverThematicSingleMedia(media: "tv", personIDs: personIDs, keywordIDs: keywordIDs, genreIDs: genreIDs)
+            async let movies = discoverThematicSingleMedia(media: "movie", personIDs: personIDs, keywordIDs: keywordIDs, genreIDs: genreIDs, releaseYear: releaseYear)
+            async let series = discoverThematicSingleMedia(media: "tv", personIDs: personIDs, keywordIDs: keywordIDs, genreIDs: genreIDs, releaseYear: releaseYear)
             return try await (movies + series).uniqued()
         }
     }
 
-    private func discoverThematicSingleMedia(media: String, personIDs: [Int], keywordIDs: [Int], genreIDs: Set<Int>) async throws -> [MediaItem] {
+    private func discoverThematicSingleMedia(media: String, personIDs: [Int], keywordIDs: [Int], genreIDs: Set<Int>, releaseYear: Int? = nil) async throws -> [MediaItem] {
         guard !personIDs.isEmpty || !keywordIDs.isEmpty || !genreIDs.isEmpty else { return [] }
         var query: [URLQueryItem] = [
             URLQueryItem(name: "sort_by", value: "vote_average.desc"),
@@ -473,6 +478,10 @@ struct TMDbService {
             URLQueryItem(name: "vote_count.gte", value: media == "movie" ? "80" : "50"),
             URLQueryItem(name: "region", value: "US")
         ]
+        if let year = releaseYear {
+            let yearParam = media == "movie" ? "primary_release_year" : "first_air_date_year"
+            query.append(URLQueryItem(name: yearParam, value: String(year)))
+        }
         if !personIDs.isEmpty {
             query.append(URLQueryItem(name: "with_people", value: personIDs.prefix(8).map(String.init).joined(separator: "|")))
         }
@@ -538,7 +547,7 @@ struct TMDbService {
         ]
 
         if !genreIDs.isEmpty {
-            query.append(URLQueryItem(name: "with_genres", value: genreIDs.map(String.init).sorted().joined(separator: ",")))
+            query.append(URLQueryItem(name: "with_genres", value: genreIDs.map(String.init).sorted().joined(separator: "|")))
         }
 
         if minimumRating > 0 {
@@ -800,15 +809,17 @@ struct TMDbService {
     }
 
     func items(for keys: [MediaKey]) async throws -> [MediaItem] {
-        var items: [MediaItem] = []
-        for key in keys.prefix(40) where key.kind == .movie || key.kind == .tv {
-            do {
-                items.append(try await item(for: key))
-            } catch {
-                continue
+        let validKeys = keys.filter { $0.kind == .movie || $0.kind == .tv }.prefix(40)
+        return try await withThrowingTaskGroup(of: MediaItem?.self) { group in
+            for key in validKeys {
+                group.addTask { try? await self.item(for: key) }
             }
+            var results: [MediaItem] = []
+            for try await item in group {
+                if let item { results.append(item) }
+            }
+            return results.uniqued()
         }
-        return items.uniqued()
     }
     
     

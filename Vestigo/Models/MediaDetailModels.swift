@@ -427,7 +427,7 @@ struct MediaDetail: Hashable {
                 var score = 0.0
 
                 if sameFranchise {
-                    score += 80.0
+                    score += 250.0
                 }
 
                 if strongAPISimilarity {
@@ -456,13 +456,21 @@ struct MediaDetail: Hashable {
                 if let sourceYear, let itemYear = item.releaseYearNumber {
                     let diff = abs(sourceYear - itemYear)
                     if diff == 0 {
-                        score += 4.0
+                        score += 5.0
                     } else if diff <= 3 {
-                        score += 3.0
+                        score += 4.0
                     } else if diff <= 7 {
-                        score += 1.6
-                    } else if diff > 25, !sameFranchise {
-                        score -= 1.4
+                        score += 2.5
+                    } else if diff <= 15 {
+                        score += 0.5
+                    } else if diff <= 25, !sameFranchise {
+                        score -= 1.5
+                    } else if diff <= 40, !sameFranchise {
+                        score -= 5.0
+                    } else if diff <= 60, !sameFranchise {
+                        score -= 10.0
+                    } else if !sameFranchise {
+                        score -= 18.0
                     }
                 }
 
@@ -524,20 +532,31 @@ struct MediaDetail: Hashable {
                 return (item, score, inputIndex)
             }
 
-        return scoredItems
+        let sorted = scoredItems
             .sorted { lhs, rhs in
                 let lhsFranchise = sameFranchiseKeys.contains(lhs.item.key)
                 let rhsFranchise = sameFranchiseKeys.contains(rhs.item.key)
                 if lhsFranchise != rhsFranchise { return lhsFranchise }
+                if lhsFranchise { return lhs.score > rhs.score }
 
-                if lhsFranchise && rhsFranchise, lhs.score != rhs.score {
-                    return lhs.score > rhs.score
-                }
+                // For TMDb recommendations (strongAPI), score-sort so our thematic scoring
+                // re-orders them — puts closer matches first even without franchise data.
+                // For TMDb similar results (mediumAPI) and everything else, preserve TMDb's
+                // input order since their similarity ordering is better than ours for that tier.
+                let lhsStrong = strongAPISimilarityKeys.contains(lhs.item.key)
+                let rhsStrong = strongAPISimilarityKeys.contains(rhs.item.key)
+                if lhsStrong != rhsStrong { return lhsStrong }
+                if lhsStrong { return lhs.score > rhs.score }
 
                 return lhs.inputIndex < rhs.inputIndex
             }
             .map(\.item)
             .uniqued()
+
+        // 10+ franchise members: franchise context dominates, drop non-franchise tail.
+        // Fewer than 10: franchise floats to the top, non-franchise fills the rest.
+        let franchiseOnly = sorted.filter { sameFranchiseKeys.contains($0.key) }
+        return franchiseOnly.count >= 10 ? franchiseOnly : sorted
     }
 
     private struct RecommendationGenreVector {

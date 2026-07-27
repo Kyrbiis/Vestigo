@@ -107,17 +107,19 @@ struct ForYouView: View {
                 }
             }
             .safeAreaInset(edge: .bottom) {
-                Button {
-                    forYouPath.append(.pickForMe)
-                } label: {
-                    Label("Pick for me", systemImage: "sparkles")
-                        .font(.headline.bold())
-                        .padding(.horizontal, 16)
-                        .frame(height: 46)
-                        .liquidGlass(cornerRadius: 23)
+                if forYouPath.isEmpty {
+                    Button {
+                        forYouPath.append(.pickForMe)
+                    } label: {
+                        Label("Pick for me", systemImage: "sparkles")
+                            .font(.headline.bold())
+                            .padding(.horizontal, 16)
+                            .frame(height: 46)
+                            .liquidGlass(cornerRadius: 23)
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.bottom, 10)
                 }
-                .buttonStyle(.plain)
-                .padding(.bottom, 10)
             }
             .navigationDestination(for: ForYouRoute.self) { route in
                 switch route {
@@ -165,18 +167,18 @@ struct ForYouView: View {
             let sectionItems = filteredForYou(model.recommendations)
             if !sectionItems.isEmpty {
                 let sectionTitle = "For you"
-                MediaSection(title: sectionTitle, items: sectionItems, hideWatchedForUpcoming: false, model: model) {
+                MediaSection(title: sectionTitle, items: sectionItems, hideWatchedForUpcoming: false, model: model, openFull: {
                     forYouPath.append(.section(ForYouSection(title: sectionTitle, items: sectionItems)))
-                }
+                })
             }
         case .moreLikeLast:
             if let recentWatchedItem {
                 let sectionItems = filteredForYou(model.moreLikeLastWatched)
                 if !sectionItems.isEmpty {
                     let sectionTitle = "More like \(recentWatchedItem.title)"
-                    MediaSection(title: sectionTitle, items: sectionItems, hideWatchedForUpcoming: false, model: model) {
+                    MediaSection(title: sectionTitle, items: sectionItems, hideWatchedForUpcoming: false, model: model, openFull: {
                         forYouPath.append(.section(ForYouSection(title: sectionTitle, items: sectionItems)))
-                    }
+                    })
                 }
             }
         case .moreLikeFavourite:
@@ -184,42 +186,42 @@ struct ForYouView: View {
                 let sectionItems = filteredForYou(model.moreLikeFavourite)
                 if !sectionItems.isEmpty {
                     let sectionTitle = "More like a favourite \(favouriteItem.kind.label.lowercased()): \(favouriteItem.title)"
-                    MediaSection(title: sectionTitle, items: sectionItems, hideWatchedForUpcoming: false, model: model) {
+                    MediaSection(title: sectionTitle, items: sectionItems, hideWatchedForUpcoming: false, model: model, openFull: {
                         forYouPath.append(.section(ForYouSection(title: sectionTitle, items: sectionItems)))
-                    }
+                    })
                 }
             }
         case .watchlistPicks:
             if !watchlistPicks.isEmpty {
                 let sectionTitle = "From your watchlist"
                 let sectionItems = watchlistPicks
-                MediaSection(title: sectionTitle, items: sectionItems, hideWatchedForUpcoming: false, model: model) {
+                MediaSection(title: sectionTitle, items: sectionItems, hideWatchedForUpcoming: false, model: model, openFull: {
                     forYouPath.append(.section(ForYouSection(title: sectionTitle, items: sectionItems)))
-                }
+                })
             }
         case .seriesNext:
             let sectionItems = filteredForYou(model.seriesNext)
             if !sectionItems.isEmpty {
                 let sectionTitle = "Continue with related series"
-                MediaSection(title: sectionTitle, items: sectionItems, hideWatchedForUpcoming: false, model: model) {
+                MediaSection(title: sectionTitle, items: sectionItems, hideWatchedForUpcoming: false, model: model, openFull: {
                     forYouPath.append(.section(ForYouSection(title: sectionTitle, items: sectionItems)))
-                }
+                })
             }
         case .fromTopGenre:
             let sectionItems = filteredForYou(model.fromTopGenre)
             if !sectionItems.isEmpty {
                 let sectionTitle = "More from \(topGenreTitle)"
-                MediaSection(title: sectionTitle, items: sectionItems, hideWatchedForUpcoming: false, model: model) {
+                MediaSection(title: sectionTitle, items: sectionItems, hideWatchedForUpcoming: false, model: model, openFull: {
                     forYouPath.append(.section(ForYouSection(title: sectionTitle, items: sectionItems)))
-                }
+                })
             }
         case .trySomethingNew:
             let sectionItems = filteredForYou(model.trySomethingNewRecommendations)
             if !sectionItems.isEmpty {
                 let sectionTitle = "Try something new"
-                MediaSection(title: sectionTitle, items: sectionItems, hideWatchedForUpcoming: false, model: model) {
+                MediaSection(title: sectionTitle, items: sectionItems, hideWatchedForUpcoming: false, model: model, openFull: {
                     forYouPath.append(.section(ForYouSection(title: sectionTitle, items: sectionItems)))
-                }
+                })
             }
         }
     }

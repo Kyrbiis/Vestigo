@@ -108,7 +108,7 @@ struct ContentView: View {
         .alert("Daily IMDb Limit Reached", isPresented: $model.showOMDbLimitAlert) {
             Button("OK", role: .cancel) { }
         } message: {
-            Text("Your OMDb API key has made \(model.settings.omdbDailyRequestCount.formatted()) requests today, reaching its daily limit. IMDb ratings will not load until midnight. You can view or change your key tier in Settings → Content → OMDb API Keys.")
+            Text("Your OMDb API key has made \(model.settings.omdbDailyRequestCount.formatted()) requests today, reaching its daily limit. IMDb ratings will not load until midnight. You can view or change your key tier from the OMDb website.")
         }
     }
 }

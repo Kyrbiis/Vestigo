@@ -1066,10 +1066,35 @@ async function getTVDBFranchise(query: string, includeEntityDetails = false) {
   }
 }
 
+function todayUTC(): string {
+  return new Date().toISOString().slice(0, 10)
+}
+
+async function incrementGroqUsage() {
+  try {
+    const kv = await Deno.openKv()
+    await kv.atomic().sum(["groq_calls", todayUTC()], 1n).commit()
+  } catch {
+    // Non-fatal — don't fail the request if KV is unavailable
+  }
+}
+
+async function getGroqUsage(date: string): Promise<number> {
+  const kv = await Deno.openKv()
+  const entry = await kv.get<Deno.KvU64>(["groq_calls", date])
+  return Number(entry.value ?? 0n)
+}
+
 Deno.serve(async (req) => {
   const url = new URL(req.url)
 
   try {
+    if (url.pathname.endsWith("/groq-usage")) {
+      const date = url.searchParams.get("date") ?? todayUTC()
+      const count = await getGroqUsage(date)
+      return Response.json({ ok: true, date, count, limit: 14400 })
+    }
+
     if (url.pathname.endsWith("/health")) {
       return Response.json({
         ok: true,
@@ -1087,7 +1112,8 @@ Deno.serve(async (req) => {
           MOVIE_OF_THE_NIGHT_KEY: previewSecret("MOVIE_OF_THE_NIGHT_KEY"),
           WATCHMODE_API_KEY: previewSecret("WATCHMODE_API_KEY"),
           TASTEDIVE_API_KEY: previewSecret("TASTEDIVE_API_KEY"),
-          AMC_API_KEY: previewSecret("AMC_API_KEY")
+          AMC_API_KEY: previewSecret("AMC_API_KEY"),
+          GROQ_API_KEY: previewSecret("GROQ_API_KEY")
         }
       })
     }
@@ -1524,6 +1550,250 @@ Deno.serve(async (req) => {
       }))
 
       return Response.json({ ok: true, totalShowtimes: allShowtimes.length, matchedShowtimes: matching.length, theaters })
+    }
+
+    if (url.pathname.endsWith("/thematic-recommend")) {
+      const groqKey = Deno.env.get("GROQ_API_KEY")
+      if (!groqKey) {
+        return Response.json({ ok: false, error: "GROQ_API_KEY not configured" }, { status: 500 })
+      }
+
+      const body = await req.json().catch(() => null)
+      const query = typeof body?.query === "string" ? body.query.trim() : ""
+      const filter = typeof body?.filter === "string" ? body.filter : "both"
+
+      if (!query) {
+        return Response.json({ ok: false, error: "Missing query" }, { status: 400 })
+      }
+
+      const mediaScope = filter === "movie" ? "movies only" : filter === "tv" ? "TV shows only" : "movies and TV shows"
+
+      const systemPrompt = `Today's date is July 2026. The current year is 2026.
+You are a film and television recommendation expert. Think of this like a knowledgeable film-fan friend being asked: "find me something that is [genre_flavor] AND [mood]" — they want titles that genuinely satisfy ALL the stated preferences together.
+
+The query uses these fields:
+- genre_flavor: HARD setting/genre requirement — listed FIRST because it is the primary filter. Every single title you return MUST belong to or be prominently set in this genre. The description in parentheses is the exact definition. Example: "Space (set in outer space — spacecraft, astronauts, alien worlds)" means ONLY films/shows actually set in space — not Earth-based sci-fi, not just any futuristic story. If genre_flavor says Space, 100% of results must be space films. No exceptions.
+- mood: primary emotional archetype. "Feel-Good" = uplifting/heartwarming; "Comedy" = primarily comedic; "Mystery" = whodunit/secrets; "Thriller" = tension/suspense/danger; "Smart people solving problems" = experts using intelligence; "Mission" = specific objective/operation/survival; "Heist" = robbery/con/caper; "Adventure" = exploration/excitement; "Character and Relationships" = relationship dynamics/personal growth; "Human Triumph" = underdog/resilience; "Documentary" = nonfiction only; "Historical" = set during real historical events; "War" = combat/military; "Epic / Spectacle" = grand scale/visuals; "Mind-Bending" = twists/unreliable narrators; "Horror" = fear/dread; "Thought-Provoking Sci-Fi" = idea-driven sci-fi exploring ethics, technology, or consciousness
+- secondary: secondary mood layers to blend in alongside the primary mood
+- realism: "Real-world only" = no fantasy/sci-fi/superpowers; "Mostly realistic" = grounded; "Some sci-fi or fantasy" = speculative ok; "Completely fictional" = fantastical preferred
+- release_window: hard release date constraint with an explicit cutoff year — do not suggest any title outside this window, even by one year
+- source: preferred source material ("Based on a true story", "Based on a book", "Based on a game")
+- avoid: absolute exclusions — return ZERO titles from these categories, no exceptions
+
+Return ONLY a valid JSON object:
+{
+  "titles": [
+    { "title": "Interstellar", "year": 2014, "reason": "space travel, mind-bending time dilation" },
+    { "title": "2001: A Space Odyssey", "year": 1968, "reason": "philosophical space epic" }
+  ]
+}
+
+Rules:
+- Return 80-100 REAL, EXISTING titles. They must actually exist.
+- Return ${mediaScope}.
+- genre_flavor is NON-NEGOTIABLE: if genre_flavor is set, every single title must satisfy it — do not include anything that doesn't genuinely fit the genre_flavor definition, even if it's a perfect mood match.
+- HOLISTIC matching: after satisfying genre_flavor, titles should also satisfy mood and secondary as best as possible.
+- Lead with the strongest all-around matches. Think like a knowledgeable film fan, not a keyword matcher.
+- Strictly obey "avoid" — zero of these in the output, no exceptions.
+- Respect "realism": if "Real-world only", return nothing with magic, aliens, superpowers, or fantasy.
+- Prefer well-regarded, critically acclaimed titles. Avoid films that are widely considered poor quality.
+- reason: 3-6 words, lowercase, captures the core fit.
+- year: actual release year as a number, not a string.
+- Include both well-known and less obvious titles. Aim for variety — don't cluster around the same director or franchise.
+- Return ONLY the raw JSON object, nothing else.`
+
+      const groqResp = await fetchWithTimeout("https://api.groq.com/openai/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${groqKey}`
+        },
+        body: JSON.stringify({
+          model: "llama-3.3-70b-versatile",
+          max_tokens: 6000,
+          messages: [
+            { role: "system", content: systemPrompt },
+            { role: "user", content: query }
+          ]
+        })
+      }, 20000)
+
+      if (!groqResp.ok) {
+        const text = await groqResp.text()
+        return Response.json({ ok: false, error: `Groq error: ${groqResp.status} ${text}` }, { status: 502 })
+      }
+
+      const groqData = await groqResp.json()
+      const text = (groqData?.choices?.[0]?.message?.content ?? "").trim()
+
+      let parsed: any
+      try {
+        parsed = JSON.parse(text)
+      } catch {
+        return Response.json({ ok: false, error: "Failed to parse Groq response as JSON", raw: rawText }, { status: 502 })
+      }
+
+      const titles = Array.isArray(parsed?.titles) ? parsed.titles : []
+      await incrementGroqUsage()
+      return Response.json({ ok: true, titles })
+    }
+
+    if (url.pathname.endsWith("/groq-rerank")) {
+      const groqKey = Deno.env.get("GROQ_API_KEY")
+      if (!groqKey) {
+        return Response.json({ ok: false, error: "GROQ_API_KEY not configured" }, { status: 500 })
+      }
+
+      const body = await req.json().catch(() => null)
+      const query = typeof body?.query === "string" ? body.query.trim() : ""
+      const candidates = Array.isArray(body?.candidates) ? body.candidates : []
+
+      if (!query || candidates.length === 0) {
+        return Response.json({ ok: false, error: "Missing query or candidates" }, { status: 400 })
+      }
+
+      const candidateList = candidates.map((c: any, i: number) => {
+        const year = c.year ? ` (${c.year})` : ""
+        const overview = typeof c.overview === "string" && c.overview ? ` — ${c.overview.slice(0, 180)}` : ""
+        return `${i + 1}. ${c.title}${year}${overview}`
+      }).join("\n")
+
+      const rerankSystemPrompt = `Today's date is July 2026. The current year is 2026.
+You are a film and TV recommendation expert. The user has described their preferences. From the candidate list, pick and order only the titles that holistically satisfy ALL the stated preferences together — genre_flavor first, then mood and secondary.
+
+The preference format uses these fields:
+- genre_flavor: HARD setting/genre requirement — if present, ONLY titles that genuinely fit this genre belong in the output. Example: "Space (set in outer space — spacecraft, astronauts, alien worlds)" means only titles actually set in space. Exclude any candidate that doesn't satisfy genre_flavor, regardless of how well it fits the mood.
+- mood: primary emotional archetype. "Feel-Good" = uplifting/heartwarming; "Comedy" = primarily comedic; "Mystery" = whodunit/secrets; "Thriller" = tension/suspense/danger; "Smart people solving problems" = experts using intelligence; "Mission" = specific objective/operation/survival; "Heist" = robbery/con/caper; "Adventure" = exploration/excitement; "Character and Relationships" = relationship dynamics/personal growth; "Human Triumph" = underdog/resilience; "Epic / Spectacle" = grand scale/visuals; "Mind-Bending" = twists/unreliable narrators; "Horror" = fear/dread; "Thought-Provoking Sci-Fi" = idea-driven sci-fi; "War" = combat/military; "Historical" = stories during real historical events; "Documentary" = nonfiction only
+- secondary: secondary mood layers to blend with the primary
+- realism: how grounded vs fantastical
+- release_window: era preference
+- source: preferred source material type
+- avoid: absolute exclusions — do NOT include any title from these categories, zero exceptions
+
+Return ONLY a valid JSON object:
+{ "rankings": [{"title": "Inception", "year": 2010}, {"title": "Prisoners", "year": 2013}] }
+
+Rules:
+- ONLY include titles from the provided candidate list. Never invent or add titles.
+- genre_flavor is NON-NEGOTIABLE: exclude any candidate that doesn't genuinely fit, even if the mood match is excellent.
+- Order best all-around match first — think like a knowledgeable film fan, not a keyword scorer.
+- Return at most 35. Include all candidates that genuinely fit — don't be unnecessarily restrictive.
+- Strictly exclude anything in "avoid". Zero exceptions.
+- Return ONLY the raw JSON object, nothing else.`
+
+      const rerankResp = await fetchWithTimeout("https://api.groq.com/openai/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${groqKey}`
+        },
+        body: JSON.stringify({
+          model: "llama-3.3-70b-versatile",
+          max_tokens: 2048,
+          messages: [
+            { role: "system", content: rerankSystemPrompt },
+            { role: "user", content: `User preferences:\n${query}\n\nCandidates:\n${candidateList}` }
+          ]
+        })
+      }, 15000)
+
+      if (!rerankResp.ok) {
+        const text = await rerankResp.text()
+        return Response.json({ ok: false, error: `Groq error: ${rerankResp.status} ${text}` }, { status: 502 })
+      }
+
+      const rerankData = await rerankResp.json()
+      const rerankText = rerankData?.choices?.[0]?.message?.content ?? ""
+
+      let rerankParsed: any
+      try {
+        rerankParsed = JSON.parse(rerankText)
+      } catch {
+        return Response.json({ ok: false, error: "Failed to parse Groq response as JSON", raw: rerankText }, { status: 502 })
+      }
+
+      const rankings = Array.isArray(rerankParsed?.rankings) ? rerankParsed.rankings : []
+      await incrementGroqUsage()
+      return Response.json({ ok: true, rankings })
+    }
+
+    if (url.pathname.endsWith("/thematic-parse")) {
+      const groqKey = Deno.env.get("GROQ_API_KEY")
+      if (!groqKey) {
+        return Response.json({ ok: false, error: "GROQ_API_KEY not configured" }, { status: 500 })
+      }
+
+      const body = await req.json().catch(() => null)
+      const query = typeof body?.query === "string" ? body.query.trim() : ""
+
+      if (!query) {
+        return Response.json({ ok: false, error: "Missing query" }, { status: 400 })
+      }
+
+      const systemPrompt = `Today's date is July 2026. The current year is 2026.
+You extract structured search parameters from movie or TV show requests.
+Return ONLY a valid JSON object with exactly these fields (no extra text, no markdown):
+{
+  "similarToTitles": [],
+  "avoidSimilarToTitles": [],
+  "people": [],
+  "positiveThemes": [],
+  "negativeThemes": [],
+  "genres": [],
+  "excludedGenres": [],
+  "releaseYear": null
+}
+
+Rules:
+- Use your full real-world knowledge to identify people, events, and subjects from indirect descriptions.
+  Examples: "sprinter at the 1936 Olympics" → people: ["Jesse Owens"]
+            "Homer's poem" → people: ["Homer"], similarToTitles: ["The Odyssey"], positiveThemes: ["epic", "ancient Greece", "hero's journey"]
+            "the painter who cut off his ear" → people: ["Vincent van Gogh"]
+            "Nolan's mind-bending dream film" → similarToTitles: ["Inception"], people: ["Christopher Nolan"]
+- Only populate similarToTitles when the user explicitly names a title OR you can directly identify the specific work they mean.
+- "alien" as a common noun → positiveThemes: ["alien", "extraterrestrial"], genres: ["sci-fi"]. Only similarToTitles: ["Alien"] if user explicitly means the Ridley Scott franchise.
+- "animated" / "cartoon" / "anime" → genres: ["animation"]
+- "live action version" of an animated story → excludedGenres: ["animation"], animated source in similarToTitles (e.g. "live action Moana" → similarToTitles: ["Moana"], excludedGenres: ["animation"])
+- "not animated" / "live action" → excludedGenres: ["animation"]
+- "released this year" / "from this year" → releaseYear: 2026
+- Specific year like "from 2019" → releaseYear: 2019
+- Vague eras like "last five years" or "from the 80s" → releaseYear: null
+- Infer themes from liked/disliked aspects: "I liked the heist planning" → positiveThemes: ["heist"]
+- Return ONLY the raw JSON object, nothing else.`
+
+      const groqResp = await fetchWithTimeout("https://api.groq.com/openai/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${groqKey}`
+        },
+        body: JSON.stringify({
+          model: "llama-3.3-70b-versatile",
+          max_tokens: 512,
+          messages: [
+            { role: "system", content: systemPrompt },
+            { role: "user", content: query }
+          ]
+        })
+      }, 15000)
+
+      if (!groqResp.ok) {
+        const text = await groqResp.text()
+        return Response.json({ ok: false, error: `Groq error: ${groqResp.status} ${text}` }, { status: 502 })
+      }
+
+      const groqData = await groqResp.json()
+      const text = groqData?.choices?.[0]?.message?.content ?? ""
+
+      let parsed: any
+      try {
+        parsed = JSON.parse(text)
+      } catch {
+        return Response.json({ ok: false, error: "Failed to parse Groq response as JSON", raw: text }, { status: 502 })
+      }
+
+      await incrementGroqUsage()
+      return Response.json({ ok: true, ...parsed })
     }
 
     if (url.pathname.endsWith("/brand-logo")) {

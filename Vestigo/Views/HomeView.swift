@@ -66,18 +66,18 @@ struct HomeView: View {
     private func homeCarouselView(for carousel: HomeCarousel) -> some View {
         switch carousel {
         case .trending:
-            MediaSection(title: carousel.title, items: model.trending, hideWatchedForUpcoming: false, model: model) {
+            MediaSection(title: carousel.title, items: model.trending, hideWatchedForUpcoming: false, model: model, openFull: {
                 model.homePath.append(.trending)
-            }
+            })
         case .newReleases:
-            MediaSection(title: carousel.title, items: model.newReleases, hideWatchedForUpcoming: false, model: model) {
+            MediaSection(title: carousel.title, items: model.newReleases, hideWatchedForUpcoming: false, model: model, openFull: {
                 model.homePath.append(.newReleases)
-            }
+            })
         case .upcoming:
             if model.settings.showUpcomingReleases, !model.upcoming.isEmpty {
-                MediaSection(title: carousel.title, items: model.upcoming, hideWatchedForUpcoming: true, model: model) {
+                MediaSection(title: carousel.title, items: model.upcoming, hideWatchedForUpcoming: true, model: model, openFull: {
                     model.homePath.append(.upcoming)
-                }
+                })
             }
         }
     }

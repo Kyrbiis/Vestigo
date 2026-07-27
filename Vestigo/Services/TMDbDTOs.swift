@@ -11,9 +11,10 @@ struct TMDbPersonSearchDTO: Decodable {
     let name: String
     let knownForDepartment: String?
     let profilePath: String?
-    
+    let popularity: Double?
+
     enum CodingKeys: String, CodingKey {
-        case id, name
+        case id, name, popularity
         case knownForDepartment = "known_for_department"
         case profilePath = "profile_path"
     }

@@ -1424,67 +1424,69 @@ struct StreamingServicesSetupSheet: View {
     let isOnboarding: Bool
 
     var body: some View {
-        VStack(spacing: 0) {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 24) {
+                HStack(alignment: .center) {
+                    if isOnboarding {
+                        Image(systemName: "play.tv.fill")
+                            .font(.title3)
+                            .foregroundStyle(model.settings.accentColor)
+                    }
+                    Text(isOnboarding ? "Your Streaming Services" : "Streaming Services")
+                        .font(.title2.bold())
+                    Spacer()
+                    if isOnboarding {
+                        HStack(spacing: 16) {
+                            Button("Skip") { model.completeStreamingSetup() }
+                                .foregroundStyle(.secondary)
+                            Button("Done") { model.completeStreamingSetup() }
+                                .fontWeight(.semibold)
+                                .foregroundStyle(model.settings.accentColor)
+                        }
+                    }
+                }
+
+                if isOnboarding {
+                    Text("Select what you subscribe to. Vestigo will put these at the top of where-to-watch lists and can alert you when your saved titles arrive on them.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+
+                StreamingServicesPicker(model: model)
+
+                if isOnboarding {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Toggle(isOn: Binding(
+                            get: { model.settings.notificationPreferences.notifyOnlyForSubscribedServices },
+                            set: { model.settings.notificationPreferences.notifyOnlyForSubscribedServices = $0; model.saveSettings() }
+                        )) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Only notify for my services")
+                                    .font(.headline.bold())
+                                Text("Streaming availability alerts will only fire when a saved title arrives on one of your selected services.")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        .tint(model.settings.accentColor)
+                    }
+                    .settingBubble()
+                }
+            }
+            .padding(18)
+            .padding(.bottom, 110)
+        }
+        .scrollClipDisabled()
+        .scrollDismissesKeyboard(.immediately)
+        .scrollIndicators(.hidden)
+        .safeAreaInset(edge: .top, spacing: 0) {
             Capsule()
                 .fill(.white.opacity(0.46))
                 .frame(width: 48, height: 5)
+                .frame(maxWidth: .infinity)
                 .padding(.top, 12)
                 .padding(.bottom, 8)
-
-            ScrollView {
-                VStack(alignment: .leading, spacing: 24) {
-                    HStack(alignment: .center) {
-                        if isOnboarding {
-                            Image(systemName: "play.tv.fill")
-                                .font(.title3)
-                                .foregroundStyle(model.settings.accentColor)
-                        }
-                        Text(isOnboarding ? "Your Streaming Services" : "Streaming Services")
-                            .font(.title2.bold())
-                        Spacer()
-                        if isOnboarding {
-                            HStack(spacing: 16) {
-                                Button("Skip") { model.completeStreamingSetup() }
-                                    .foregroundStyle(.secondary)
-                                Button("Done") { model.completeStreamingSetup() }
-                                    .fontWeight(.semibold)
-                                    .foregroundStyle(model.settings.accentColor)
-                            }
-                        }
-                    }
-
-                    if isOnboarding {
-                        Text("Select what you subscribe to. Vestigo will put these at the top of where-to-watch lists and can alert you when your saved titles arrive on them.")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                    }
-
-                    StreamingServicesPicker(model: model)
-
-                    if isOnboarding {
-                        VStack(alignment: .leading, spacing: 8) {
-                            Toggle(isOn: Binding(
-                                get: { model.settings.notificationPreferences.notifyOnlyForSubscribedServices },
-                                set: { model.settings.notificationPreferences.notifyOnlyForSubscribedServices = $0; model.saveSettings() }
-                            )) {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text("Only notify for my services")
-                                        .font(.headline.bold())
-                                    Text("Streaming availability alerts will only fire when a saved title arrives on one of your selected services.")
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                }
-                            }
-                            .tint(model.settings.accentColor)
-                        }
-                        .settingBubble()
-                    }
-                }
-                .padding(18)
-                .padding(.bottom, 110)
-            }
-            .scrollDismissesKeyboard(.immediately)
-            .scrollIndicators(.hidden)
+                .background(.clear)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .sheetLiquidGlass(cornerRadius: 48)
@@ -1656,45 +1658,47 @@ struct NotificationPreferencesSheet: View {
     let isOnboarding: Bool
 
     var body: some View {
-        VStack(spacing: 0) {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                HStack(alignment: .center) {
+                    Text("Notifications")
+                        .font(.title2.bold())
+                    Spacer()
+                    HStack(spacing: 16) {
+                        Button(isOnboarding ? "Not now" : "Cancel") {
+                            if isOnboarding { model.markNotificationPromptSeen() }
+                            dismiss()
+                        }
+                        .foregroundStyle(.secondary)
+                        Button("Done") {
+                            model.markNotificationPromptSeen()
+                            dismiss()
+                        }
+                        .fontWeight(.semibold)
+                        .foregroundStyle(model.settings.accentColor)
+                    }
+                }
+
+                Text("Vestigo can alert you about releases, trailers, where-to-watch updates, new seasons, and franchise continuations. You can enable, disable, or tune each notification type anytime in Settings.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+
+                NotificationPreferencesContent(model: model, isOnboarding: isOnboarding)
+            }
+            .padding(18)
+            .padding(.bottom, 110)
+        }
+        .scrollClipDisabled()
+        .scrollDismissesKeyboard(.immediately)
+        .scrollIndicators(.hidden)
+        .safeAreaInset(edge: .top, spacing: 0) {
             Capsule()
                 .fill(.white.opacity(0.46))
                 .frame(width: 48, height: 5)
+                .frame(maxWidth: .infinity)
                 .padding(.top, 12)
                 .padding(.bottom, 8)
-
-            ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
-                    HStack(alignment: .center) {
-                        Text("Notifications")
-                            .font(.title2.bold())
-                        Spacer()
-                        HStack(spacing: 16) {
-                            Button(isOnboarding ? "Not now" : "Cancel") {
-                                if isOnboarding { model.markNotificationPromptSeen() }
-                                dismiss()
-                            }
-                            .foregroundStyle(.secondary)
-                            Button("Done") {
-                                model.markNotificationPromptSeen()
-                                dismiss()
-                            }
-                            .fontWeight(.semibold)
-                            .foregroundStyle(model.settings.accentColor)
-                        }
-                    }
-
-                    Text("Vestigo can alert you about releases, trailers, where-to-watch updates, new seasons, and franchise continuations. You can enable, disable, or tune each notification type anytime in Settings.")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-
-                    NotificationPreferencesContent(model: model, isOnboarding: isOnboarding)
-                }
-                .padding(18)
-                .padding(.bottom, 110)
-            }
-            .scrollDismissesKeyboard(.immediately)
-            .scrollIndicators(.hidden)
+                .background(.clear)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .sheetLiquidGlass(cornerRadius: 48)
@@ -2089,8 +2093,35 @@ private struct DevToolsPanel: View {
     @State private var isRestartingConnection = false
     @State private var restartResult: String = ""
 
+    @State private var groqCallCount: Int = 0
+    @State private var isLoadingGroqUsage = false
+
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
+
+            // MARK: Groq Usage
+            devSectionLabel("Groq (Describe It)")
+
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("Today's calls (UTC)")
+                        .font(.subheadline)
+                    Spacer()
+                    Text("\(groqCallCount) / \(ThematicSearchService.dailyLimit.formatted())")
+                        .font(.caption.bold().monospacedDigit())
+                        .foregroundStyle(groqCallCount > 12_000 ? .red : groqCallCount > 8_000 ? .orange : .secondary)
+                }
+                ProgressView(value: Double(groqCallCount), total: Double(ThematicSearchService.dailyLimit))
+                    .tint(groqCallCount > 12_000 ? .red : groqCallCount > 8_000 ? .orange : model.settings.accentColor)
+                Button(isLoadingGroqUsage ? "Loading…" : "Refresh") {
+                    fetchGroqUsage()
+                }
+                .font(.caption.bold())
+                .foregroundStyle(model.settings.accentColor)
+                .disabled(isLoadingGroqUsage)
+            }
+            .settingBubble()
+            .onAppear { fetchGroqUsage() }
 
             // MARK: Snapshots
             devSectionLabel("Snapshots")
@@ -2517,6 +2548,19 @@ private struct DevToolsPanel: View {
                     restartResult = "✗ \(error.localizedDescription) (\(ms)ms)"
                     isRestartingConnection = false
                 }
+            }
+        }
+    }
+
+    private func fetchGroqUsage() {
+        isLoadingGroqUsage = true
+        Task {
+            defer { Task { @MainActor in isLoadingGroqUsage = false } }
+            guard let url = URL(string: "https://mtttuyvpjyugudkevchj.supabase.co/functions/v1/vestigo-api/groq-usage") else { return }
+            guard let (data, _) = try? await URLSession.shared.data(from: url) else { return }
+            struct Resp: Decodable { let count: Int }
+            if let resp = try? JSONDecoder().decode(Resp.self, from: data) {
+                await MainActor.run { groqCallCount = resp.count }
             }
         }
     }

@@ -637,7 +637,7 @@ struct FranchiseDetailView: View {
     @State private var universeMediaFilter: MediaFilter = .both
     @State private var backendRecommendations: [MediaItem] = []
     @State private var backendRecommendationError: String?
-    @State private var isLoadingBackendRecommendations = false
+    @State private var isLoadingBackendRecommendations = true
     private let backendClient = VestigoBackendClient()
 
     private var allItems: [MediaItem] {

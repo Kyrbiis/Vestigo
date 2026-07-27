@@ -4,6 +4,9 @@ import Combine
 #if canImport(UserNotifications)
 import UserNotifications
 #endif
+#if canImport(FoundationModels)
+import FoundationModels
+#endif
 
 @MainActor
 final class VestigoModel: ObservableObject {
@@ -105,6 +108,11 @@ final class VestigoModel: ObservableObject {
     // private var tasteDiveSimilarCache: [MediaKey: [MediaItem]] = [:]
     private var tmdbExpandedSimilarCache: [MediaKey: [MediaItem]] = [:]
     private var franchiseRecommendationCache: [MediaKey: [MediaItem]] = [:]
+    private var pickForMeThematicCache: [String: [MediaItem]] = [:]
+
+    // In-memory session state — survives tab switches but not app quit
+    var pickForMeSessionAnswers: PickForMeAnswers? = nil
+    var pickForMeSessionResults: [MediaItem] = []
 
     func refreshImages() {
         imageRefreshToken &+= 1
@@ -199,8 +207,7 @@ final class VestigoModel: ObservableObject {
     func shouldHideAsShortFilm(_ item: MediaItem, enabled: Bool) -> Bool {
         guard enabled else { return false }
         guard item.kind == .movie else { return false }
-        guard let runtime = detailsCache[item.key]?.runtime else { return false }
-
+        let runtime = detailsCache[item.key]?.runtime ?? item.runtime ?? 0
         return runtime > 0 && runtime <= 40
     }
 
@@ -319,13 +326,19 @@ final class VestigoModel: ObservableObject {
             object: NSUbiquitousKeyValueStore.default,
             queue: .main
         ) { [weak self] _ in
-            self?.handleExternalKVChange()
+            Task { @MainActor [weak self] in self?.handleExternalKVChange() }
         }
 
         await loadHome()
 
         scheduleWatchlistNotificationsOnStartup()
         NotificationScheduler.shared.scheduleNextBackgroundCheck()
+
+        #if os(iOS)
+        if let pendingURL = AppDelegate.pendingDeepLinkURL {
+            openNotificationDeepLink(pendingURL)
+        }
+        #endif
 
         Task {
             await syncFromCloudOnLaunch()
@@ -439,20 +452,29 @@ final class VestigoModel: ObservableObject {
     }
 
     func openNotificationDeepLink(_ deepLink: URL) {
-        guard deepLink.scheme == "vestigo" else { return }
-        let components = deepLink.pathComponents.filter { $0 != "/" }
-        guard components.count >= 2 else { return }
-
-        let kind: MediaKind = components[0] == "tv" ? .tv : .movie
-        guard let id = Int(components[1]) else { return }
+        #if os(iOS)
+        AppDelegate.pendingDeepLinkURL = nil
+        #endif
+        guard deepLink.scheme == "vestigo", let host = deepLink.host else { return }
+        let kind: MediaKind = host == "tv" ? .tv : .movie
+        let pathComponents = deepLink.pathComponents.filter { $0 != "/" }
+        guard let idStr = pathComponents.first, let id = Int(idStr), id > 0 else { return }
         let key = MediaKey(id: id, kind: kind)
 
-        if let cached = library.items[key] ?? trending.first(where: { $0.key == key }) ?? popular.first(where: { $0.key == key }) ?? newReleases.first(where: { $0.key == key }) ?? upcoming.first(where: { $0.key == key }) {
+        if let cached = library.items[key]
+            ?? trending.first(where: { $0.key == key })
+            ?? popular.first(where: { $0.key == key })
+            ?? newReleases.first(where: { $0.key == key })
+            ?? upcoming.first(where: { $0.key == key }) {
             selectedItem = cached
             return
         }
 
-        errorText = "Open the item from Search or Watchlist to refresh this notification."
+        Task {
+            if let items = try? await tmdb.items(for: [key]), let item = items.first {
+                selectedItem = item
+            }
+        }
     }
     
     func loadHome() async {
@@ -666,7 +688,7 @@ final class VestigoModel: ObservableObject {
 
         func notInterestedDownweight(for candidate: MediaItem) -> Double {
             if library.isNotInterested(candidate.key) {
-                return 0.15
+                return 0.03
             }
 
             guard !notInterestedSeeds.isEmpty else { return 1.0 }
@@ -876,75 +898,92 @@ final class VestigoModel: ObservableObject {
 
     func pickForMeRecommendations(for answers: PickForMeAnswers) async -> [MediaItem] {
         let effectiveFilter = answers.effectiveMediaFilter
-        let wantsMainstreamResults = answers.recommendationType == .crowdPleaser
         let wantsNewReleaseResults = answers.releaseAge == .newReleases
-        let discoveryGenreIDs = pickForMeDiscoveryGenreIDs(for: answers)
         var sourceMaterialCandidateKeys: Set<MediaKey> = []
-        var candidates = (
-            recommendations +
-            moreLikeLastWatched +
-            moreLikeFavourite +
-            fromTopGenre +
-            seriesNext +
-            library.watchlistItems
-        )
-        .uniqued()
+        var sourceMaterialItems: [MediaItem] = []
 
-        if wantsMainstreamResults {
-            candidates.append(contentsOf: popular + trending)
-        }
+        // Groq runs in parallel with source material discovery
+        let thematicQuery = answers.pickForMeGroqFullQuery ?? answers.pickForMeThematicQuery
 
-        if wantsNewReleaseResults {
-            candidates.append(contentsOf: newReleases)
-        }
-
-        if wantsMainstreamResults || wantsNewReleaseResults {
-            candidates.append(contentsOf: trySomethingNewRecommendations)
-        }
-
-        do {
-            let discovered = try await tmdb.discoverPickForMe(
-                filter: effectiveFilter,
-                genreIDs: discoveryGenreIDs,
-                runtime: answers.runtime,
-                minimumRating: 0,
-                includeAdult: !settings.hideAdultResults,
-                sortBy: wantsMainstreamResults ? "popularity.desc" : "vote_average.desc"
-            )
-            candidates.append(contentsOf: discovered)
-        } catch { }
-
-        for supplementalGenreIDs in pickForMeSupplementalDiscoveryGenreIDs(for: answers) {
-            do {
-                let discovered = try await tmdb.discoverPickForMe(
-                    filter: effectiveFilter,
-                    genreIDs: supplementalGenreIDs,
-                    runtime: answers.runtime,
-                    minimumRating: 0,
-                    includeAdult: !settings.hideAdultResults,
-                    sortBy: wantsMainstreamResults ? "popularity.desc" : "vote_average.desc"
-                )
-                candidates.append(contentsOf: discovered)
-            } catch { }
+        let thematicTask = Task { [weak self] () -> [MediaItem] in
+            guard let self, let query = thematicQuery else { return [] }
+            return await self.pickForMeThematicCandidates(query: query, filter: effectiveFilter)
         }
 
         if let sourceMaterial = answers.sourceMaterial, sourceMaterial != .noPreference {
             do {
-                let sourceMaterialCandidates = try await tmdb.discoverSourceMaterial(sourceMaterial, filter: effectiveFilter)
-                sourceMaterialCandidateKeys = Set(sourceMaterialCandidates.map(\.key))
-                candidates.append(contentsOf: sourceMaterialCandidates)
+                let sm = try await tmdb.discoverSourceMaterial(sourceMaterial, filter: effectiveFilter)
+                sourceMaterialCandidateKeys = Set(sm.map(\.key))
+                sourceMaterialItems = sm
             } catch { }
         }
 
-        let uniqueCandidates = candidates.uniqued()
+        let thematicCandidates = await thematicTask.value
+        let thematicCandidateKeys = Set(thematicCandidates.map(\.key))
+
+        let uniqueCandidates: [MediaItem]
+        if thematicCandidates.count >= 5 {
+            // Groq succeeded — use only its candidates plus hard supplemental preferences
+            var pool = thematicCandidates + sourceMaterialItems
+            if wantsNewReleaseResults {
+                pool.append(contentsOf: newReleases + trySomethingNewRecommendations)
+            }
+            uniqueCandidates = pool.uniqued()
+        } else {
+            // Groq failed or returned too few — fall back to local library + TMDb discovery
+            let discoveryGenreIDs = pickForMeDiscoveryGenreIDs(for: answers)
+            var fallback = (
+                recommendations +
+                moreLikeLastWatched +
+                moreLikeFavourite +
+                fromTopGenre +
+                seriesNext +
+                library.watchlistItems
+            ).uniqued()
+            if wantsNewReleaseResults {
+                fallback.append(contentsOf: newReleases + trySomethingNewRecommendations)
+            }
+            do {
+                let discovered = try await tmdb.discoverPickForMe(
+                    filter: effectiveFilter,
+                    genreIDs: discoveryGenreIDs,
+                    runtime: answers.runtime,
+                    minimumRating: 0,
+                    includeAdult: !settings.hideAdultResults,
+                    sortBy: "vote_average.desc"
+                )
+                fallback.append(contentsOf: discovered)
+            } catch { }
+            fallback.append(contentsOf: sourceMaterialItems)
+            uniqueCandidates = fallback.uniqued()
+        }
+
+        // Re-rank only among Groq's own suggestions — local candidates are fallback only
+        let rerankCandidates = thematicCandidates
+        let rerankTask = Task { [weak self] () -> [MediaKey: Int] in
+            guard let self, let query = thematicQuery, !rerankCandidates.isEmpty else { return [:] }
+            return await self.pickForMeGroqRerank(candidates: Array(rerankCandidates), query: query)
+        }
+
         await loadPickForMeStrictFilterDetails(for: uniqueCandidates, answers: answers)
+
+        // Load external ratings for all Groq candidates (RT penalty + accurate filter) and the first 30 overall candidates (IMDb where available, TMDb fallback via ratingSortValue)
+        await withTaskGroup(of: Void.self) { group in
+            let priorityItems = (thematicCandidates + uniqueCandidates.prefix(30)).uniqued()
+            for item in priorityItems where externalRatingsCache[item.key] == nil {
+                group.addTask { await self.loadExternalRatings(item) }
+            }
+        }
 
         let filtered = uniqueCandidates
             .uniqued()
             .filter { item in
-                guard !library.isWatched(item.key) else { return false }
+                guard !library.isNeverShowAgain(item.key) else { return false }
                 guard !settings.hideUpcomingFromRecommended || !item.isUpcoming else { return false }
                 guard effectiveFilter == .both || item.kind.rawValue == effectiveFilter.rawValue else { return false }
+
+                // Exclude obscure titles with very few votes — prevents tag-matched noise from surfacing
+                if let count = item.voteCount, count < 200 { return false }
 
                 if !pickForMeRuntimeAllows(item, runtime: answers.runtime) {
                     return false
@@ -958,7 +997,7 @@ final class VestigoModel: ObservableObject {
                     return false
                 }
 
-                if !pickForMeRealismAllows(item, answers: answers) {
+                if !pickForMeFictionAllows(item, answers: answers) {
                     return false
                 }
 
@@ -978,6 +1017,13 @@ final class VestigoModel: ObservableObject {
                     return false
                 }
 
+                if let minimumRating = answers.minimumRating, let min = minimumRating.minimumRating {
+                    let rating = ratingSortValue(for: item)
+                    if rating > 0, rating < min - 0.5 {
+                        return false
+                    }
+                }
+
                 if !pickForMePrimaryArchetypeAllows(item, answers: answers) {
                     return false
                 }
@@ -985,9 +1031,9 @@ final class VestigoModel: ObservableObject {
                 return true
             }
 
-        let prepared = preparedResults(filtered, hideWatched: true)
+        let prepared = preparedResults(filtered, hideWatched: false)
         let visible = prepared.filter { item in
-            if shouldHideAsShortFilm(item, enabled: settings.hideShortFilmsFromRecommended) {
+            if shouldHideAsShortFilm(item, enabled: true) {
                 return false
             }
 
@@ -998,10 +1044,12 @@ final class VestigoModel: ObservableObject {
             return true
         }
 
+        let rerankScores = await rerankTask.value
+
         let sorted = visible
             .sorted { lhs, rhs in
-                let lhsScore = pickForMeScore(lhs, answers: answers, sourceMaterialCandidateKeys: sourceMaterialCandidateKeys)
-                let rhsScore = pickForMeScore(rhs, answers: answers, sourceMaterialCandidateKeys: sourceMaterialCandidateKeys)
+                let lhsScore = pickForMeScore(lhs, answers: answers, sourceMaterialCandidateKeys: sourceMaterialCandidateKeys, thematicCandidateKeys: thematicCandidateKeys, rerankScores: rerankScores)
+                let rhsScore = pickForMeScore(rhs, answers: answers, sourceMaterialCandidateKeys: sourceMaterialCandidateKeys, thematicCandidateKeys: thematicCandidateKeys, rerankScores: rerankScores)
 
                 if lhsScore != rhsScore {
                     return lhsScore > rhsScore
@@ -1052,6 +1100,10 @@ final class VestigoModel: ObservableObject {
                 genreIDs.insert(16)
             case .family:
                 genreIDs.formUnion([10751, 10762])
+            case .action:
+                genreIDs.insert(28)
+            case .comedy:
+                genreIDs.insert(35)
             case .space, .noPreference:
                 break
             }
@@ -1103,14 +1155,6 @@ final class VestigoModel: ObservableObject {
             }
         }
 
-        switch answers.realism {
-        case .someSpeculative:
-            append([878])
-            append([14])
-        case .mostlyRealistic, .realWorld, .completelyFictional, .anything, nil:
-            break
-        }
-
         return Array(genreIDs.prefix(6))
     }
 
@@ -1143,14 +1187,16 @@ final class VestigoModel: ObservableObject {
     }
 
     private func loadPickForMeStrictFilterDetails(for items: [MediaItem], answers: PickForMeAnswers) async {
-        let needsRuntime = answers.runtime != nil && answers.runtime != .any
-        let needsContentRating = !answers.contentRatings.isEmpty && !answers.contentRatings.contains(.any)
-        guard needsRuntime || needsContentRating else { return }
-
-        for item in items.prefix(120) where detailsCache[item.key] == nil {
-            do {
-                detailsCache[item.key] = try await tmdb.detail(for: item)
-            } catch { }
+        await withTaskGroup(of: Void.self) { group in
+            for item in items.prefix(120) where detailsCache[item.key] == nil {
+                group.addTask { [weak self] in
+                    guard let self else { return }
+                    do {
+                        let detail = try await self.tmdb.detail(for: item)
+                        await MainActor.run { self.detailsCache[item.key] = detail }
+                    } catch { }
+                }
+            }
         }
     }
 
@@ -1204,8 +1250,6 @@ final class VestigoModel: ObservableObject {
 
     private func pickForMeSourceMaterialTextMatches(_ text: String, sourceMaterial: PickForMeSourceMaterial) -> Bool {
         switch sourceMaterial {
-        case .trueStory:
-            return text.containsAny(["based on true", "based on actual", "true story", "true events", "real events", "real-life", "real life"])
         case .book:
             return text.containsAny(["based on the novel", "based on a novel", "based on the book", "based on a book", "adapted from the novel", "adapted from a novel", "book by", "novel by"])
         case .game:
@@ -1215,14 +1259,17 @@ final class VestigoModel: ObservableObject {
         }
     }
 
-    private func pickForMeRealismAllows(_ item: MediaItem, answers: PickForMeAnswers) -> Bool {
+    private func pickForMeFictionAllows(_ item: MediaItem, answers: PickForMeAnswers) -> Bool {
+        guard let pref = answers.fictionPreference, !pref.isAnyOption else { return true }
         let genres = Set(item.genreIDs)
         let text = pickForMeSearchableText(for: item)
 
-        switch answers.realism {
-        case .realWorld:
-            return !pickForMeIsSpeculative(genres: genres, text: text)
-        case .mostlyRealistic, .someSpeculative, .completelyFictional, .anything, nil:
+        switch pref {
+        case .nonFiction:
+            return genres.contains(99) || pickForMeIsNonfictionOrTrueEvent(genres: genres, text: text)
+        case .basedOnTrueStory:
+            return pickForMeIsNonfictionOrTrueEvent(genres: genres, text: text)
+        case .fiction, .noPreference:
             return true
         }
     }
@@ -1234,11 +1281,15 @@ final class VestigoModel: ObservableObject {
         return historicalScore > 0
     }
 
-    private func pickForMeScore(_ item: MediaItem, answers: PickForMeAnswers, sourceMaterialCandidateKeys: Set<MediaKey>) -> Double {
+    private func pickForMeScore(_ item: MediaItem, answers: PickForMeAnswers, sourceMaterialCandidateKeys: Set<MediaKey>, thematicCandidateKeys: Set<MediaKey> = [], rerankScores: [MediaKey: Int] = [:]) -> Double {
         let primaryAlignment = pickForMePrimaryArchetypeAlignmentScore(item, answers: answers)
         var score = primaryAlignment * 13.0
         let genreIDs = Set(item.genreIDs)
         let text = pickForMeSearchableText(for: item)
+
+        if library.isNotInterested(item.key) {
+            score -= 40.0
+        }
 
         if library.isNeverShowAgain(item.key) {
             score -= 250.0
@@ -1276,17 +1327,11 @@ final class VestigoModel: ObservableObject {
             sourceMaterialCandidateKeys: sourceMaterialCandidateKeys
         )
 
-        if let realism = answers.realism {
-            score += pickForMeRealismScore(genres: genreIDs, text: text, realism: realism)
-        }
-
-        if let recommendationType = answers.recommendationType {
-            score += pickForMeRecommendationTypeScore(for: item, recommendationType: recommendationType)
-        }
-
         if let minimumRating = answers.minimumRating {
             score += pickForMeMinimumRatingScore(for: item, minimumRating: minimumRating)
         }
+
+        score -= pickForMeRottenTomatoesPenalty(for: item)
 
         if item.genreIDs.contains(99) && !answers.wantsDocumentary {
             score -= pickForMeDocumentaryDownweight(for: answers)
@@ -1318,6 +1363,16 @@ final class VestigoModel: ObservableObject {
         }
 
         score += pickForMePersonalizationScore(for: item) * 0.18
+
+        // Groq specifically chose this item — it is the primary signal, not tag matching
+        if thematicCandidateKeys.contains(item.key) {
+            score += 20.0
+        }
+
+        // Groq re-ranked this item from the actual candidate pool — position-weighted bonus
+        if let rank = rerankScores[item.key] {
+            score += max(0.0, 16.0 - Double(rank - 1) * 1.5)
+        }
 
         return score
     }
@@ -1381,13 +1436,6 @@ final class VestigoModel: ObservableObject {
         if let sourceMaterial = answers.sourceMaterial, sourceMaterial != .noPreference {
             if sourceMaterialCandidateKeys.contains(item.key) || pickForMeSourceMaterialTextMatches(text, sourceMaterial: sourceMaterial) {
                 score += 5.0
-            }
-        }
-
-        if let realism = answers.realism, realism != .anything {
-            let realismScore = pickForMeRealismScore(genres: genres, text: text, realism: realism)
-            if realismScore > 0 {
-                score += 2.5
             }
         }
 
@@ -1460,7 +1508,7 @@ final class VestigoModel: ObservableObject {
             base = pickForMeKeywordScore(text, ["mission", "operation", "rescue", "espionage", "military objective", "survival objective", "special operations", "spy", "objective"]) * 2.0 +
                 (genres.intersection([53, 28, 10752, 80, 36]).isEmpty ? 0 : 4.2)
         case .heist:
-            base = pickForMeKeywordScore(text, ["heist", "robbery", "con artist", "con man", "con woman", "theft", "casino", "caper", "scheme", "steal"]) * 2.4 +
+            base = pickForMeKeywordScore(text, ["heist", "robbery", "con artist", "con man", "con woman", "theft", "casino", "caper", "scheme", "steal", "thief", "infiltrat", "extraction"]) * 2.4 +
                 (genres.intersection([80, 53, 35, 28]).isEmpty ? 0 : 4.0)
         case .adventure:
             base = pickForMeKeywordScore(text, ["treasure", "expedition", "exploration", "archaeology", "quest", "journey", "travel"]) * 2.0 +
@@ -1487,7 +1535,7 @@ final class VestigoModel: ObservableObject {
             if genres.contains(28) { s += text.containsAny(pickForMeEpicSpectacleSignals) ? 2.4 : 0.8 }
             base = s
         case .mindBending:
-            base = pickForMeKeywordScore(text, ["memory", "nonlinear", "alternate reality", "twist", "puzzle", "mind-bending", "reality", "dream"]) * 2.1 +
+            base = pickForMeKeywordScore(text, ["memory", "nonlinear", "alternate reality", "twist", "puzzle", "mind-bending", "reality", "dream", "subconscious", "perception", "illusion", "layers"]) * 2.1 +
                 (genres.intersection([9648, 878, 53]).isEmpty ? 0 : 4.0)
         case .horror:
             base = pickForMeKeywordScore(text, ["supernatural", "monster", "possession", "slasher", "psychological horror", "terror", "dread", "haunted"]) * 2.0 +
@@ -1508,23 +1556,6 @@ final class VestigoModel: ObservableObject {
         let strongMatches = primaryScores.filter { $0 >= 3.5 }.count
         guard strongMatches >= 2 else { return 0 }
         return Double(strongMatches - 1) * 2.4
-    }
-
-    private func pickForMeSeriousnessScore(genres: Set<Int>, text: String, seriousness: PickForMeSeriousness) -> Double {
-        switch seriousness {
-        case .lightFun:
-            return (genres.intersection([35, 12, 10751, 16]).isEmpty ? 0 : 3.0) - (genres.intersection([27, 10752]).isEmpty ? 0 : 2.5) - (text.containsAny(["grief", "tragedy", "terminal"]) ? 1.8 : 0)
-        case .mostlyFun:
-            return (genres.intersection([35, 12, 28]).isEmpty ? 0 : 2.2) - (genres.contains(27) ? 1.4 : 0)
-        case .balanced:
-            return 1.0
-        case .serious:
-            return genres.intersection([18, 53, 36, 10752]).isEmpty ? 0.4 : 2.6
-        case .intense:
-            return genres.intersection([53, 27, 28, 80, 10752]).isEmpty ? -0.5 : 3.4
-        case .noPreference:
-            return 0
-        }
     }
 
     private func pickForMeGenrePreferenceScore(genres: Set<Int>, text: String, genrePreference: PickForMeGenrePreference) -> Double {
@@ -1550,24 +1581,11 @@ final class VestigoModel: ObservableObject {
             return genres.contains(10751) || genres.contains(10762) ? 1.0 : 0
         case .horror:
             return genres.contains(27) ? 1.1 : 0
+        case .action:
+            return genres.contains(28) || text.containsAny(["action", "chase", "explosive", "combat", "fight"]) ? 1.3 : 0
+        case .comedy:
+            return genres.contains(35) || text.containsAny(["comedy", "comedic", "humorous", "funny"]) ? 1.2 : 0
         case .noPreference:
-            return 0
-        }
-    }
-
-    private func pickForMeRealismScore(genres: Set<Int>, text: String, realism: PickForMeRealism) -> Double {
-        let speculative = pickForMeIsSpeculative(genres: genres, text: text)
-        switch realism {
-        case .realWorld:
-            return speculative ? -6.0 : (genres.intersection([18, 36, 53, 10752]).isEmpty ? 1.2 : 3.0)
-        case .mostlyRealistic:
-            return speculative ? -2.2 : 2.0
-        case .someSpeculative:
-            return speculative ? 1.8 : 0.8
-        case .completelyFictional:
-            let nonfictionPenalty = pickForMeIsNonfictionOrTrueEvent(genres: genres, text: text) ? -8.0 : 0
-            return nonfictionPenalty + (speculative ? 2.0 : 1.4)
-        case .anything:
             return 0
         }
     }
@@ -1580,75 +1598,6 @@ final class VestigoModel: ObservableObject {
         genres.contains(99) || pickForMeHistoricalEventScore(genres: genres, text: text) > 0
     }
 
-    private func pickForMeActionScore(genres: Set<Int>, actionLevel: PickForMeActionLevel) -> Double {
-        let hasAction = !genres.intersection([28, 12, 53, 10752, 10759]).isEmpty
-        switch actionLevel {
-        case .none:
-            return hasAction ? -3.5 : 2.0
-        case .little:
-            return hasAction ? 0.8 : 1.4
-        case .moderate:
-            return hasAction ? 2.6 : -0.4
-        case .lots:
-            return hasAction ? 4.0 : -1.5
-        case .noPreference:
-            return 0
-        }
-    }
-
-    private func pickForMeEngagementScore(genres: Set<Int>, text: String, engagement: PickForMeEngagement) -> Double {
-        switch engagement {
-        case .easy:
-            return (genres.intersection([35, 12, 28, 10751]).isEmpty ? 0.4 : 2.4) - (text.containsAny(["conspiracy", "nonlinear", "mind-bending", "puzzle"]) ? 2.0 : 0)
-        case .moderate:
-            return genres.intersection([18, 53, 12, 80]).isEmpty ? 0.8 : 2.0
-        case .focused:
-            return (genres.intersection([9648, 53, 878, 80]).isEmpty ? 0 : 3.0) + (text.containsAny(["investigation", "conspiracy", "mystery", "puzzle", "secret"]) ? 2.0 : 0) - (genres.contains(35) && !genres.contains(18) ? 1.5 : 0)
-        case .noPreference:
-            return 0
-        }
-    }
-
-    private func pickForMeRecommendationTypeScore(for item: MediaItem, recommendationType: PickForMeRecommendationType) -> Double {
-        let rating = ratingSortValue(for: item)
-        let externalRatings = externalRatingsCache[item.key]
-        let rottenTomatoesRating = externalRatings?.rottenTomatoesRating
-        let imdbVoteCount = externalRatings?.imdbVoteCountValue
-        let hasStrongCriticScore = rottenTomatoesRating.map { $0 >= 85 } ?? false
-        let hasGoodCriticScore = rottenTomatoesRating.map { $0 >= 75 } ?? false
-        let isFromMainstreamLists = popular.contains(where: { $0.key == item.key }) || trending.contains(where: { $0.key == item.key }) || newReleases.contains(where: { $0.key == item.key })
-        let isPopularEnough = isFromMainstreamLists || (imdbVoteCount ?? 0) >= 100_000
-        let isNicheEnough = !isFromMainstreamLists && (imdbVoteCount.map { $0 < 35_000 } ?? true)
-
-        switch recommendationType {
-        case .crowdPleaser:
-            var score = 0.0
-            score += isPopularEnough ? 1.2 : -0.2
-            score += rating >= 7.2 ? 0.6 : rating >= 6.5 ? 0.25 : -0.3
-            if let rottenTomatoesRating {
-                score += rottenTomatoesRating >= 70 ? 0.4 : -0.2
-            }
-            return score
-        case .acclaimed:
-            if hasStrongCriticScore {
-                return 1.8
-            }
-            if hasGoodCriticScore {
-                return 1.2
-            }
-            return rating >= 8 ? 1.1 : rating >= 7.3 ? 0.6 : -0.25
-        case .hiddenGem:
-            var score = isNicheEnough ? 1.2 : -0.45
-            score += rating >= 7.2 ? 0.7 : rating >= 6.6 ? 0.3 : -0.3
-            if let rottenTomatoesRating {
-                score += rottenTomatoesRating >= 75 ? 0.45 : rottenTomatoesRating < 55 ? -0.25 : 0
-            }
-            return score
-        case .noPreference:
-            return 0
-        }
-    }
-
     private func pickForMeMinimumRatingScore(for item: MediaItem, minimumRating: PickForMeMinimumRating) -> Double {
         guard let minimum = minimumRating.minimumRating else { return 0 }
         let rating = ratingSortValue(for: item)
@@ -1658,14 +1607,23 @@ final class VestigoModel: ObservableObject {
         }
 
         if rating >= minimum - 0.4 {
-            return -0.4
+            return -6.0
         }
 
         if rating >= minimum - 0.8 {
-            return -1.8
+            return -18.0
         }
 
-        return -4.0
+        return -45.0
+    }
+
+    private func pickForMeRottenTomatoesPenalty(for item: MediaItem) -> Double {
+        guard let rt = externalRatingsCache[item.key]?.rottenTomatoesRating else { return 0 }
+        if rt < 20 { return 18.0 }
+        if rt < 30 { return 12.0 }
+        if rt < 40 { return 6.0 }
+        if rt < 50 { return 2.5 }
+        return 0
     }
 
     private func shouldPenalizeMissingContentRating(_ item: MediaItem, answers: PickForMeAnswers) -> Bool {
@@ -1683,7 +1641,7 @@ final class VestigoModel: ObservableObject {
             return 10.0
         }
 
-        if answers.sourceMaterial == .trueStory || answers.realism == .realWorld {
+        if answers.fictionPreference == .nonFiction || answers.fictionPreference == .basedOnTrueStory {
             return 5.0
         }
 
@@ -1691,14 +1649,9 @@ final class VestigoModel: ObservableObject {
     }
 
     private func pickForMeHistoricalWarDownweight(for answers: PickForMeAnswers) -> Double {
-        if answers.actionLevels.contains(.none) || answers.actionLevels.contains(.little) {
-            return 18.0
-        }
-
         if answers.archetypes.contains(.mission) || answers.secondaryArchetypes.contains(.mission) {
             return 8.0
         }
-
         return 14.0
     }
 
@@ -1866,12 +1819,10 @@ final class VestigoModel: ObservableObject {
                 (genres.contains(10402) && text.containsAny(["live", "tour", "concert", "performance"]))
         case .war:
             return !genres.intersection(pickForMeWarGenreIDs).isEmpty || text.containsAny(pickForMeWarDealBreakerSignals)
-        case .sciFiFantasy:
-            return pickForMeIsSpeculative(genres: genres, text: text)
         case .graphicViolence, .sexualContent:
             return false
         case .superhero:
-            return text.containsAny(["superhero", "super hero", "marvel", "dc comics", "batman", "superman", "spider-man", "spider man", "avengers", "x-men", "comic book"])
+            return text.containsAny(["superhero", "super hero", "marvel", "dc comics", "batman", "superman", "spider-man", "spider man", "avengers", "x-men", "comic book", "mutant", "wolverine", "iron man", "captain america", "thor", "supervillain", "super villain", "gotham", "kryptonite", "professor x", "black widow", "black panther", "deadpool", "aquaman", "wonder woman", "justice league", "guardians of the galaxy", "ant-man", "doctor strange"])
         case .verySad:
             return text.containsAny(["grief", "tragedy", "terminal", "mourning", "devastating", "death of"])
         case .foreignLanguage:
@@ -1880,6 +1831,10 @@ final class VestigoModel: ObservableObject {
             guard item.kind == .movie else { return false }
             let minutes = detailsCache[item.key]?.runtime ?? item.runtime
             return (minutes ?? 0) >= 180
+        case .sciFi:
+            return genres.intersection([878, 10765]).count > 0 || text.containsAny(["sci-fi", "science fiction", "dystopian future", "space station", "artificial intelligence", "robot uprising", "cyberpunk"])
+        case .heavyFantasy:
+            return genres.contains(14) || text.containsAny(["magic", "sorcery", "wizard", "witch", "dragon", "elf", "dwarf", "hobbit", "enchanted", "dark lord", "mystical realm", "mythical creature"])
         case .none:
             return false
         }
@@ -1945,7 +1900,159 @@ final class VestigoModel: ObservableObject {
     private func pickForMeSearchableText(for item: MediaItem) -> String {
         "\(item.title) \(item.overview)".lowercased()
     }
-    
+
+    private func pickForMeThematicCandidates(query: String, filter: MediaFilter) async -> [MediaItem] {
+        if let cached = pickForMeThematicCache[query] { return cached }
+        var results = await pickForMeGroqCandidates(query: query, filter: filter)
+        if results.isEmpty {
+            #if canImport(FoundationModels)
+            results = await pickForMeAppleIntelligenceCandidates(query: query, filter: filter)
+            #endif
+        }
+        pickForMeThematicCache[query] = results
+        return results
+    }
+
+    private func pickForMeGroqRerank(candidates: [MediaItem], query: String) async -> [MediaKey: Int] {
+        let candidateData: [[String: Any]] = candidates.map { item in
+            var d: [String: Any] = ["title": item.title]
+            if let year = thematicReleaseYear(of: item) { d["year"] = year }
+            if !item.overview.isEmpty { d["overview"] = String(item.overview.prefix(180)) }
+            return d
+        }
+        guard let body = try? JSONSerialization.data(withJSONObject: ["query": query, "candidates": candidateData]) else { return [:] }
+        var req = URLRequest(url: VestigoBackendConfiguration.baseURL.appending(path: "groq-rerank"))
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = body
+
+        guard let (data, response) = try? await URLSession.shared.data(for: req),
+              let http = response as? HTTPURLResponse, http.statusCode == 200,
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let rankings = json["rankings"] as? [[String: Any]] else { return [:] }
+
+        var result: [MediaKey: Int] = [:]
+        for (rankIndex, entry) in rankings.enumerated() {
+            guard let title = entry["title"] as? String else { continue }
+            let year = entry["year"] as? Int ?? 0
+            let norm = normalizeThematicTitle(title)
+            if let match = candidates.first(where: {
+                normalizeThematicTitle($0.title) == norm ||
+                (year > 0 && thematicReleaseYear(of: $0) == year && normalizeThematicTitle($0.title).contains(norm))
+            }) {
+                if result[match.key] == nil { result[match.key] = rankIndex + 1 }
+            }
+        }
+        return result
+    }
+
+    private func pickForMeGroqCandidates(query: String, filter: MediaFilter) async -> [MediaItem] {
+        let filterParams: [String]
+        switch filter {
+        case .movie: filterParams = ["movie"]
+        case .tv:    filterParams = ["tv"]
+        case .both:  filterParams = ["movie", "tv"]
+        }
+
+        // Build requests on MainActor before entering nonisolated task group to avoid Codable actor-isolation warnings
+        let requests: [(URLRequest, MediaFilter)] = filterParams.compactMap { filterParam in
+            guard let body = try? JSONSerialization.data(withJSONObject: ["query": query, "filter": filterParam]) else { return nil }
+            var req = URLRequest(url: VestigoBackendConfiguration.baseURL.appending(path: "thematic-recommend"))
+            req.httpMethod = "POST"
+            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            req.httpBody = body
+            return (req, filterParam == "tv" ? .tv : .movie)
+        }
+
+        return await withTaskGroup(of: [MediaItem].self) { group in
+            for (req, mediaFilter) in requests {
+                group.addTask {
+                    do {
+                        let (data, response) = try await URLSession.shared.data(for: req)
+                        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else { return [] }
+                        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                              let titles = json["titles"] as? [[String: Any]] else { return [] }
+                        let suggestions: [(String, Int)] = titles.compactMap { dict in
+                            guard let title = dict["title"] as? String else { return nil }
+                            return (title, dict["year"] as? Int ?? 0)
+                        }
+                        return await withTaskGroup(of: MediaItem?.self) { inner in
+                            for (title, year) in suggestions {
+                                inner.addTask { await self.resolveThematicTitle(title, year: year, filter: mediaFilter) }
+                            }
+                            var items: [MediaItem] = []
+                            for await item in inner { if let item { items.append(item) } }
+                            return items
+                        }
+                    } catch { return [] }
+                }
+            }
+            var all: [MediaItem] = []
+            for await items in group { all.append(contentsOf: items) }
+            return all
+        }
+    }
+
+    #if canImport(FoundationModels)
+    private func pickForMeAppleIntelligenceCandidates(query: String, filter: MediaFilter) async -> [MediaItem] {
+        guard SystemLanguageModel.default.isAvailable else { return [] }
+        let session = LanguageModelSession()
+        let mediaType: String
+        switch filter {
+        case .movie: mediaType = "films"
+        case .tv: mediaType = "TV shows"
+        case .both: mediaType = "films and TV shows"
+        }
+        let prompt = "List 15 \(query) \(mediaType). Format each title exactly as: Title (Year). One per line. Only the title and year — no other text."
+        guard let response = try? await session.respond(to: prompt) else { return [] }
+        return await resolveThematicTitles(from: response.content, filter: filter)
+    }
+    #endif
+
+    private func resolveThematicTitles(from text: String, filter: MediaFilter) async -> [MediaItem] {
+        let pattern = try? NSRegularExpression(pattern: #"(.+?)\s*\((\d{4})\)"#)
+        let nsText = text as NSString
+        let matches = pattern?.matches(in: text, range: NSRange(location: 0, length: nsText.length)) ?? []
+        let suggestions: [(String, Int)] = matches.compactMap { match in
+            guard match.numberOfRanges >= 3,
+                  let titleRange = Range(match.range(at: 1), in: text),
+                  let yearRange = Range(match.range(at: 2), in: text),
+                  let year = Int(text[yearRange]) else { return nil }
+            return (String(text[titleRange]).trimmingCharacters(in: .whitespacesAndNewlines), year)
+        }
+        return await withTaskGroup(of: MediaItem?.self) { group in
+            for (title, year) in suggestions {
+                group.addTask { await self.resolveThematicTitle(title, year: year, filter: filter) }
+            }
+            var results: [MediaItem] = []
+            for await item in group { if let item { results.append(item) } }
+            return results
+        }
+    }
+
+    private func resolveThematicTitle(_ title: String, year: Int, filter: MediaFilter) async -> MediaItem? {
+        guard let results = try? await tmdb.search(query: title, filter: filter), !results.isEmpty else { return nil }
+        let normalized = normalizeThematicTitle(title)
+        if let exact = results.first(where: { normalizeThematicTitle($0.title) == normalized }) { return exact }
+        if let yearMatch = results.first(where: { thematicReleaseYear(of: $0) == year }) { return yearMatch }
+        let first = results[0]
+        let firstNorm = normalizeThematicTitle(first.title)
+        if firstNorm.contains(normalized) || normalized.contains(firstNorm) { return first }
+        return nil
+    }
+
+    private func normalizeThematicTitle(_ s: String) -> String {
+        s.lowercased()
+            .replacingOccurrences(of: #"[^a-z0-9 ]"#, with: "", options: .regularExpression)
+            .replacingOccurrences(of: #"\b(the|a|an)\b"#, with: "", options: .regularExpression)
+            .components(separatedBy: .whitespaces).filter { !$0.isEmpty }.joined(separator: " ")
+    }
+
+    private func thematicReleaseYear(of item: MediaItem) -> Int? {
+        guard let date = item.releaseDate, date.count >= 4 else { return nil }
+        return Int(date.prefix(4))
+    }
+
     func updateSearch() {
         searchTask?.cancel()
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2459,7 +2566,7 @@ final class VestigoModel: ObservableObject {
         } catch { }
     }
     
-    func loadDetail(_ item: MediaItem) async {
+    func loadDetail(_ item: MediaItem, runNotificationChecks: Bool = true) async {
         if detailsCache[item.key] == nil {
             do { detailsCache[item.key] = try await tmdb.detail(for: item) } catch { }
         }
@@ -2489,13 +2596,17 @@ final class VestigoModel: ObservableObject {
             do {
                 let franchiseMembers = try await relatedMedia.franchiseMembers(imdbID: imdbID)
                 let franchiseKeys = Set(franchiseMembers.map(\.mediaKey))
-                let franchiseItems = try await tmdb.items(for: Array(franchiseKeys))
-                detailsCache[item.key] = detail.addingSimilarCandidates(
-                    franchiseItems,
-                    source: item,
-                    sameFranchiseKeys: franchiseKeys,
-                    externalRatings: externalRatingsCache
-                )
+                if !franchiseKeys.isEmpty {
+                    let franchiseItems = try await tmdb.items(for: Array(franchiseKeys))
+                    if let latestDetail = detailsCache[item.key] {
+                        detailsCache[item.key] = latestDetail.addingSimilarCandidates(
+                            franchiseItems,
+                            source: item,
+                            sameFranchiseKeys: franchiseKeys,
+                            externalRatings: externalRatingsCache
+                        )
+                    }
+                }
             } catch { }
         }
         await loadExternalRatings(item, priority: true)
@@ -2522,7 +2633,9 @@ final class VestigoModel: ObservableObject {
                 relatedMediaCache[item.key] = []
             }
         }
-        checkNotificationsAfterDetailLoad(item)
+        if runNotificationChecks {
+            checkNotificationsAfterDetailLoad(item)
+        }
     }
 
     private func checkNotificationsAfterDetailLoad(_ item: MediaItem) {
@@ -2533,7 +2646,7 @@ final class VestigoModel: ObservableObject {
         let isWatched = library.isWatched(item.key)
 
         if let detail = detailsCache[item.key] {
-            if isWatchlisted {
+            if isWatchlisted, !isWatched {
                 NotificationScheduler.shared.checkNewTrailer(
                     for: item, trailerCount: detail.trailers.count, preferences: prefs
                 )
@@ -2554,7 +2667,7 @@ final class VestigoModel: ObservableObject {
             }
         }
 
-        if isWatchlisted, let providers = providerCache[item.key] {
+        if isWatchlisted, !isWatched, let providers = providerCache[item.key] {
             NotificationScheduler.shared.checkProviderChange(
                 for: item, providers: providers, preferences: prefs,
                 subscribedServiceNames: settings.subscribedServiceNames
@@ -2572,7 +2685,6 @@ final class VestigoModel: ObservableObject {
         var sameFranchiseKeys = detail.sameFranchiseKeys
         let strongKeys = detail.strongAPISimilarityKeys
         let mediumKeys = detail.mediumAPISimilarityKeys
-        let sharedContributorKeys: Set<MediaKey> = []
 
         if item.kind == .movie {
             let collectionItems: [MediaItem]
@@ -2586,7 +2698,6 @@ final class VestigoModel: ObservableObject {
                 candidates.append(contentsOf: collectionItems)
                 sameFranchiseKeys.formUnion(collectionItems.map(\.key))
             } catch { }
-
         }
 
         do {
@@ -2598,8 +2709,10 @@ final class VestigoModel: ObservableObject {
         if let imdbID = detail.imdbID {
             do {
                 let franchiseKeys = Set(try await relatedMedia.franchiseMembers(imdbID: imdbID).map(\.mediaKey))
-                candidates.append(contentsOf: try await tmdb.items(for: Array(franchiseKeys)))
-                sameFranchiseKeys.formUnion(franchiseKeys)
+                if !franchiseKeys.isEmpty {
+                    sameFranchiseKeys.formUnion(franchiseKeys)
+                    candidates.append(contentsOf: try await tmdb.items(for: Array(franchiseKeys)))
+                }
             } catch { }
         }
 
@@ -2618,7 +2731,6 @@ final class VestigoModel: ObservableObject {
             sameFranchiseKeys: sameFranchiseKeys,
             strongAPISimilarityKeys: strongKeys,
             mediumAPISimilarityKeys: mediumKeys,
-            sharedContributorKeys: sharedContributorKeys,
             externalRatings: externalRatingsCache
         )
 
@@ -2786,6 +2898,9 @@ final class VestigoModel: ObservableObject {
         personCreditsCache = [:]
         personDetails = [:]
         collectionRecommendations = [:]
+        tmdbExpandedSimilarCache = [:]
+        franchiseRecommendationCache = [:]
+        pickForMeThematicCache = [:]
         clearHomeFeedCache()
     }
 
@@ -2832,6 +2947,9 @@ final class VestigoModel: ObservableObject {
            let imdbRating = externalRatingsCache[item.key]?.imdbRating {
             return imdbRating
         }
+        guard item.voteAverage > 0 else { return 0 }
+        // Don't trust a TMDb average backed by very few votes — it's statistically meaningless
+        if let count = item.voteCount, count < 100 { return 0 }
         return item.voteAverage
     }
     
@@ -2901,6 +3019,9 @@ final class VestigoModel: ObservableObject {
         
         if isNowWatched {
             generateDynamicCollections(from: item)
+            #if canImport(UserNotifications)
+            NotificationScheduler.shared.cancelAllPendingNotifications(for: item)
+            #endif
         }
         saveLocalSoon()
         
@@ -3498,9 +3619,9 @@ final class VestigoModel: ObservableObject {
         saveLocal()
     }
 
-    @available(iOS 26.0, macOS 26.0, *)
     func thematicSearch(query: String, filter: MediaFilter) async throws -> [ThematicSearchResult] {
         let service = ThematicSearchService(tmdb: tmdb)
         return try await service.search(rawQuery: query, filter: filter)
     }
 }
+

@@ -18,11 +18,14 @@ struct PickForMeView: View {
     @State private var step = 0
     @State private var results: [MediaItem] = []
     @State private var resultIndex = 0
+    @State private var resultDragOffset: CGFloat = 0
+    @State private var screenWidth: CGFloat = 393
     @State private var isLoading = false
     @State private var errorText: String?
     @State private var fallbackText: String?
     @State private var isReviewingAnswers = false
     @State private var isEditingAnswerFromReview = false
+    @State private var showingInfoSheet = false
 
     private var steps: [PickForMeStep] {
         PickForMeStep.steps(for: answers)
@@ -31,7 +34,13 @@ struct PickForMeView: View {
     init(model: VestigoModel, startingFilter: MediaFilter) {
         self.model = model
         self.startingFilter = startingFilter
-        self._answers = State(initialValue: PickForMeAnswers())
+        if let saved = model.pickForMeSessionAnswers {
+            self._answers = State(initialValue: saved)
+            self._results = State(initialValue: model.pickForMeSessionResults)
+            self._isReviewingAnswers = State(initialValue: true)
+        } else {
+            self._answers = State(initialValue: PickForMeAnswers())
+        }
     }
 
     var body: some View {
@@ -54,6 +63,8 @@ struct PickForMeView: View {
                             questionContent
                         } else {
                             resultContent
+                                .offset(x: resultDragOffset)
+                                .animation(.interactiveSpring(response: 0.3, dampingFraction: 0.8), value: resultDragOffset)
                         }
                     }
                     .padding(16)
@@ -74,6 +85,45 @@ struct PickForMeView: View {
                 }
             }
         }
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 30, coordinateSpace: .global)
+                .onChanged { value in
+                    guard !results.isEmpty, !isEditingAnswerFromReview, !isReviewingAnswers else { return }
+                    guard value.startLocation.x > 50 else { return }
+                    let dx = value.translation.width
+                    let dy = value.translation.height
+                    guard abs(dx) > abs(dy) * 0.7 else { return }
+                    resultDragOffset = dx * 0.75
+                }
+                .onEnded { value in
+                    guard !results.isEmpty, !isEditingAnswerFromReview, !isReviewingAnswers else {
+                        withAnimation(.spring(response: 0.3)) { resultDragOffset = 0 }
+                        return
+                    }
+                    guard value.startLocation.x > 50 else {
+                        withAnimation(.spring(response: 0.3)) { resultDragOffset = 0 }
+                        return
+                    }
+                    let dx = value.translation.width
+                    let dy = value.translation.height
+                    guard abs(dx) > abs(dy) * 1.5, abs(dx) > 50 else {
+                        withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) { resultDragOffset = 0 }
+                        return
+                    }
+                    let goRight = dx > 0
+                    let screenWidth = self.screenWidth
+                    withAnimation(.easeIn(duration: 0.15)) {
+                        resultDragOffset = goRight ? screenWidth : -screenWidth
+                    }
+                    Task { @MainActor in
+                        try? await Task.sleep(nanoseconds: 150_000_000)
+                        if goRight { showPreviousResult() } else { showNextResult() }
+                        resultDragOffset = goRight ? -screenWidth : screenWidth
+                        withAnimation(.easeOut(duration: 0.2)) { resultDragOffset = 0 }
+                    }
+                }
+        )
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { screenWidth = $0 }
         .navigationBarBackButtonHidden(true)
         .toolbar {
             ToolbarItem(placement: .topBarLeading) {
@@ -101,12 +151,6 @@ struct PickForMeView: View {
             if newValue.contains(.war) {
                 answers.dealBreakers.remove(.war)
             }
-            if answers.wantsSpeculative {
-                answers.dealBreakers.remove(.sciFiFantasy)
-            }
-            if !answers.shouldAskRealismQuestion {
-                answers.realism = nil
-            }
             if step >= steps.count {
                 step = max(steps.count - 1, 0)
             }
@@ -118,19 +162,8 @@ struct PickForMeView: View {
             if newValue.contains(.war) {
                 answers.dealBreakers.remove(.war)
             }
-            if answers.wantsSpeculative {
-                answers.dealBreakers.remove(.sciFiFantasy)
-            }
-            if !answers.shouldAskRealismQuestion {
-                answers.realism = nil
-            }
             if step >= steps.count {
                 step = max(steps.count - 1, 0)
-            }
-        }
-        .onChange(of: answers.genrePreferences) { _, _ in
-            if answers.wantsSpeculative {
-                answers.dealBreakers.remove(.sciFiFantasy)
             }
         }
         .onChange(of: answers.contentRatings) { _, _ in
@@ -142,8 +175,22 @@ struct PickForMeView: View {
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Pick for me")
-                .font(.largeTitle.bold())
+            HStack(alignment: .firstTextBaseline) {
+                Text("Pick for me")
+                    .font(.largeTitle.bold())
+                Spacer()
+                Button {
+                    showingInfoSheet = true
+                } label: {
+                    Image(systemName: "info.circle")
+                        .font(.title3)
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .sheet(isPresented: $showingInfoSheet) {
+                    PickForMeInfoSheet()
+                }
+            }
 
             if isReviewingAnswers && !isEditingAnswerFromReview {
                 Text("Review your answers, edit a specific question, or regenerate.")
@@ -268,18 +315,10 @@ struct PickForMeView: View {
             multiChoiceList(secondaryArchetypeOptions, selection: $answers.secondaryArchetypes)
         case .genrePreferences:
             multiChoiceList(PickForMeGenrePreference.allCases, selection: $answers.genrePreferences)
-        case .seriousness:
-            singleChoiceList(PickForMeSeriousness.allCases, selection: $answers.seriousness)
-        case .realism:
-            singleChoiceList(PickForMeRealism.allCases, selection: $answers.realism)
+        case .fictionPreference:
+            singleChoiceList(PickForMeFictionPreference.allCases, selection: $answers.fictionPreference)
         case .sourceMaterial:
             singleChoiceList(PickForMeSourceMaterial.allCases, selection: $answers.sourceMaterial)
-        case .action:
-            multiChoiceList(PickForMeActionLevel.allCases, selection: $answers.actionLevels)
-        case .engagement:
-            singleChoiceList(PickForMeEngagement.allCases, selection: $answers.engagement)
-        case .recommendationType:
-            singleChoiceList(PickForMeRecommendationType.allCases, selection: $answers.recommendationType)
         case .runtime:
             singleChoiceList(PickForMeRuntime.allCases, selection: $answers.runtime)
         case .releaseAge:
@@ -427,12 +466,23 @@ struct PickForMeView: View {
             }
         }
         .task(id: results[resultIndex].key) {
-            await model.loadDetail(results[resultIndex])
+            await model.loadDetail(results[resultIndex], runNotificationChecks: false)
         }
     }
 
     private var answerReviewContent: some View {
         VStack(alignment: .leading, spacing: 16) {
+            Button {
+                startOver()
+            } label: {
+                Label("Start over", systemImage: "arrow.counterclockwise")
+                    .font(.headline.bold())
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 52)
+                    .liquidGlass(cornerRadius: 26)
+            }
+            .buttonStyle(.plain)
+
             Text("Your answers")
                 .font(.title2.bold())
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -517,8 +567,8 @@ struct PickForMeView: View {
                 return !answers.wantsDocumentary
             case .war:
                 return !answers.wantsWar
-            case .sciFiFantasy:
-                return !answers.wantsSpeculative
+            case .longRuntime:
+                return !answers.isSeriesOnly
             default:
                 return true
             }
@@ -545,12 +595,14 @@ struct PickForMeView: View {
                     pruneAgeRatingsForCurrentFormat()
                     errorText = nil
                 }
+                .opacity(selection.wrappedValue != nil && selection.wrappedValue != .movie ? 0.35 : 1.0)
 
                 PickForMeOptionButton(title: MediaFilter.tv.title, subtitle: nil, isSelected: selection.wrappedValue == .tv) {
                     selection.wrappedValue = selection.wrappedValue == .tv ? nil : .tv
                     pruneAgeRatingsForCurrentFormat()
                     errorText = nil
                 }
+                .opacity(selection.wrappedValue != nil && selection.wrappedValue != .tv ? 0.35 : 1.0)
             }
 
             PickForMeOptionButton(title: MediaFilter.both.title, subtitle: nil, isSelected: selection.wrappedValue == .both) {
@@ -558,6 +610,7 @@ struct PickForMeView: View {
                 pruneAgeRatingsForCurrentFormat()
                 errorText = nil
             }
+            .opacity(selection.wrappedValue != nil && selection.wrappedValue != .both ? 0.35 : 1.0)
         }
     }
 
@@ -568,6 +621,7 @@ struct PickForMeView: View {
                     selection.wrappedValue = selection.wrappedValue == option ? nil : option
                     errorText = nil
                 }
+                .opacity(selection.wrappedValue != nil && selection.wrappedValue != option ? 0.35 : 1.0)
             }
         }
     }
@@ -579,6 +633,7 @@ struct PickForMeView: View {
                     selection.wrappedValue = option
                     errorText = nil
                 }
+                .opacity(selection.wrappedValue != nil && selection.wrappedValue != option ? 0.35 : 1.0)
             }
         }
     }
@@ -593,14 +648,20 @@ struct PickForMeView: View {
                     answers.secondaryArchetypes.remove(option)
                     errorText = nil
                 }
+                .opacity(!selection.wrappedValue.isEmpty && !selection.wrappedValue.contains(option) ? 0.35 : 1.0)
             }
         }
     }
 
-    private func multiChoiceList<Option: PickForMeOption>(_ options: [Option], selection: Binding<Set<Option>>) -> some View {
+    private func multiChoiceList<Option: PickForMeOption>(_ options: [Option], selection: Binding<Set<Option>>, maxCount: Int = .max) -> some View {
         VStack(spacing: 10) {
             ForEach(options) { option in
+                let selectedNonAny = selection.wrappedValue.filter { !$0.isAnyOption }
+                let anySelected = selection.wrappedValue.contains(where: { $0.isAnyOption })
+                let atMax = !option.isAnyOption && !selection.wrappedValue.contains(option) && selectedNonAny.count >= maxCount
+                let dimmed = atMax || (anySelected && !option.isAnyOption)
                 PickForMeOptionButton(title: option.title, subtitle: option.subtitle, isSelected: selection.wrappedValue.contains(option)) {
+                    guard !atMax else { return }
                     if option.isAnyOption {
                         selection.wrappedValue = [option]
                     } else {
@@ -611,9 +672,9 @@ struct PickForMeView: View {
                             selection.wrappedValue.insert(option)
                         }
                     }
-
                     errorText = nil
                 }
+                .opacity(dimmed ? 0.35 : 1.0)
             }
         }
     }
@@ -674,18 +735,10 @@ struct PickForMeView: View {
             answers.secondaryArchetypes = []
         case .genrePreferences:
             answers.genrePreferences = []
-        case .seriousness:
-            answers.seriousness = nil
-        case .realism:
-            answers.realism = nil
+        case .fictionPreference:
+            answers.fictionPreference = nil
         case .sourceMaterial:
             answers.sourceMaterial = nil
-        case .action:
-            answers.actionLevels = []
-        case .engagement:
-            answers.engagement = nil
-        case .recommendationType:
-            answers.recommendationType = nil
         case .runtime:
             answers.runtime = nil
         case .releaseAge:
@@ -752,6 +805,8 @@ struct PickForMeView: View {
             isEditingAnswerFromReview = false
             results = picked
             resultIndex = 0
+            model.pickForMeSessionAnswers = answers
+            model.pickForMeSessionResults = picked
         }
     }
 
@@ -780,18 +835,10 @@ struct PickForMeView: View {
             return optionTitles(answers.secondaryArchetypes)
         case .genrePreferences:
             return optionTitles(answers.genrePreferences)
-        case .seriousness:
-            return answers.seriousness?.title ?? "Not answered"
-        case .realism:
-            return answers.realism?.title ?? "Not answered"
+        case .fictionPreference:
+            return answers.fictionPreference?.title ?? "Not answered"
         case .sourceMaterial:
             return answers.sourceMaterial?.title ?? "Not answered"
-        case .action:
-            return optionTitles(answers.actionLevels)
-        case .engagement:
-            return answers.engagement?.title ?? "Not answered"
-        case .recommendationType:
-            return answers.recommendationType?.title ?? "Not answered"
         case .runtime:
             return answers.runtime?.title ?? "Not answered"
         case .releaseAge:
@@ -863,6 +910,19 @@ struct PickForMeView: View {
         errorText = nil
     }
 
+    private func startOver() {
+        model.pickForMeSessionAnswers = nil
+        model.pickForMeSessionResults = []
+        answers = PickForMeAnswers()
+        results = []
+        resultIndex = 0
+        step = 0
+        isReviewingAnswers = false
+        isEditingAnswerFromReview = false
+        fallbackText = nil
+        errorText = nil
+    }
+
     private var currentStepIsAnswered: Bool {
         switch currentStep {
         case .format:
@@ -873,18 +933,10 @@ struct PickForMeView: View {
             return !answers.secondaryArchetypes.isEmpty
         case .genrePreferences:
             return !answers.genrePreferences.isEmpty
-        case .seriousness:
-            return answers.seriousness != nil
-        case .realism:
-            return answers.realism != nil
+        case .fictionPreference:
+            return answers.fictionPreference != nil
         case .sourceMaterial:
             return answers.sourceMaterial != nil
-        case .action:
-            return !answers.actionLevels.isEmpty
-        case .engagement:
-            return answers.engagement != nil
-        case .recommendationType:
-            return answers.recommendationType != nil
         case .runtime:
             return answers.runtime != nil
         case .releaseAge:
@@ -896,6 +948,112 @@ struct PickForMeView: View {
         case .dealBreakers:
             return !answers.dealBreakers.isEmpty
         }
+    }
+}
+
+// MARK: - Info Sheet
+
+struct PickForMeInfoSheet: View {
+    private struct Tip: Identifiable {
+        let id = UUID()
+        let icon: String
+        let title: String
+        let body: String
+    }
+
+    private let tips: [Tip] = [
+        Tip(
+            icon: "theatermasks",
+            title: "Primary mood",
+            body: "The most important thing you want to feel. If you have multiple moods in mind, pick the most specific or niche one — it anchors every result. The others can go in secondary."
+        ),
+        Tip(
+            icon: "slider.horizontal.3",
+            title: "Secondary moods",
+            body: "Additional layers that blend alongside the primary. 1 or 2 gives the most focused results. More secondaries add flexibility rather than restricting — but too many dilutes the signal."
+        ),
+        Tip(
+            icon: "circle.hexagongrid",
+            title: "Genre flavor",
+            body: "A hard requirement. Every single result must genuinely fit the genre or setting you choose. 1 flavor is ideal — each extra one you add is applied simultaneously, which significantly shrinks the pool."
+        ),
+        Tip(
+            icon: "doc.text",
+            title: "Fiction or non-fiction",
+            body: "Leave this as no preference unless you specifically care — any non-\"no preference\" answer can be very restrictive. \"Based on a true story\" is broad (historical fiction, biopics, documentaries). \"Non-fiction only\" is documentary-strict and will cut most of the library."
+        ),
+        Tip(
+            icon: "star.leadinghalf.filled",
+            title: "Minimum rating",
+            body: "7.0+ is the sweet spot for quality without cutting too deep. 7.5+ noticeably reduces results in niche genres like space or historical. 8.0+ will often return fewer than 10 results."
+        ),
+        Tip(
+            icon: "calendar",
+            title: "Release window",
+            body: "Only set this if you genuinely care about the era. Leaving it as any age includes classics that are often the strongest matches. Many niche genres have their best films pre-2000."
+        ),
+        Tip(
+            icon: "hand.thumbsdown",
+            title: "Deal breakers",
+            body: "Only add things you truly cannot watch. Each cuts an entire category from every result — use them sparingly. Sci-Fi and Heavy fantasy are useful if you want grounded, real-world stories without speculative elements."
+        ),
+        Tip(
+            icon: "book",
+            title: "Adaptations",
+            body: "Only set this if you specifically want a book or game adaptation. Leave it as no preference otherwise — it restricts results more than most people expect."
+        ),
+    ]
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                Text("Getting better results")
+                    .font(.title2.bold())
+
+                Text("Genre flavor and deal breakers are hard cuts — every extra one reduces the pool. Mood and secondary are layered — more gives Groq more surface area to match against.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+
+                ForEach(tips) { tip in
+                    HStack(alignment: .top, spacing: 14) {
+                        Image(systemName: tip.icon)
+                            .font(.title3)
+                            .foregroundStyle(.secondary)
+                            .frame(width: 28, alignment: .center)
+                            .padding(.top, 1)
+
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(tip.title)
+                                .font(.subheadline.bold())
+                            Text(tip.body)
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .padding(14)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .liquidGlass(cornerRadius: 20)
+                }
+            }
+            .padding(18)
+            .padding(.bottom, 110)
+        }
+        .scrollClipDisabled()
+        .scrollIndicators(.hidden)
+        .safeAreaInset(edge: .top, spacing: 0) {
+            Capsule()
+                .fill(.white.opacity(0.46))
+                .frame(width: 48, height: 5)
+                .frame(maxWidth: .infinity)
+                .padding(.top, 12)
+                .padding(.bottom, 8)
+                .background(.clear)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .sheetLiquidGlass(cornerRadius: 48)
+        .ignoresSafeArea(edges: .bottom)
+        .presentationBackground(.clear)
+        .presentationCornerRadius(54)
     }
 }
 

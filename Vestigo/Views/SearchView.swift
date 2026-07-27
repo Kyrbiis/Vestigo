@@ -55,8 +55,7 @@ struct SearchView: View {
                         }
                     }
 
-                    if #available(iOS 26.0, macOS 26.0, *) {
-                        if ThematicSearchService.isAvailable {
+                    if ThematicSearchService.isAvailable {
                             Button {
                                 searchIsFocused = false
                                 model.searchFieldIsFocused = false
@@ -90,7 +89,6 @@ struct SearchView: View {
                                 ThematicSearchView(model: model)
                             }
                         }
-                    }
 
                     VStack(alignment: .leading, spacing: 14) {
                         Text("Genres")

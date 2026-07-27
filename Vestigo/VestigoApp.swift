@@ -12,6 +12,9 @@ import UserNotifications
 import BackgroundTasks
 
 final class AppDelegate: NSObject, UIApplicationDelegate {
+    // Stores a deep link URL from cold-launch notification taps, before SwiftUI's onReceive is ready.
+    static var pendingDeepLinkURL: URL?
+
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
         UNUserNotificationCenter.current().delegate = self
         NotificationScheduler.registerBackgroundTask()
@@ -20,6 +23,21 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
 
     func application(_ application: UIApplication, supportedInterfaceOrientationsFor window: UIWindow?) -> UIInterfaceOrientationMask {
         .portrait
+    }
+
+    func applicationDidBecomeActive(_ application: UIApplication) {
+        forcePortrait()
+    }
+
+    func applicationWillEnterForeground(_ application: UIApplication) {
+        forcePortrait()
+    }
+
+    private func forcePortrait() {
+        guard let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene else { return }
+        let prefs = UIWindowScene.GeometryPreferences.iOS(interfaceOrientations: .portrait)
+        scene.requestGeometryUpdate(prefs) { _ in }
+        scene.windows.forEach { $0.rootViewController?.setNeedsUpdateOfSupportedInterfaceOrientations() }
     }
 
     func application(_ application: UIApplication, didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
@@ -39,6 +57,8 @@ extension AppDelegate: UNUserNotificationCenterDelegate {
             return
         }
 
+        // Store for cold-launch case (before SwiftUI onReceive is registered).
+        AppDelegate.pendingDeepLinkURL = url
         NotificationCenter.default.post(name: .vestigoDidOpenNotificationDeepLink, object: url)
     }
 }

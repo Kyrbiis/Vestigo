@@ -86,6 +86,8 @@ struct RelatedMediaService {
           } UNION {
             ?work wdt:P1080 ?universe .
             ?item wdt:P1080 ?universe .
+            VALUES ?mediaClass { wd:Q11424 wd:Q5398426 wd:Q93204 wd:Q2386009 wd:Q202866 }
+            ?item wdt:P31 ?mediaClass .
           }
           FILTER(?item != ?work)
           {
@@ -96,7 +98,7 @@ struct RelatedMediaService {
             BIND("movie" AS ?kind)
           }
         }
-        LIMIT 50
+        LIMIT 150
         """
     }
 }
