@@ -210,17 +210,18 @@ enum ArchetypeInferenceEngine {
 
     private static func heistScore(kwds: [String]) -> Double {
         var s = 0.0
-        s += w(kwds, "heist",             weight: 6.5)
-        s += w(kwds, "caper",             weight: 5.5)
-        s += w(kwds, "con artist",        weight: 4.5)
-        s += w(kwds, "confidence trick",  weight: 4.5)
-        s += w(kwds, "con game",          weight: 4.0)
-        s += w(kwds, "grifter",           weight: 4.0)
-        s += w(kwds, "bank robbery",      weight: 4.0)
-        s += w(kwds, "jewel thief",       weight: 3.5)
-        s += w(kwds, "scam",              weight: 2.0)
-        s += w(kwds, "robbery",           weight: 1.5)
-        s += w(kwds, "theft",             weight: 1.0)
+        s += w(kwds, "heist",             weight: 7.0)
+        s += w(kwds, "caper",             weight: 6.5)
+        s += w(kwds, "con artist",        weight: 6.0)
+        s += w(kwds, "confidence trick",  weight: 6.0)
+        s += w(kwds, "con game",          weight: 5.5)
+        s += w(kwds, "grifter",           weight: 5.5)
+        s += w(kwds, "jewel thief",       weight: 5.0)
+        s += w(kwds, "elaborate plan",    weight: 3.5)
+        s += w(kwds, "scam",              weight: 3.0)
+        s += w(kwds, "bank robbery",      weight: 2.5)
+        s += w(kwds, "robbery",           weight: 1.2)
+        s += w(kwds, "theft",             weight: 0.8)
         return s
     }
 

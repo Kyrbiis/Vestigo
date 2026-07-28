@@ -1151,9 +1151,10 @@ final class VestigoModel: ObservableObject {
                 append([28, 53])     // Action AND Thriller
                 append([28])
             case .heist:
-                append([80, 53])     // Crime AND Thriller
-                append([80])
-                append([35, 80])     // Comedy AND Crime — catches caper comedies
+                append([80, 53])     // Crime AND Thriller — Ocean's Eleven, Heat
+                append([53])         // Thriller alone — catches sophisticated capers not tagged Crime
+                append([80])         // Crime alone — broader net
+                append([35, 80])     // Comedy AND Crime — caper comedies
             case .adventure:
                 append([12])
                 append([12, 28])     // Adventure AND Action
@@ -1539,8 +1540,13 @@ final class VestigoModel: ObservableObject {
             base = pickForMeKeywordScore(text, ["mission", "operation", "rescue", "espionage", "military objective", "survival objective", "special operations", "spy", "objective"]) * 2.0 +
                 (genres.intersection([53, 28, 10752, 80, 36]).isEmpty ? 0 : 4.2)
         case .heist:
-            base = pickForMeKeywordScore(text, ["heist", "robbery", "con artist", "con man", "con woman", "theft", "casino", "caper", "scheme", "steal", "thief", "infiltrat", "extraction"]) * 2.4 +
-                (genres.intersection([80, 53, 35, 28]).isEmpty ? 0 : 4.0)
+            // Sophisticated caper signals weighted much higher than generic robbery/theft
+            let caperSignals = ["heist", "caper", "con artist", "con man", "con woman", "con game", "grifter", "confidence trick", "casino", "infiltrat", "scheme", "elaborate", "elaborate plan", "jewel"]
+            let bruteSignals = ["robbery", "theft", "steal", "thief", "extraction"]
+            let caperScore = Double(caperSignals.filter { text.contains($0) }.count) * 3.4
+            let bruteScore = Double(bruteSignals.filter { text.contains($0) }.count) * 1.0
+            let genreBase = genres.intersection([80, 53]).isEmpty ? 0 : 4.2  // Crime or Thriller only
+            base = caperScore + bruteScore + genreBase
         case .adventure:
             base = pickForMeKeywordScore(text, ["treasure", "expedition", "exploration", "archaeology", "quest", "journey", "travel"]) * 2.0 +
                 (genres.intersection([12, 28, 10759]).isEmpty ? 0 : 4.4)
