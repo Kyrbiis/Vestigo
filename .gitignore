@@ -1,11 +1,50 @@
-node_modules/
-VestigoBackend/node_modules/
-node_modules/
-VestigoBackend/node_modules/
-node_modules/
-VestigoBackend/node_modules/
+# ==============================
+# Xcode
+# ==============================
 
-# Secrets / local env
+# User-specific Xcode data (breakpoints, window layouts, scheme ordering)
+xcuserdata/
+*.xcuserstate
+*.xcuserdata/
+
+# Build output
+DerivedData/
+build/
+*.o
+*.d
+
+# Xcode archives and exports
+*.xcarchive
+
+# Swift Package Manager
+.build/
+.swiftpm/
+*.resolved
+
+# ==============================
+# macOS
+# ==============================
+
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V8
+.Trashes
+Thumbs.db
+
+# ==============================
+# Node / Backend
+# ==============================
+
+node_modules/
+**/node_modules/
+.npm
+.yarn
+
+# ==============================
+# Secrets / environment
+# ==============================
+
 .env
 .env.*
 *.env
@@ -14,7 +53,12 @@ VestigoBackend/node_modules/
 **/.env.*
 **/*.env
 **/*.env.*
+wrangler.toml
 
-# Dependencies
-node_modules/
-**/node_modules/
+# ==============================
+# Misc
+# ==============================
+
+*.log
+*.swp
+*~
