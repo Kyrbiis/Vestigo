@@ -956,6 +956,24 @@ final class VestigoModel: ObservableObject {
                     )) ?? []
                 }
             }
+            // Heist keyword discovery — bypasses rating-rank ordering to find heist-tagged films
+            // directly, regardless of where they fall in a sorted Crime/Thriller list
+            if answers.archetypes.contains(.heist) {
+                for kw in ["heist", "caper"] {
+                    let keyword = kw
+                    group.addTask { [weak self] in
+                        guard let self else { return [] }
+                        let kwIDs = (try? await self.tmdb.keywordIDs(for: keyword)) ?? []
+                        guard !kwIDs.isEmpty else { return [] }
+                        return (try? await self.tmdb.discoverThematic(
+                            personIDs: [],
+                            keywordIDs: kwIDs,
+                            genreIDs: [],
+                            filter: effectiveFilter
+                        )) ?? []
+                    }
+                }
+            }
             for await items in group {
                 discoveredItems.append(contentsOf: items)
             }
@@ -1549,7 +1567,7 @@ final class VestigoModel: ObservableObject {
             // GenreBase only meaningful when there are actual heist-related signals in the text;
             // without signals, Crime/Thriller alone isn't enough to score well as a heist film.
             let genreBase = genres.intersection([80, 53]).isEmpty ? 0.0 :
-                (caperCount > 0 ? 5.5 : (bruteCount > 0 ? 4.0 : 1.5))
+                (caperCount > 0 ? 5.5 : (bruteCount > 0 ? 4.0 : 3.5))
             base = caperScore + bruteScore + genreBase
         case .adventure:
             base = pickForMeKeywordScore(text, ["treasure", "expedition", "exploration", "archaeology", "quest", "journey", "travel"]) * 2.0 +
