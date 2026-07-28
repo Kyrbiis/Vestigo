@@ -105,10 +105,10 @@ struct ContentView: View {
         }
         .favouriteReplacementOverlay(model: model)
         .ratingPromptOverlay(model: model)
-        .alert("Daily IMDb Limit Reached", isPresented: $model.showOMDbLimitAlert) {
+        .alert("Daily OMDb Limit Reached", isPresented: $model.showOMDbLimitAlert) {
             Button("OK", role: .cancel) { }
         } message: {
-            Text("Your OMDb API key has made \(model.settings.omdbDailyRequestCount.formatted()) requests today, reaching its daily limit. IMDb ratings will not load until midnight. You can view or change your key tier from the OMDb website.")
+            Text("Your OMDb API key has made \(model.settings.omdbDailyRequestCount.formatted()) requests today, reaching its daily limit. IMDb and Rotten Tomato ratings will not load until midnight. You can view or change your key tier from the OMDb website.")
         }
     }
 }
