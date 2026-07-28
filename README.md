@@ -72,7 +72,7 @@ Original media and knowledge links use Wikimedia projects and their content lice
 
 <br>
 
-While the app is free, it is also going to stay free for me, so users will need to get their own OMDb key. If the app becomes successful in the future, I will add a paid one to the backend.
+While the app is free, it is also going to stay free for me so users will need to get their own OMDb key. If the app becomes successful in the future, I will add a paid one to the backend.
 
 <br>
 
