@@ -902,13 +902,18 @@ final class VestigoModel: ObservableObject {
         var sourceMaterialCandidateKeys: Set<MediaKey> = []
         var sourceMaterialItems: [MediaItem] = []
 
-        // Groq runs in parallel with source material discovery
-        let thematicQuery = answers.pickForMeGroqFullQuery ?? answers.pickForMeThematicQuery
-
-        let thematicTask = Task { [weak self] () -> [MediaItem] in
-            guard let self, let query = thematicQuery else { return [] }
-            return await self.pickForMeThematicCandidates(query: query, filter: effectiveFilter)
-        }
+        // -- GROQ PATH (disabled — re-enable by setting useGroq = true) --
+        // let useGroq = false
+        // let thematicQuery = answers.pickForMeGroqFullQuery ?? answers.pickForMeThematicQuery
+        // var thematicCandidates: [MediaItem] = []
+        // var rerankScores: [MediaKey: Int] = [:]
+        // if useGroq, let query = thematicQuery {
+        //     thematicCandidates = await pickForMeThematicCandidates(query: query, filter: effectiveFilter)
+        //     if thematicCandidates.count >= 5 {
+        //         rerankScores = await pickForMeGroqRerank(candidates: thematicCandidates, query: query)
+        //     }
+        // }
+        // -- END GROQ PATH --
 
         if let sourceMaterial = answers.sourceMaterial, sourceMaterial != .noPreference {
             do {
@@ -918,59 +923,64 @@ final class VestigoModel: ObservableObject {
             } catch { }
         }
 
-        let thematicCandidates = await thematicTask.value
-        let thematicCandidateKeys = Set(thematicCandidates.map(\.key))
+        // Run primary broad discovery + all archetype-specific genre combos in parallel
+        let primaryGenreIDs = pickForMeDiscoveryGenreIDs(for: answers)
+        let supplementalGroups = pickForMeSupplementalDiscoveryGenreIDs(for: answers)
 
-        let uniqueCandidates: [MediaItem]
-        if thematicCandidates.count >= 5 {
-            // Groq succeeded — use only its candidates plus hard supplemental preferences
-            var pool = thematicCandidates + sourceMaterialItems
-            if wantsNewReleaseResults {
-                pool.append(contentsOf: newReleases + trySomethingNewRecommendations)
+        var discoveredItems: [MediaItem] = []
+        await withTaskGroup(of: [MediaItem].self) { group in
+            // Primary discovery — OR genres, 3 pages
+            if !primaryGenreIDs.isEmpty {
+                group.addTask { [weak self] in
+                    guard let self else { return [] }
+                    return (try? await self.tmdb.discoverPickForMe(
+                        filter: effectiveFilter,
+                        genreIDs: primaryGenreIDs,
+                        runtime: answers.runtime,
+                        minimumRating: 0,
+                        includeAdult: !self.settings.hideAdultResults,
+                        sortBy: "vote_average.desc"
+                    )) ?? []
+                }
             }
-            uniqueCandidates = pool.uniqued()
-        } else {
-            // Groq failed or returned too few — fall back to local library + TMDb discovery
-            let discoveryGenreIDs = pickForMeDiscoveryGenreIDs(for: answers)
-            var fallback = (
-                recommendations +
-                moreLikeLastWatched +
-                moreLikeFavourite +
-                fromTopGenre +
-                seriesNext +
-                library.watchlistItems
-            ).uniqued()
-            if wantsNewReleaseResults {
-                fallback.append(contentsOf: newReleases + trySomethingNewRecommendations)
+            // Supplemental archetype combos — AND genres via discoverThematic (2 pages each)
+            for genreGroup in supplementalGroups {
+                let ids = genreGroup
+                group.addTask { [weak self] in
+                    guard let self else { return [] }
+                    return (try? await self.tmdb.discoverThematic(
+                        personIDs: [],
+                        keywordIDs: [],
+                        genreIDs: ids,
+                        filter: effectiveFilter
+                    )) ?? []
+                }
             }
-            do {
-                let discovered = try await tmdb.discoverPickForMe(
-                    filter: effectiveFilter,
-                    genreIDs: discoveryGenreIDs,
-                    runtime: answers.runtime,
-                    minimumRating: 0,
-                    includeAdult: !settings.hideAdultResults,
-                    sortBy: "vote_average.desc"
-                )
-                fallback.append(contentsOf: discovered)
-            } catch { }
-            fallback.append(contentsOf: sourceMaterialItems)
-            uniqueCandidates = fallback.uniqued()
+            for await items in group {
+                discoveredItems.append(contentsOf: items)
+            }
         }
 
-        // Re-rank only among Groq's own suggestions — local candidates are fallback only
-        let rerankCandidates = thematicCandidates
-        let rerankTask = Task { [weak self] () -> [MediaKey: Int] in
-            guard let self, let query = thematicQuery, !rerankCandidates.isEmpty else { return [:] }
-            return await self.pickForMeGroqRerank(candidates: Array(rerankCandidates), query: query)
+        var pool = (
+            recommendations +
+            moreLikeLastWatched +
+            moreLikeFavourite +
+            fromTopGenre +
+            seriesNext +
+            library.watchlistItems
+        )
+        if wantsNewReleaseResults {
+            pool.append(contentsOf: newReleases + trySomethingNewRecommendations)
         }
+        pool.append(contentsOf: discoveredItems)
+        pool.append(contentsOf: sourceMaterialItems)
+        let uniqueCandidates = pool.uniqued()
 
         await loadPickForMeStrictFilterDetails(for: uniqueCandidates, answers: answers)
 
-        // Load external ratings for all Groq candidates (RT penalty + accurate filter) and the first 30 overall candidates (IMDb where available, TMDb fallback via ratingSortValue)
+        // Load external ratings for the first 60 candidates (RT penalty + IMDb sort)
         await withTaskGroup(of: Void.self) { group in
-            let priorityItems = (thematicCandidates + uniqueCandidates.prefix(30)).uniqued()
-            for item in priorityItems where externalRatingsCache[item.key] == nil {
+            for item in uniqueCandidates.prefix(60) where externalRatingsCache[item.key] == nil {
                 group.addTask { await self.loadExternalRatings(item) }
             }
         }
@@ -1044,12 +1054,10 @@ final class VestigoModel: ObservableObject {
             return true
         }
 
-        let rerankScores = await rerankTask.value
-
         let sorted = visible
             .sorted { lhs, rhs in
-                let lhsScore = pickForMeScore(lhs, answers: answers, sourceMaterialCandidateKeys: sourceMaterialCandidateKeys, thematicCandidateKeys: thematicCandidateKeys, rerankScores: rerankScores)
-                let rhsScore = pickForMeScore(rhs, answers: answers, sourceMaterialCandidateKeys: sourceMaterialCandidateKeys, thematicCandidateKeys: thematicCandidateKeys, rerankScores: rerankScores)
+                let lhsScore = pickForMeScore(lhs, answers: answers, sourceMaterialCandidateKeys: sourceMaterialCandidateKeys)
+                let rhsScore = pickForMeScore(rhs, answers: answers, sourceMaterialCandidateKeys: sourceMaterialCandidateKeys)
 
                 if lhsScore != rhsScore {
                     return lhsScore > rhsScore
@@ -1104,7 +1112,9 @@ final class VestigoModel: ObservableObject {
                 genreIDs.insert(28)
             case .comedy:
                 genreIDs.insert(35)
-            case .space, .noPreference:
+            case .space:
+                genreIDs.formUnion([878, 10765])  // Sci-Fi — closest available TMDb genre for space
+            case .noPreference:
                 break
             }
         }
@@ -1123,34 +1133,60 @@ final class VestigoModel: ObservableObject {
         let archetypes = answers.archetypes.union(answers.secondaryArchetypes)
         for archetype in archetypes {
             switch archetype {
-            case .thriller:
-                append([53])
+            case .feelGood:
+                append([35, 10751])  // Comedy AND Family
+                append([35])
+            case .comedy:
+                append([35])
             case .mystery:
                 append([9648])
-                append([53])
-            case .mindBending:
-                append([9648, 878])  // Mystery AND SciFi — more specific than either alone
                 append([9648, 53])   // Mystery AND Thriller
-                append([878])
-            case .heist:
-                append([80])
+            case .thriller:
                 append([53])
-                append([28])
-            case .mission:
-                append([28])
-                append([53])
+                append([53, 9648])   // Thriller AND Mystery
             case .smartProblems:
-                append([18, 53])  // Drama AND Thriller — filters out pure romance/soap dramas
-                append([18, 80])  // Drama AND Crime — catches procedurals and legal dramas
+                append([18, 53])     // Drama AND Thriller
+                append([18, 80])     // Drama AND Crime
+            case .mission:
+                append([28, 53])     // Action AND Thriller
+                append([28])
+            case .heist:
+                append([80, 53])     // Crime AND Thriller
+                append([80])
+                append([35, 80])     // Comedy AND Crime — catches caper comedies
             case .adventure:
                 append([12])
-            case .thoughtfulSciFi:
-                append([878])
-            case .war:
-                append(pickForMeWarGenreIDs)
+                append([12, 28])     // Adventure AND Action
+            case .characterRelationships:
+                append([18, 10749])  // Drama AND Romance
+                append([18, 10751])  // Drama AND Family
+                append([18])
             case .humanTriumph:
                 append([18])
-            case .feelGood, .comedy, .characterRelationships, .documentary, .historical, .epicSpectacle, .horror, .surprise, .noPreference:
+                append([18, 36])     // Drama AND History — biopics, real triumph stories
+            case .documentary:
+                append([99])
+            case .historical:
+                append([36])
+                append([36, 18])     // History AND Drama
+            case .war:
+                append(pickForMeWarGenreIDs)
+                append([10752, 18])  // War AND Drama
+            case .epicSpectacle:
+                append([12, 14])     // Adventure AND Fantasy
+                append([12, 878])    // Adventure AND Sci-Fi
+                append([28, 12])     // Action AND Adventure
+            case .mindBending:
+                append([9648, 878])  // Mystery AND Sci-Fi
+                append([9648, 53])   // Mystery AND Thriller
+                append([878, 53])    // Sci-Fi AND Thriller
+            case .horror:
+                append([27])
+                append([27, 53])     // Horror AND Thriller
+            case .thoughtfulSciFi:
+                append([878, 18])    // Sci-Fi AND Drama
+                append([878])
+            case .surprise, .noPreference:
                 break
             }
         }
@@ -1281,9 +1317,9 @@ final class VestigoModel: ObservableObject {
         return historicalScore > 0
     }
 
-    private func pickForMeScore(_ item: MediaItem, answers: PickForMeAnswers, sourceMaterialCandidateKeys: Set<MediaKey>, thematicCandidateKeys: Set<MediaKey> = [], rerankScores: [MediaKey: Int] = [:]) -> Double {
+    private func pickForMeScore(_ item: MediaItem, answers: PickForMeAnswers, sourceMaterialCandidateKeys: Set<MediaKey>) -> Double {
         let primaryAlignment = pickForMePrimaryArchetypeAlignmentScore(item, answers: answers)
-        var score = primaryAlignment * 13.0
+        var score = primaryAlignment * 15.0  // was 13.0 — compensates for removed Groq +20 bonus
         let genreIDs = Set(item.genreIDs)
         let text = pickForMeSearchableText(for: item)
 
@@ -1362,17 +1398,12 @@ final class VestigoModel: ObservableObject {
             score += 0.3
         }
 
-        score += pickForMePersonalizationScore(for: item) * 0.18
+        score += pickForMePersonalizationScore(for: item) * 0.22  // was 0.18 — library signal more important without Groq
 
-        // Groq specifically chose this item — it is the primary signal, not tag matching
-        if thematicCandidateKeys.contains(item.key) {
-            score += 20.0
-        }
-
-        // Groq re-ranked this item from the actual candidate pool — position-weighted bonus
-        if let rank = rerankScores[item.key] {
-            score += max(0.0, 16.0 - Double(rank - 1) * 1.5)
-        }
+        // -- GROQ SCORE BONUSES (disabled with Groq path) --
+        // if thematicCandidateKeys.contains(item.key) { score += 20.0 }
+        // if let rank = rerankScores[item.key] { score += max(0.0, 16.0 - Double(rank - 1) * 1.5) }
+        // -- END GROQ BONUSES --
 
         return score
     }
@@ -1386,11 +1417,11 @@ final class VestigoModel: ObservableObject {
         guard pickForMeHasDominantPrimaryArchetype(answers) else { return 0 }
 
         if alignment >= 6.5 {
-            return 14.0
+            return 18.0  // was 14.0
         }
 
         if alignment >= 4.5 {
-            return 6.0
+            return 8.0   // was 6.0
         }
 
         if alignment >= 3.2 {
