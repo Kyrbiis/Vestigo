@@ -102,7 +102,7 @@ enum HomeCarousel: String, Codable, CaseIterable, Identifiable, Hashable {
 }
 
 enum ForYouCarousel: String, Codable, CaseIterable, Identifiable, Hashable {
-    case forYou, moreLikeLast, moreLikeFavourite, watchlistPicks, seriesNext, fromTopGenre, trySomethingNew
+    case forYou, moreLikeLast, moreLikeFavourite, watchlistPicks, seriesNext
     var id: String { rawValue }
     var title: String {
         switch self {
@@ -111,8 +111,6 @@ enum ForYouCarousel: String, Codable, CaseIterable, Identifiable, Hashable {
         case .moreLikeFavourite: return "More like a favourite"
         case .watchlistPicks: return "From your watchlist"
         case .seriesNext: return "Continue with related series"
-        case .fromTopGenre: return "More from top genre"
-        case .trySomethingNew: return "Try something new"
         }
     }
 }

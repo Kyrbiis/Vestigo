@@ -26,12 +26,6 @@ struct ForYouView: View {
         model.library.favouriteItems(for: forYouFilter).first
     }
 
-    private var topGenreTitle: String {
-        let watchedGenreIDs = filteredForYou(model.library.watchedItems).flatMap(\.genreIDs)
-        guard let topGenreID = watchedGenreIDs.frequencySorted().first else { return "your taste" }
-        return GenreDefinition.all.first(where: { $0.tmdbID == topGenreID })?.name ?? "your taste"
-    }
-
     private var watchlistPicks: [MediaItem] {
         filteredForYou(model.library.watchlistItems)
             .sorted(
@@ -203,22 +197,6 @@ struct ForYouView: View {
             let sectionItems = filteredForYou(model.seriesNext)
             if !sectionItems.isEmpty {
                 let sectionTitle = "Continue with related series"
-                MediaSection(title: sectionTitle, items: sectionItems, hideWatchedForUpcoming: false, model: model, openFull: {
-                    forYouPath.append(.section(ForYouSection(title: sectionTitle, items: sectionItems)))
-                })
-            }
-        case .fromTopGenre:
-            let sectionItems = filteredForYou(model.fromTopGenre)
-            if !sectionItems.isEmpty {
-                let sectionTitle = "More from \(topGenreTitle)"
-                MediaSection(title: sectionTitle, items: sectionItems, hideWatchedForUpcoming: false, model: model, openFull: {
-                    forYouPath.append(.section(ForYouSection(title: sectionTitle, items: sectionItems)))
-                })
-            }
-        case .trySomethingNew:
-            let sectionItems = filteredForYou(model.trySomethingNewRecommendations)
-            if !sectionItems.isEmpty {
-                let sectionTitle = "Try something new"
                 MediaSection(title: sectionTitle, items: sectionItems, hideWatchedForUpcoming: false, model: model, openFull: {
                     forYouPath.append(.section(ForYouSection(title: sectionTitle, items: sectionItems)))
                 })

@@ -140,9 +140,12 @@ struct AppSettings: Codable, Hashable {
         homeCarouselOrder = Self.mergedOrder(saved: savedHomeOrder, defaults: HomeCarousel.allCases)
         homeCarouselHidden = try container.decodeIfPresent(Set<HomeCarousel>.self, forKey: .homeCarouselHidden) ?? homeCarouselHidden
 
-        let savedForYouOrder = try container.decodeIfPresent([ForYouCarousel].self, forKey: .forYouCarouselOrder) ?? []
+        let savedForYouOrder = ((try? container.decodeIfPresent([String].self, forKey: .forYouCarouselOrder)) ?? [])
+            .compactMap(ForYouCarousel.init(rawValue:))
         forYouCarouselOrder = Self.mergedOrder(saved: savedForYouOrder, defaults: ForYouCarousel.allCases)
-        forYouCarouselHidden = try container.decodeIfPresent(Set<ForYouCarousel>.self, forKey: .forYouCarouselHidden) ?? forYouCarouselHidden
+        let savedForYouHidden = ((try? container.decodeIfPresent([String].self, forKey: .forYouCarouselHidden)) ?? [])
+            .compactMap(ForYouCarousel.init(rawValue:))
+        forYouCarouselHidden = savedForYouHidden.isEmpty ? forYouCarouselHidden : Set(savedForYouHidden)
         omdbPrimaryKey = try container.decodeIfPresent(String.self, forKey: .omdbPrimaryKey) ?? omdbPrimaryKey
         omdbBackupKey = try container.decodeIfPresent(String.self, forKey: .omdbBackupKey) ?? omdbBackupKey
         omdbTierLimit = try container.decodeIfPresent(Int.self, forKey: .omdbTierLimit) ?? omdbTierLimit

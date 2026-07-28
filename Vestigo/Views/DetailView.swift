@@ -325,8 +325,10 @@ struct DetailView: View {
     }
 
     @ViewBuilder private var trailerSection: some View {
-        if let trailer = detail?.primaryTrailer {
-            TrailerPlayerCard(trailer: trailer)
+        if let trailers = detail?.trailers, !trailers.isEmpty {
+            ForEach(Array(trailers.enumerated()), id: \.element.id) { index, trailer in
+                TrailerPlayerCard(trailer: trailer, isFirstInSection: index == 0)
+            }
         }
     }
     
@@ -476,11 +478,14 @@ struct DetailView: View {
 
 struct TrailerPlayerCard: View {
     let trailer: TrailerVideo
+    var isFirstInSection: Bool = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Trailer")
-                .sectionTitle()
+            if isFirstInSection {
+                Text("Trailer")
+                    .sectionTitle()
+            }
 
             YouTubeTrailerPlayer(videoKey: trailer.key, title: trailer.displayTitle)
                 .aspectRatio(16 / 9, contentMode: .fit)
@@ -490,10 +495,18 @@ struct TrailerPlayerCard: View {
                         .stroke(.white.opacity(0.12), lineWidth: 1)
                 }
 
-            Text(trailer.displayTitle)
-                .font(.caption.bold())
-                .foregroundStyle(.secondary)
-                .lineLimit(2)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(trailer.displayTitle)
+                    .font(.caption.bold())
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+
+                if !trailer.official {
+                    Label("Not from official channel — may not be accurate", systemImage: "exclamationmark.triangle")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }

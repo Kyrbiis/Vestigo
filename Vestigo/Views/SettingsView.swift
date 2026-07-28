@@ -131,21 +131,53 @@ struct SettingsView: View {
 
                 VStack(alignment: .leading, spacing: 10) {
 
-                    VStack(alignment: .leading, spacing: 6) {
-                        Toggle("Prefer IMDb ratings", isOn: Binding(
-                            get: { model.settings.preferredRatingSource == .imdb },
-                            set: { model.settings.preferredRatingSource = $0 ? .imdb : .tmdb }
-                        ))
-                        .font(.headline.bold())
-                        .tint(model.settings.accentColor)
-
-                        Text("When on, IMDb scores from OMDb are used for rating displays, filters, and sorts where available. When off, TMDb scores are used instead.")
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Ratings source")
+                            .font(.headline.bold())
+                        let imdbAvailable = !model.settings.omdbPrimaryKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        HStack(spacing: 0) {
+                            Button { model.settings.preferredRatingSource = .tmdb } label: {
+                                Text("TMDb")
+                                    .font(.subheadline.bold())
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 8)
+                                    .background(
+                                        model.settings.preferredRatingSource == .tmdb
+                                            ? model.settings.accentColor.opacity(0.85) : .clear,
+                                        in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                    )
+                                    .foregroundStyle(model.settings.preferredRatingSource == .tmdb ? .white : .primary)
+                            }
+                            Button { model.settings.preferredRatingSource = .imdb } label: {
+                                Text("IMDb")
+                                    .font(.subheadline.bold())
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 8)
+                                    .background(
+                                        model.settings.preferredRatingSource == .imdb
+                                            ? model.settings.accentColor.opacity(0.85) : .clear,
+                                        in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                    )
+                                    .foregroundStyle(
+                                        model.settings.preferredRatingSource == .imdb
+                                            ? AnyShapeStyle(.white)
+                                            : imdbAvailable
+                                                ? AnyShapeStyle(.primary)
+                                                : AnyShapeStyle(.tertiary)
+                                    )
+                            }
+                            .disabled(!imdbAvailable)
+                        }
+                        .padding(4)
+                        .liquidGlass(cornerRadius: 18)
+                        Text(imdbAvailable
+                            ? "IMDb scores from OMDb are used for rating displays, filters, and sorts where available."
+                            : "Add an OMDb API key below to enable IMDb ratings.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
                     .settingBubble()
 
-                    if model.settings.preferredRatingSource == .imdb {
                     let primaryTrimmed = model.settings.omdbPrimaryKey.trimmingCharacters(in: .whitespacesAndNewlines)
                     DisclosureGroup(isExpanded: $omdbKeysExpanded) {
                         VStack(alignment: .leading, spacing: 12) {
@@ -246,7 +278,6 @@ struct SettingsView: View {
                     .tint(model.settings.accentColor)
                     .settingBubble()
                     .onAppear { omdbKeysExpanded = primaryTrimmed.isEmpty }
-                    } // end if preferredRatingSource == .imdb
 
                     VStack(alignment: .leading, spacing: 6) {
                         Toggle("Prioritise English", isOn: $model.settings.prioritiseEnglish)

@@ -761,7 +761,7 @@ final class VestigoModel: ObservableObject {
             hideExtrasAndPromos: settings.hideExtrasAndPromosFromRecommended
         )
         seriesNext = await filteredContentCleanupIfNeeded(
-            preparedResults(nextItems.uniqued().filter { !library.isWatched($0.key) && !library.isNeverShowAgain($0.key) }, hideWatched: true),
+            preparedResults(nextItems.uniqued().filter { !library.isWatched($0.key) && !library.isNeverShowAgain($0.key) && $0.kind == .tv }, hideWatched: true),
             hideShortFilms: settings.hideShortFilmsFromRecommended,
             hideExtrasAndPromos: settings.hideExtrasAndPromosFromRecommended
         )
