@@ -1472,7 +1472,7 @@ final class VestigoModel: ObservableObject {
         }
 
         if let minimumRating = answers.minimumRating, let minimum = minimumRating.minimumRating, ratingSortValue(for: item) >= minimum {
-            score += 2.0
+            score += 5.0
         }
 
         if !answers.contentRatings.isEmpty && !answers.contentRatings.contains(.any) {
@@ -1540,12 +1540,16 @@ final class VestigoModel: ObservableObject {
             base = pickForMeKeywordScore(text, ["mission", "operation", "rescue", "espionage", "military objective", "survival objective", "special operations", "spy", "objective"]) * 2.0 +
                 (genres.intersection([53, 28, 10752, 80, 36]).isEmpty ? 0 : 4.2)
         case .heist:
-            // Sophisticated caper signals weighted much higher than generic robbery/theft
-            let caperSignals = ["heist", "caper", "con artist", "con man", "con woman", "con game", "grifter", "confidence trick", "casino", "infiltrat", "scheme", "elaborate", "elaborate plan", "jewel"]
+            let caperSignals = ["heist", "caper", "con artist", "con man", "con woman", "con game", "grifter", "confidence trick", "casino", "infiltrat", "scheme", "mastermind", "getaway", "elaborate", "jewel"]
             let bruteSignals = ["robbery", "theft", "steal", "thief", "extraction"]
-            let caperScore = Double(caperSignals.filter { text.contains($0) }.count) * 3.4
-            let bruteScore = Double(bruteSignals.filter { text.contains($0) }.count) * 1.0
-            let genreBase = genres.intersection([80, 53]).isEmpty ? 0 : 4.2  // Crime or Thriller only
+            let caperCount = caperSignals.filter { text.contains($0) }.count
+            let bruteCount = bruteSignals.filter { text.contains($0) }.count
+            let caperScore = Double(caperCount) * 4.5
+            let bruteScore = Double(bruteCount) * 0.8
+            // GenreBase only meaningful when there are actual heist-related signals in the text;
+            // without signals, Crime/Thriller alone isn't enough to score well as a heist film.
+            let genreBase = genres.intersection([80, 53]).isEmpty ? 0.0 :
+                (caperCount > 0 ? 5.5 : (bruteCount > 0 ? 4.0 : 1.5))
             base = caperScore + bruteScore + genreBase
         case .adventure:
             base = pickForMeKeywordScore(text, ["treasure", "expedition", "exploration", "archaeology", "quest", "journey", "travel"]) * 2.0 +
@@ -1640,18 +1644,18 @@ final class VestigoModel: ObservableObject {
         let rating = ratingSortValue(for: item)
 
         if rating >= minimum {
-            return 3.0 + min((rating - minimum) * 1.4, 2.2)
+            return 8.0 + min((rating - minimum) * 4.5, 13.0)
         }
 
         if rating >= minimum - 0.4 {
-            return -6.0
+            return -12.0
         }
 
         if rating >= minimum - 0.8 {
-            return -18.0
+            return -28.0
         }
 
-        return -45.0
+        return -55.0
     }
 
     private func pickForMeRottenTomatoesPenalty(for item: MediaItem) -> Double {

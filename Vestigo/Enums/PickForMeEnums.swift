@@ -348,7 +348,7 @@ enum PickForMeArchetype: String, CaseIterable, PickForMeOption {
         case .thriller: return "Tension, danger, suspense, or pursuit."
         case .smartProblems: return "Experts, teams, investigations, planning, or persistence."
         case .mission: return "A specific objective, operation, rescue, or survival mission."
-        case .heist: return "Sophisticated capers, cons, and elaborate schemes — think Ocean's Eleven, not armed robbery."
+        case .heist: return "Sophisticated capers, cons, and elaborate schemes."
         case .adventure: return "Exploration, discovery, and excitement."
         case .characterRelationships: return "Relationships, family dynamics, and personal growth."
         case .humanTriumph: return "Overcoming hurdles, resilience, achievement, or against-the-odds stories."
