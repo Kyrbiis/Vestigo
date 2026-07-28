@@ -365,6 +365,28 @@ enum PickForMeArchetype: String, CaseIterable, PickForMeOption {
     }
     var isAnyOption: Bool { self == .surprise || self == .noPreference }
 
+    // TMDb keyword terms to look up for targeted discovery alongside genre-based discovery.
+    // Only populated for archetypes where genre sorting alone leaves good films buried
+    // (e.g. heist films at 7.2 rating sit far below the top of the Crime genre list).
+    // Empty means genre-based discovery is already sufficient.
+    var discoveryKeywords: [String] {
+        switch self {
+        case .heist:                  return ["heist", "caper"]
+        case .mystery:                return ["murder mystery", "whodunit"]
+        case .mission:                return ["espionage", "spy"]
+        case .mindBending:            return ["unreliable narrator", "mind-bending"]
+        case .thoughtfulSciFi:        return ["dystopia", "artificial intelligence"]
+        case .humanTriumph:           return ["underdog"]
+        case .adventure:              return ["treasure hunt"]
+        case .characterRelationships: return ["coming of age"]
+        // Genre-based discovery is sufficient for these
+        case .feelGood, .comedy, .thriller, .smartProblems,
+             .documentary, .historical, .war, .epicSpectacle, .horror,
+             .surprise, .noPreference:
+            return []
+        }
+    }
+
     var thematicDiscoveryPhrase: String? {
         switch self {
         case .feelGood: return "uplifting and heartwarming films that leave you feeling good"

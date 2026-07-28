@@ -956,10 +956,11 @@ final class VestigoModel: ObservableObject {
                     )) ?? []
                 }
             }
-            // Heist keyword discovery — bypasses rating-rank ordering to find heist-tagged films
-            // directly, regardless of where they fall in a sorted Crime/Thriller list
-            if answers.archetypes.contains(.heist) {
-                for kw in ["heist", "caper"] {
+            // Keyword discovery for primary archetypes — finds archetype-specific films that
+            // may not appear in the top pages of a genre-sorted list (e.g. heist films with
+            // a 7.2 rating sit past page 3 of the Crime genre sorted by vote_average.desc)
+            for archetype in answers.archetypes where !archetype.isAnyOption {
+                for kw in archetype.discoveryKeywords {
                     let keyword = kw
                     group.addTask { [weak self] in
                         guard let self else { return [] }
