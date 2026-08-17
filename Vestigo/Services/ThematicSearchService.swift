@@ -16,33 +16,74 @@ struct ThematicSearchService {
     let tmdb: TMDbService
 
     static var isAvailable: Bool { true }
-
     static let dailyLimit = 14_400
 
     func search(rawQuery: String, filter: MediaFilter) async throws -> [ThematicSearchResult] {
-        async let movieSuggestions = fetchSuggestions(rawQuery: rawQuery, filterParam: "movie")
-        async let tvSuggestions    = fetchSuggestions(rawQuery: rawQuery, filterParam: "tv")
-        let (movies, tv) = try await (movieSuggestions, tvSuggestions)
-        async let movieResults = resolve(suggestions: movies, filter: .movie)
-        async let tvResults    = resolve(suggestions: tv,     filter: .tv)
-        let (mr, tr) = await (movieResults, tvResults)
-        return mr + tr
+        async let movieItems = fetchItems(rawQuery: rawQuery, filterParam: "movie")
+        async let tvItems    = fetchItems(rawQuery: rawQuery, filterParam: "tv")
+        let (movies, tv) = try await (movieItems, tvItems)
+
+        var seen = Set<MediaKey>()
+        return (movies + tv)
+            .sorted { $0.score > $1.score }
+            .filter { seen.insert($0.item.key).inserted }
     }
 
-    // MARK: - Groq recommendation fetch
+    // MARK: - Backend fetch
 
-    private struct Suggestion: Decodable {
-        let title: String
-        let year: Int?
-        let reason: String
+    private struct ThematicItem: Decodable {
+        let id: Int
+        let title: String?
+        let name: String?
+        let overview: String?
+        let posterPath: String?
+        let backdropPath: String?
+        let releaseDate: String?
+        let firstAirDate: String?
+        let voteAverage: Double?
+        let voteCount: Int?
+        let genreIDs: [Int]?
+        let originalLanguage: String?
+        let mediaType: String?
+
+        enum CodingKeys: String, CodingKey {
+            case id, title, name, overview
+            case posterPath = "poster_path"
+            case backdropPath = "backdrop_path"
+            case releaseDate = "release_date"
+            case firstAirDate = "first_air_date"
+            case voteAverage = "vote_average"
+            case voteCount = "vote_count"
+            case genreIDs = "genre_ids"
+            case originalLanguage = "original_language"
+            case mediaType = "media_type"
+        }
+
+        var asMediaItem: MediaItem {
+            MediaItem(
+                id: id,
+                kind: mediaType == "tv" ? .tv : .movie,
+                title: title ?? name ?? "",
+                overview: overview ?? "",
+                posterPath: posterPath,
+                backdropPath: backdropPath,
+                releaseDate: releaseDate ?? firstAirDate,
+                voteAverage: voteAverage ?? 0,
+                voteCount: voteCount,
+                genreIDs: genreIDs ?? [],
+                creditRole: nil,
+                runtime: nil,
+                originalLanguage: originalLanguage
+            )
+        }
     }
 
     private struct RecommendResponse: Decodable {
         let ok: Bool
-        let titles: [Suggestion]
+        let items: [ThematicItem]
     }
 
-    private func fetchSuggestions(rawQuery: String, filterParam: String) async throws -> [Suggestion] {
+    private func fetchItems(rawQuery: String, filterParam: String) async throws -> [ThematicSearchResult] {
         struct Body: Encodable { let query: String; let filter: String }
 
         var req = URLRequest(url: VestigoBackendConfiguration.baseURL.appending(path: "thematic-recommend"))
@@ -55,74 +96,17 @@ struct ThematicSearchService {
             throw URLError(.badServerResponse)
         }
         let decoded = try JSONDecoder().decode(RecommendResponse.self, from: data)
-        return decoded.titles
-    }
 
-    // MARK: - TMDb resolution
-
-    private func resolve(suggestions: [Suggestion], filter: MediaFilter) async -> [ThematicSearchResult] {
-        await withTaskGroup(of: ThematicSearchResult?.self) { group in
-            for (index, suggestion) in suggestions.enumerated() {
-                let s = suggestion
-                let rank = index
-                group.addTask {
-                    guard let item = await self.resolveTitle(s.title, year: s.year, filter: filter) else { return nil }
-                    let score = Double(suggestions.count - rank)
-                    return ThematicSearchResult(
-                        item: item,
-                        matchedFacets: [s.reason],
-                        penaltySignals: [],
-                        score: score
-                    )
-                }
+        return decoded.items
+            .filter { !($0.title ?? $0.name ?? "").isEmpty }
+            .enumerated()
+            .map { index, item in
+                ThematicSearchResult(
+                    item: item.asMediaItem,
+                    matchedFacets: [],
+                    penaltySignals: [],
+                    score: Double(decoded.items.count - index)
+                )
             }
-            var results: [ThematicSearchResult] = []
-            for await r in group { if let r { results.append(r) } }
-
-            // Deduplicate by MediaKey, keeping highest score (earliest Groq suggestion)
-            var seen = Set<MediaKey>()
-            return results
-                .sorted { $0.score > $1.score }
-                .filter { seen.insert($0.item.key).inserted }
-        }
-    }
-
-    private func resolveTitle(_ title: String, year: Int?, filter: MediaFilter) async -> MediaItem? {
-        guard let results = try? await tmdb.search(query: title, filter: filter), !results.isEmpty else { return nil }
-
-        let normalized = normalize(title)
-
-        // Prefer an exact or near-exact title match
-        if let exact = results.first(where: { normalize($0.title) == normalized }) {
-            return exact
-        }
-
-        // If year provided, prefer the result whose release year matches
-        if let year {
-            if let yearMatch = results.first(where: { releaseYear(of: $0) == year }) {
-                return yearMatch
-            }
-        }
-
-        // Fall back to first result only if title is reasonably close
-        let first = results[0]
-        let firstNorm = normalize(first.title)
-        if firstNorm.contains(normalized) || normalized.contains(firstNorm) {
-            return first
-        }
-
-        return nil
-    }
-
-    private func normalize(_ s: String) -> String {
-        s.lowercased()
-            .replacingOccurrences(of: #"[^a-z0-9 ]"#, with: "", options: .regularExpression)
-            .replacingOccurrences(of: #"\b(the|a|an)\b"#, with: "", options: .regularExpression)
-            .components(separatedBy: .whitespaces).filter { !$0.isEmpty }.joined(separator: " ")
-    }
-
-    private func releaseYear(of item: MediaItem) -> Int? {
-        guard let date = item.releaseDate, date.count >= 4 else { return nil }
-        return Int(date.prefix(4))
     }
 }
