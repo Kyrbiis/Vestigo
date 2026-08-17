@@ -26,9 +26,9 @@ A personal movie and TV tracker for iOS. Discover what to watch next, track what
 
 **Details**
 - Cast & crew with person profiles and filmographies
-- Streaming availability with prices and direct links to streaming apps where available
 - Trailers
-- Original soundtrack links where applicable
+- Streaming availability with prices and direct links to streaming apps where available
+- Original media if applicable
 
 <br>
 
