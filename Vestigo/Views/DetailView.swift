@@ -326,9 +326,7 @@ struct DetailView: View {
 
     @ViewBuilder private var trailerSection: some View {
         if let trailers = detail?.trailers, !trailers.isEmpty {
-            ForEach(Array(trailers.enumerated()), id: \.element.id) { index, trailer in
-                TrailerPlayerCard(trailer: trailer, isFirstInSection: index == 0)
-            }
+            TrailersSection(trailers: Array(trailers.prefix(3)))
         }
     }
     
@@ -380,7 +378,7 @@ struct DetailView: View {
 
     @ViewBuilder private var cinemasSection: some View {
         #if canImport(CoreLocation)
-        if item.kind == .movie {
+        if item.kind == .movie && UserDefaults.standard.bool(forKey: "Vestigo.showCinemas") {
             CinemasNearYouSection(
                 filmTitle: item.title,
                 service: cinemaService,
@@ -476,32 +474,73 @@ struct DetailView: View {
     }
 }
 
-struct TrailerPlayerCard: View {
-    let trailer: TrailerVideo
-    var isFirstInSection: Bool = true
+private struct TrailersSection: View {
+    let trailers: [TrailerVideo]
+    @State private var currentIndex = 0
+
+    private var currentTrailer: TrailerVideo { trailers[currentIndex] }
+
+    private func navigate(by offset: Int) {
+        let next = currentIndex + offset
+        guard next >= 0, next < trailers.count else { return }
+        withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) { currentIndex = next }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            if isFirstInSection {
-                Text("Trailer")
-                    .sectionTitle()
-            }
+            Text("Trailer")
+                .sectionTitle()
 
-            YouTubeTrailerPlayer(videoKey: trailer.key, title: trailer.displayTitle)
-                .aspectRatio(16 / 9, contentMode: .fit)
-                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 18, style: .continuous)
-                        .stroke(.white.opacity(0.12), lineWidth: 1)
+            HStack(spacing: 4) {
+                if trailers.count > 1 {
+                    Button { navigate(by: -1) } label: {
+                        Image(systemName: "chevron.left")
+                            .font(.system(size: 11, weight: .bold))
+                            .padding(6)
+                            .background(.white.opacity(0.12), in: Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .opacity(currentIndex > 0 ? 1 : 0)
+                    .disabled(currentIndex == 0)
                 }
 
+                YouTubeTrailerPlayer(videoKey: currentTrailer.key, title: currentTrailer.displayTitle)
+                    .id(currentTrailer.id)
+                    .aspectRatio(16 / 9, contentMode: .fit)
+                    .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            .stroke(.white.opacity(0.12), lineWidth: 1)
+                    }
+
+                if trailers.count > 1 {
+                    Button { navigate(by: 1) } label: {
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 11, weight: .bold))
+                            .padding(6)
+                            .background(.white.opacity(0.12), in: Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .opacity(currentIndex < trailers.count - 1 ? 1 : 0)
+                    .disabled(currentIndex >= trailers.count - 1)
+                }
+            }
+            .padding(.horizontal, -14)
+            .gesture(
+                DragGesture(minimumDistance: 30)
+                    .onEnded { value in
+                        if value.translation.width < -50 { navigate(by: 1) }
+                        else if value.translation.width > 50 { navigate(by: -1) }
+                    }
+            )
+
             VStack(alignment: .leading, spacing: 4) {
-                Text(trailer.displayTitle)
+                Text(currentTrailer.displayTitle)
                     .font(.caption.bold())
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
 
-                if !trailer.official {
+                if !currentTrailer.official {
                     Label("Not from official channel — may not be accurate", systemImage: "exclamationmark.triangle")
                         .font(.caption2)
                         .foregroundStyle(.tertiary)

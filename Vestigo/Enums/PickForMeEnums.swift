@@ -24,7 +24,7 @@ struct PickForMeAnswers: Hashable {
     var genrePreferences: Set<PickForMeGenrePreference> = []
     var fictionPreference: PickForMeFictionPreference?
     var sourceMaterial: PickForMeSourceMaterial?
-    var runtime: PickForMeRuntime?
+    var runtimeRange: PickForMeRuntimeRange = .unconstrained
     var releaseAge: PickForMeReleaseAge?
     var contentRatings: Set<PickForMeContentRating> = []
     var minimumRating: PickForMeMinimumRating?
@@ -38,7 +38,7 @@ struct PickForMeAnswers: Hashable {
         if !genrePreferences.isEmpty { count += 1 }
         if fictionPreference != nil { count += 1 }
         if sourceMaterial != nil { count += 1 }
-        if runtime != nil { count += 1 }
+        if runtimeRange.hasConstraint { count += 1 }
         if releaseAge != nil { count += 1 }
         if !contentRatings.isEmpty { count += 1 }
         if minimumRating != nil { count += 1 }
@@ -54,7 +54,7 @@ struct PickForMeAnswers: Hashable {
         if !genrePreferences.isEmpty && !genrePreferences.contains(.noPreference) { count += 1 }
         if let fictionPreference, fictionPreference != .noPreference { count += 1 }
         if let sourceMaterial, sourceMaterial != .noPreference { count += 1 }
-        if !isSeriesOnly, let runtime, runtime != .any { count += 1 }
+        if !isSeriesOnly && runtimeRange.hasConstraint { count += 1 }
         if let releaseAge, releaseAge != .noPreference { count += 1 }
         if !contentRatings.isEmpty && !contentRatings.contains(.any) { count += 1 }
         if let minimumRating, minimumRating != .any { count += 1 }
@@ -125,13 +125,13 @@ struct PickForMeAnswers: Hashable {
     var pickForMeThematicQuery: String? {
         var terms: [String] = []
         for archetype in archetypes where !archetype.isAnyOption {
-            if let t = archetype.groqConceptTerm { terms.append(t) }
+            if let t = archetype.cerebrasConceptTerm { terms.append(t) }
         }
         for archetype in secondaryArchetypes where !archetype.isAnyOption {
-            if let t = archetype.groqConceptTerm { terms.append(t) }
+            if let t = archetype.cerebrasConceptTerm { terms.append(t) }
         }
         for genre in genrePreferences where !genre.isAnyOption {
-            if let t = genre.groqConceptTerm { terms.append(t) }
+            if let t = genre.cerebrasConceptTerm { terms.append(t) }
         }
         guard !terms.isEmpty else { return nil }
         return terms.joined(separator: ", ")
@@ -143,7 +143,7 @@ struct PickForMeAnswers: Hashable {
         // genre_flavor goes first — anchors every suggestion around the required setting/genre
         let genreTerms = genrePreferences.compactMap { pref -> String? in
             guard !pref.isAnyOption else { return nil }
-            if let term = pref.groqConceptTerm {
+            if let term = pref.cerebrasConceptTerm {
                 return "\(pref.title) (\(term))"
             }
             return pref.title
@@ -404,7 +404,7 @@ enum PickForMeArchetype: String, CaseIterable, PickForMeOption {
         }
     }
 
-    var groqConceptTerm: String? {
+    var cerebrasConceptTerm: String? {
         switch self {
         case .feelGood: return "uplifting heartwarming optimistic"
         case .mystery: return "mystery detective whodunit hidden secrets"
@@ -448,7 +448,7 @@ enum PickForMeGenrePreference: String, CaseIterable, PickForMeOption {
     }
     var isAnyOption: Bool { self == .noPreference }
 
-    var groqConceptTerm: String? {
+    var cerebrasConceptTerm: String? {
         switch self {
         case .space: return "set in outer space — spacecraft, astronauts, alien worlds, space stations, interstellar travel"
         case .fantasy: return "fantasy world — magic, mythical creatures, kingdoms, sorcery"
@@ -509,30 +509,37 @@ enum PickForMeSourceMaterial: String, CaseIterable, PickForMeOption {
     }
 }
 
-enum PickForMeRuntime: String, CaseIterable, PickForMeOption {
-    case underNinety, underTwoHours, underTwoAndHalfHours, any
-    var id: String { rawValue }
-    var title: String {
-        switch self {
-        case .underNinety: return "Under 90 minutes"
-        case .underTwoHours: return "Under 2 hours"
-        case .underTwoAndHalfHours: return "Under 2.5 hours"
-        case .any: return "Any length"
-        }
-    }
-    var isAnyOption: Bool { self == .any }
-    var minimumMinutes: Int? { nil }
-    var maximumMinutes: Int? {
-        switch self {
-        case .underNinety: return 89
-        case .underTwoHours: return 119
-        case .underTwoAndHalfHours: return 149
-        case .any: return nil
-        }
-    }
+struct PickForMeRuntimeRange: Hashable {
+    var minMinutes: Int  // 0 = no minimum
+    var maxMinutes: Int  // 0 = no maximum
+
+    static let unconstrained = PickForMeRuntimeRange(minMinutes: 0, maxMinutes: 0)
+    static let steps = [0, 30, 60, 90, 120, 150, 180, 210, 240]
+
+    var hasConstraint: Bool { minMinutes > 0 || maxMinutes > 0 }
+
     func contains(_ minutes: Int) -> Bool {
-        guard let maximumMinutes else { return true }
-        return minutes <= maximumMinutes
+        if minMinutes > 0 && minutes < minMinutes { return false }
+        if maxMinutes > 0 && minutes > maxMinutes { return false }
+        return true
+    }
+
+    var displayString: String {
+        let minStr = minMinutes > 0 ? Self.formatMinutes(minMinutes) : nil
+        let maxStr = maxMinutes > 0 ? Self.formatMinutes(maxMinutes) : nil
+        switch (minStr, maxStr) {
+        case (nil, nil): return "Any length"
+        case (let min?, nil): return "\(min) or more"
+        case (nil, let max?): return "Up to \(max)"
+        case (let min?, let max?): return "\(min) – \(max)"
+        }
+    }
+
+    static func formatMinutes(_ m: Int) -> String {
+        guard m > 0 else { return "Any" }
+        let h = m / 60, mins = m % 60
+        if h == 0 { return "\(mins)m" }
+        return mins == 0 ? "\(h)h" : "\(h)h \(mins)m"
     }
 }
 

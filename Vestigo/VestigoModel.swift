@@ -100,6 +100,7 @@ final class VestigoModel: ObservableObject {
     private var externalRatingInFlight: Set<MediaKey> = []
     private var searchTask: Task<Void, Never>?
     private var saveTask: Task<Void, Never>?
+    private var recommendationsRefreshTask: Task<Void, Never>?
     private var searchRequestID = UUID()
     private var isApplyingCloudSnapshot = false
     private var mediaSearchCache: [String: [MediaItem]] = [:]
@@ -331,28 +332,10 @@ final class VestigoModel: ObservableObject {
 
         await loadHome()
 
-        scheduleWatchlistNotificationsOnStartup()
-        NotificationScheduler.shared.scheduleNextBackgroundCheck()
-
-        #if os(iOS)
-        if let pendingURL = AppDelegate.pendingDeepLinkURL {
-            openNotificationDeepLink(pendingURL)
-        }
-        #endif
-
         Task {
             await syncFromCloudOnLaunch()
             await loadHome()
         }
-    }
-
-    private func scheduleWatchlistNotificationsOnStartup() {
-        let upcoming = library.watchlistItems.filter { $0.isUpcoming }
-        guard !upcoming.isEmpty else { return }
-        NotificationScheduler.shared.scheduleWatchlistNotifications(
-            for: upcoming,
-            preferences: settings.notificationPreferences
-        )
     }
 
     func markNotificationPromptSeen() {
@@ -387,7 +370,6 @@ final class VestigoModel: ObservableObject {
             guard settings.notificationPreferences.watchlistLeadTimes.count > 1 else { return }
             settings.notificationPreferences.watchlistLeadTimes.remove(leadTime)
         }
-        scheduleWatchlistNotificationsOnStartup()
         saveLocalSoon()
     }
 
@@ -452,9 +434,6 @@ final class VestigoModel: ObservableObject {
     }
 
     func openNotificationDeepLink(_ deepLink: URL) {
-        #if os(iOS)
-        AppDelegate.pendingDeepLinkURL = nil
-        #endif
         guard deepLink.scheme == "vestigo", let host = deepLink.host else { return }
         let kind: MediaKind = host == "tv" ? .tv : .movie
         let pathComponents = deepLink.pathComponents.filter { $0 != "/" }
@@ -858,12 +837,6 @@ final class VestigoModel: ObservableObject {
             hideExtrasAndPromos: settings.hideExtrasAndPromosFromRecommended
         )
 
-        let prefs = settings.notificationPreferences
-        if prefs.isEnabled {
-            for item in recommendations where item.isUpcoming {
-                NotificationScheduler.shared.scheduleIfSimilarUpcoming(item, preferences: prefs)
-            }
-        }
     }
 
     func loadTopRated(kind: MediaKind) async {
@@ -936,7 +909,7 @@ final class VestigoModel: ObservableObject {
                     return (try? await self.tmdb.discoverPickForMe(
                         filter: effectiveFilter,
                         genreIDs: primaryGenreIDs,
-                        runtime: answers.runtime,
+                        runtimeRange: answers.runtimeRange,
                         minimumRating: 0,
                         includeAdult: !self.settings.hideAdultResults,
                         sortBy: "vote_average.desc"
@@ -1014,7 +987,7 @@ final class VestigoModel: ObservableObject {
                 // Exclude obscure titles with very few votes — prevents tag-matched noise from surfacing
                 if let count = item.voteCount, count < 200 { return false }
 
-                if !pickForMeRuntimeAllows(item, runtime: answers.runtime) {
+                if !pickForMeRuntimeAllows(item, runtimeRange: answers.runtimeRange) {
                     return false
                 }
 
@@ -1234,12 +1207,12 @@ final class VestigoModel: ObservableObject {
         return balanced
     }
 
-    private func pickForMeRuntimeAllows(_ item: MediaItem, runtime: PickForMeRuntime?) -> Bool {
+    private func pickForMeRuntimeAllows(_ item: MediaItem, runtimeRange: PickForMeRuntimeRange) -> Bool {
         guard item.kind == .movie else { return true }
-        guard let runtime, runtime != .any else { return true }
-        guard let minutes = detailsCache[item.key]?.runtime ?? item.runtime else { return false }
+        guard runtimeRange.hasConstraint else { return true }
+        guard let minutes = detailsCache[item.key]?.runtime ?? item.runtime else { return true }
 
-        return runtime.contains(minutes)
+        return runtimeRange.contains(minutes)
     }
 
     private func loadPickForMeStrictFilterDetails(for items: [MediaItem], answers: PickForMeAnswers) async {
@@ -1498,7 +1471,7 @@ final class VestigoModel: ObservableObject {
             score += 1.0
         }
 
-        if answers.runtime != nil && answers.runtime != .any {
+        if answers.runtimeRange.hasConstraint {
             score += 1.0
         }
 
@@ -2626,7 +2599,7 @@ final class VestigoModel: ObservableObject {
         } catch { }
     }
     
-    func loadDetail(_ item: MediaItem, runNotificationChecks: Bool = true) async {
+    func loadDetail(_ item: MediaItem) async {
         if detailsCache[item.key] == nil {
             do { detailsCache[item.key] = try await tmdb.detail(for: item) } catch { }
         }
@@ -2692,46 +2665,6 @@ final class VestigoModel: ObservableObject {
             } else {
                 relatedMediaCache[item.key] = []
             }
-        }
-        if runNotificationChecks {
-            checkNotificationsAfterDetailLoad(item)
-        }
-    }
-
-    private func checkNotificationsAfterDetailLoad(_ item: MediaItem) {
-        let prefs = settings.notificationPreferences
-        guard prefs.isEnabled else { return }
-
-        let isWatchlisted = library.isInWatchlist(item.key)
-        let isWatched = library.isWatched(item.key)
-
-        if let detail = detailsCache[item.key] {
-            if isWatchlisted, !isWatched {
-                NotificationScheduler.shared.checkNewTrailer(
-                    for: item, trailerCount: detail.trailers.count, preferences: prefs
-                )
-            }
-
-            if isWatched && item.kind == .tv {
-                NotificationScheduler.shared.checkNewSeason(
-                    for: item, seasons: detail.seasons, preferences: prefs
-                )
-            }
-
-            // Notify if this is an unwatched installment in a franchise the user has seen
-            if !isWatched {
-                let hasWatchedFranchisePeer = detail.sameFranchiseKeys.contains { library.isWatched($0) }
-                if hasWatchedFranchisePeer {
-                    NotificationScheduler.shared.notifyFranchiseInstallment(item, preferences: prefs)
-                }
-            }
-        }
-
-        if isWatchlisted, !isWatched, let providers = providerCache[item.key] {
-            NotificationScheduler.shared.checkProviderChange(
-                for: item, providers: providers, preferences: prefs,
-                subscribedServiceNames: settings.subscribedServiceNames
-            )
         }
     }
 
@@ -3031,16 +2964,8 @@ final class VestigoModel: ObservableObject {
     }
     
     func toggleWatchlist(_ item: MediaItem) {
-        let wasInWatchlist = library.isInWatchlist(item.key)
         library.toggleWatchlist(item)
         saveLocalSoon()
-
-        let prefs = settings.notificationPreferences
-        if library.isInWatchlist(item.key) && !wasInWatchlist {
-            NotificationScheduler.shared.scheduleWatchlistNotifications(for: [item], preferences: prefs)
-        } else if !library.isInWatchlist(item.key) && wasInWatchlist {
-            NotificationScheduler.shared.cancelWatchlistNotifications(for: item)
-        }
     }
     
     func toggleWatched(_ item: MediaItem, showsRatingPrompt: Bool = true) {
@@ -3079,9 +3004,6 @@ final class VestigoModel: ObservableObject {
         
         if isNowWatched {
             generateDynamicCollections(from: item)
-            #if canImport(UserNotifications)
-            NotificationScheduler.shared.cancelAllPendingNotifications(for: item)
-            #endif
         }
         saveLocalSoon()
         
@@ -3150,9 +3072,9 @@ final class VestigoModel: ObservableObject {
 
         collectionRecommendations.removeAll()
         saveLocalSoon()
-        Task { await loadSmartRecommendations() }
+        scheduleRecommendationsRefresh()
     }
-    
+
     private func removeFromForYouRecommendations(_ item: MediaItem) {
         recommendations.removeAll { $0.key == item.key }
         moreLikeLastWatched.removeAll { $0.key == item.key }
@@ -3226,17 +3148,16 @@ final class VestigoModel: ObservableObject {
         library.ratings[item.key] = rating
         generateDynamicCollections(from: item)
         saveLocalSoon()
-        Task { await loadSmartRecommendations() }
+        scheduleRecommendationsRefresh()
     }
-    
+
     func requestToggleFavourite(_ item: MediaItem) {
         guard item.kind == .movie || item.kind == .tv else { return }
         guard library.isWatched(item.key) else { return }
 
         library.toggleFavourite(item)
         saveLocalSoon()
-        objectWillChange.send()
-        Task { await loadSmartRecommendations() }
+        scheduleRecommendationsRefresh()
     }
 
     func toggleNeverShowAgain(_ item: MediaItem) {
@@ -3249,8 +3170,7 @@ final class VestigoModel: ObservableObject {
         }
 
         saveLocalSoon()
-        objectWillChange.send()
-        Task { await loadSmartRecommendations() }
+        scheduleRecommendationsRefresh()
     }
 
     func toggleNotInterested(_ item: MediaItem) {
@@ -3263,8 +3183,7 @@ final class VestigoModel: ObservableObject {
         }
 
         saveLocalSoon()
-        objectWillChange.send()
-        Task { await loadSmartRecommendations() }
+        scheduleRecommendationsRefresh()
     }
 
     func confirmFavouriteReplacement() {
@@ -3341,7 +3260,7 @@ final class VestigoModel: ObservableObject {
         }
 
         saveLocalSoon()
-        Task { await loadSmartRecommendations() }
+        scheduleRecommendationsRefresh()
         return notFound
     }
 
@@ -3646,6 +3565,15 @@ final class VestigoModel: ObservableObject {
     
     func saveSettings() {
         saveLocalSoon()
+    }
+
+    private func scheduleRecommendationsRefresh() {
+        recommendationsRefreshTask?.cancel()
+        recommendationsRefreshTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            guard !Task.isCancelled, let self else { return }
+            await self.loadSmartRecommendations()
+        }
     }
 
     private func saveLocalSoon() {

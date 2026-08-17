@@ -2215,6 +2215,17 @@ private struct DevToolsPanel: View {
             }
             .settingBubble()
 
+            // MARK: Features
+            devSectionLabel("Features")
+
+            Toggle("Show cinema showtimes", isOn: Binding(
+                get: { UserDefaults.standard.bool(forKey: "Vestigo.showCinemas") },
+                set: { UserDefaults.standard.set($0, forKey: "Vestigo.showCinemas") }
+            ))
+            .font(.headline.bold())
+            .tint(model.settings.accentColor)
+            .settingBubble()
+
             // MARK: Actions
             devSectionLabel("Actions")
 
@@ -2243,12 +2254,6 @@ private struct DevToolsPanel: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .settingBubble()
 
-            Button("Reset notification deduplication store") {
-                NotificationScheduler.shared.resetDeduplicationStore()
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .settingBubble()
-
             Button("Send test notification") {
                 model.postDevTestNotification(
                     title: "Vestigo test notification",
@@ -2264,23 +2269,7 @@ private struct DevToolsPanel: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .settingBubble()
 
-            // MARK: Simulate notifications
-            devSectionLabel("Simulate Notifications")
 
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Fires each kind immediately, bypassing all guards. Check Notification Centre after tapping.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .padding(.bottom, 2)
-
-                ForEach(NotificationKind.allCases) { kind in
-                    Button("Fire: \(kind.title)") {
-                        NotificationScheduler.shared.fireTestNotification(for: kind)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                }
-            }
-            .settingBubble()
 
             // MARK: Diagnostics
             devSectionLabel("Diagnostics")

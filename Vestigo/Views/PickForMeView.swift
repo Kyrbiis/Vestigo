@@ -56,16 +56,7 @@ struct PickForMeView: View {
 
                     VStack(alignment: .leading, spacing: 24) {
                         header
-
-                        if isReviewingAnswers && !isEditingAnswerFromReview {
-                            answerReviewContent
-                        } else if results.isEmpty || isEditingAnswerFromReview {
-                            questionContent
-                        } else {
-                            resultContent
-                                .offset(x: resultDragOffset)
-                                .animation(.interactiveSpring(response: 0.3, dampingFraction: 0.8), value: resultDragOffset)
-                        }
+                        mainContent
                     }
                     .padding(16)
                     .padding(.bottom, 28)
@@ -136,7 +127,7 @@ struct PickForMeView: View {
         }
         .onChange(of: answers.mediaFormat) { _, _ in
             if answers.isSeriesOnly {
-                answers.runtime = nil
+                answers.runtimeRange = .unconstrained
             }
 
             if step >= steps.count {
@@ -170,6 +161,18 @@ struct PickForMeView: View {
             if step >= steps.count {
                 step = max(steps.count - 1, 0)
             }
+        }
+    }
+
+    @ViewBuilder private var mainContent: some View {
+        if isReviewingAnswers && !isEditingAnswerFromReview {
+            answerReviewContent
+        } else if results.isEmpty || isEditingAnswerFromReview {
+            questionContent
+        } else {
+            resultContent
+                .offset(x: resultDragOffset)
+                .animation(.interactiveSpring(response: 0.3, dampingFraction: 0.8), value: resultDragOffset)
         }
     }
 
@@ -320,7 +323,7 @@ struct PickForMeView: View {
         case .sourceMaterial:
             singleChoiceList(PickForMeSourceMaterial.allCases, selection: $answers.sourceMaterial)
         case .runtime:
-            singleChoiceList(PickForMeRuntime.allCases, selection: $answers.runtime)
+            RuntimeRangeSlider(range: $answers.runtimeRange, accentColor: model.settings.accentColor)
         case .releaseAge:
             singleChoiceList(PickForMeReleaseAge.allCases, selection: $answers.releaseAge)
         case .ageRating:
@@ -466,7 +469,7 @@ struct PickForMeView: View {
             }
         }
         .task(id: results[resultIndex].key) {
-            await model.loadDetail(results[resultIndex], runNotificationChecks: false)
+            await model.loadDetail(results[resultIndex])
         }
     }
 
@@ -740,7 +743,7 @@ struct PickForMeView: View {
         case .sourceMaterial:
             answers.sourceMaterial = nil
         case .runtime:
-            answers.runtime = nil
+            answers.runtimeRange = .unconstrained
         case .releaseAge:
             answers.releaseAge = nil
         case .ageRating:
@@ -840,7 +843,7 @@ struct PickForMeView: View {
         case .sourceMaterial:
             return answers.sourceMaterial?.title ?? "Not answered"
         case .runtime:
-            return answers.runtime?.title ?? "Not answered"
+            return answers.runtimeRange.hasConstraint ? answers.runtimeRange.displayString : "Not answered"
         case .releaseAge:
             return answers.releaseAge?.title ?? "Not answered"
         case .ageRating:
@@ -938,7 +941,7 @@ struct PickForMeView: View {
         case .sourceMaterial:
             return answers.sourceMaterial != nil
         case .runtime:
-            return answers.runtime != nil
+            return answers.runtimeRange.hasConstraint
         case .releaseAge:
             return answers.releaseAge != nil
         case .ageRating:
@@ -1095,5 +1098,110 @@ struct PickForMeOptionButton: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+    }
+}
+
+// MARK: - Runtime Range Slider
+
+private struct RuntimeRangeSlider: View {
+    @Binding var range: PickForMeRuntimeRange
+    let accentColor: Color
+
+    private let steps = PickForMeRuntimeRange.steps
+    private let handleSize: CGFloat = 28
+
+    private var leftIndex: Int {
+        steps.firstIndex(of: range.minMinutes) ?? 0
+    }
+
+    private var rightIndex: Int {
+        range.maxMinutes == 0 ? steps.count - 1 : (steps.firstIndex(of: range.maxMinutes) ?? steps.count - 1)
+    }
+
+    private func xForIndex(_ index: Int, trackWidth: CGFloat) -> CGFloat {
+        guard steps.count > 1 else { return 0 }
+        return trackWidth * CGFloat(index) / CGFloat(steps.count - 1)
+    }
+
+    private func indexForX(_ x: CGFloat, trackWidth: CGFloat) -> Int {
+        guard trackWidth > 0, steps.count > 1 else { return 0 }
+        let fraction = max(0, min(1, x / trackWidth))
+        return Int((fraction * CGFloat(steps.count - 1)).rounded())
+    }
+
+    var body: some View {
+        VStack(spacing: 14) {
+            GeometryReader { geo in
+                let trackWidth = geo.size.width - handleSize
+
+                ZStack(alignment: .leading) {
+                    Capsule()
+                        .fill(.white.opacity(0.15))
+                        .frame(height: 5)
+                        .padding(.horizontal, handleSize / 2)
+
+                    let lx = xForIndex(leftIndex, trackWidth: trackWidth)
+                    let rx = xForIndex(rightIndex, trackWidth: trackWidth)
+                    Capsule()
+                        .fill(accentColor)
+                        .frame(width: max(0, rx - lx), height: 5)
+                        .offset(x: lx + handleSize / 2)
+
+                    Circle()
+                        .fill(.white)
+                        .frame(width: handleSize, height: handleSize)
+                        .shadow(color: .black.opacity(0.2), radius: 4, x: 0, y: 2)
+                        .offset(x: xForIndex(leftIndex, trackWidth: trackWidth))
+                        .gesture(
+                            DragGesture(coordinateSpace: .named("runtime_slider"))
+                                .onChanged { value in
+                                    let newIndex = indexForX(value.location.x - handleSize / 2, trackWidth: trackWidth)
+                                    let clamped = max(0, min(newIndex, rightIndex))
+                                    range = PickForMeRuntimeRange(minMinutes: steps[clamped], maxMinutes: range.maxMinutes)
+                                }
+                        )
+
+                    Circle()
+                        .fill(.white)
+                        .frame(width: handleSize, height: handleSize)
+                        .shadow(color: .black.opacity(0.2), radius: 4, x: 0, y: 2)
+                        .offset(x: xForIndex(rightIndex, trackWidth: trackWidth))
+                        .gesture(
+                            DragGesture(coordinateSpace: .named("runtime_slider"))
+                                .onChanged { value in
+                                    let newIndex = indexForX(value.location.x - handleSize / 2, trackWidth: trackWidth)
+                                    let clamped = max(leftIndex, min(newIndex, steps.count - 1))
+                                    let newMax = clamped == steps.count - 1 ? 0 : steps[clamped]
+                                    range = PickForMeRuntimeRange(minMinutes: range.minMinutes, maxMinutes: newMax)
+                                }
+                        )
+                }
+                .frame(height: handleSize)
+                .coordinateSpace(name: "runtime_slider")
+            }
+            .frame(height: handleSize)
+
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Minimum")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Text(range.minMinutes > 0 ? PickForMeRuntimeRange.formatMinutes(range.minMinutes) : "Any")
+                        .font(.subheadline.bold())
+                }
+                Spacer()
+                VStack(alignment: .trailing, spacing: 2) {
+                    Text("Maximum")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Text(range.maxMinutes > 0 ? PickForMeRuntimeRange.formatMinutes(range.maxMinutes) : "Any")
+                        .font(.subheadline.bold())
+                }
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 16)
+        .frame(maxWidth: .infinity)
+        .liquidGlass(cornerRadius: 28)
     }
 }

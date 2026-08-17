@@ -494,15 +494,15 @@ struct TMDbService {
         return try await fetchListPages(path: "/discover/\(media)", query: query, pages: 2)
     }
 
-    func discoverPickForMe(filter: MediaFilter, genreIDs: Set<Int>, runtime: PickForMeRuntime?, minimumRating: Double, includeAdult: Bool, sortBy: String) async throws -> [MediaItem] {
+    func discoverPickForMe(filter: MediaFilter, genreIDs: Set<Int>, runtimeRange: PickForMeRuntimeRange, minimumRating: Double, includeAdult: Bool, sortBy: String) async throws -> [MediaItem] {
         switch filter {
         case .movie:
-            return try await discoverPickForMeSingleMedia(media: "movie", genreIDs: genreIDs, runtime: runtime, minimumRating: minimumRating, includeAdult: includeAdult, sortBy: sortBy)
+            return try await discoverPickForMeSingleMedia(media: "movie", genreIDs: genreIDs, runtimeRange: runtimeRange, minimumRating: minimumRating, includeAdult: includeAdult, sortBy: sortBy)
         case .tv:
-            return try await discoverPickForMeSingleMedia(media: "tv", genreIDs: genreIDs, runtime: runtime, minimumRating: minimumRating, includeAdult: includeAdult, sortBy: sortBy)
+            return try await discoverPickForMeSingleMedia(media: "tv", genreIDs: genreIDs, runtimeRange: runtimeRange, minimumRating: minimumRating, includeAdult: includeAdult, sortBy: sortBy)
         case .both:
-            async let movies = discoverPickForMeSingleMedia(media: "movie", genreIDs: genreIDs, runtime: runtime, minimumRating: minimumRating, includeAdult: includeAdult, sortBy: sortBy)
-            async let series = discoverPickForMeSingleMedia(media: "tv", genreIDs: genreIDs, runtime: runtime, minimumRating: minimumRating, includeAdult: includeAdult, sortBy: sortBy)
+            async let movies = discoverPickForMeSingleMedia(media: "movie", genreIDs: genreIDs, runtimeRange: runtimeRange, minimumRating: minimumRating, includeAdult: includeAdult, sortBy: sortBy)
+            async let series = discoverPickForMeSingleMedia(media: "tv", genreIDs: genreIDs, runtimeRange: runtimeRange, minimumRating: minimumRating, includeAdult: includeAdult, sortBy: sortBy)
             return try await movies + series
         }
     }
@@ -536,7 +536,7 @@ struct TMDbService {
         ], pages: 2)
     }
 
-    private func discoverPickForMeSingleMedia(media: String, genreIDs: Set<Int>, runtime: PickForMeRuntime?, minimumRating: Double, includeAdult: Bool, sortBy: String) async throws -> [MediaItem] {
+    private func discoverPickForMeSingleMedia(media: String, genreIDs: Set<Int>, runtimeRange: PickForMeRuntimeRange, minimumRating: Double, includeAdult: Bool, sortBy: String) async throws -> [MediaItem] {
         var query: [URLQueryItem] = [
             URLQueryItem(name: "sort_by", value: sortBy),
             URLQueryItem(name: "include_adult", value: includeAdult ? "true" : "false"),
@@ -554,12 +554,12 @@ struct TMDbService {
             query.append(URLQueryItem(name: "vote_average.gte", value: String(format: "%.1f", minimumRating)))
         }
 
-        if let minimumMinutes = runtime?.minimumMinutes {
-            query.append(URLQueryItem(name: "with_runtime.gte", value: String(minimumMinutes)))
+        if runtimeRange.minMinutes > 0 {
+            query.append(URLQueryItem(name: "with_runtime.gte", value: String(runtimeRange.minMinutes)))
         }
 
-        if let maximumMinutes = runtime?.maximumMinutes {
-            query.append(URLQueryItem(name: "with_runtime.lte", value: String(maximumMinutes)))
+        if runtimeRange.maxMinutes > 0 {
+            query.append(URLQueryItem(name: "with_runtime.lte", value: String(runtimeRange.maxMinutes)))
         }
 
         return try await fetchListPages(path: "/discover/\(media)", query: query, pages: 3)

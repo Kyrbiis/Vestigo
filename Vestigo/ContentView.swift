@@ -95,14 +95,6 @@ struct ContentView: View {
         .sheet(isPresented: $model.showNotificationOnboarding) {
             NotificationPreferencesSheet(model: model, isOnboarding: true)
         }
-        .onReceive(NotificationCenter.default.publisher(for: .vestigoDidRegisterForRemoteNotifications)) { notification in
-            guard let token = notification.object as? String else { return }
-            model.registerDeviceToken(token)
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .vestigoDidOpenNotificationDeepLink)) { notification in
-            guard let deepLink = notification.object as? URL else { return }
-            model.openNotificationDeepLink(deepLink)
-        }
         .favouriteReplacementOverlay(model: model)
         .ratingPromptOverlay(model: model)
         .alert("Daily OMDb Limit Reached", isPresented: $model.showOMDbLimitAlert) {
