@@ -15,9 +15,6 @@ import CloudKit
 #if canImport(EventKit)
 import EventKit
 #endif
-#if canImport(UserNotifications)
-import UserNotifications
-#endif
 #if canImport(WebKit)
 import WebKit
 #endif
@@ -91,9 +88,6 @@ struct ContentView: View {
         }
         .sheet(isPresented: $model.showStreamingSetup) {
             StreamingServicesSetupSheet(model: model, isOnboarding: true)
-        }
-        .sheet(isPresented: $model.showNotificationOnboarding) {
-            NotificationPreferencesSheet(model: model, isOnboarding: true)
         }
         .favouriteReplacementOverlay(model: model)
         .ratingPromptOverlay(model: model)

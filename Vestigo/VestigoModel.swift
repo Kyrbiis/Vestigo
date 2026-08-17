@@ -1,9 +1,6 @@
 import SwiftUI
 import Foundation
 import Combine
-#if canImport(UserNotifications)
-import UserNotifications
-#endif
 #if canImport(FoundationModels)
 import FoundationModels
 #endif
@@ -46,6 +43,7 @@ final class VestigoModel: ObservableObject {
     @Published var detailsCache: [MediaKey: MediaDetail] = [:]
     @Published var externalRatingsCache: [MediaKey: ExternalRatings] = [:]
     @Published var providerCache: [MediaKey: [StreamingOption]] = [:]
+    @Published var tmdbFallbackKeys: Set<MediaKey> = []
     @Published var relatedMediaCache: [MediaKey: [RelatedMediaSection]] = [:]
     @Published var personCreditsCache: [Int: [MediaItem]] = [:]
     @Published var personDetails: [Int: PersonDetail] = [:]
@@ -73,9 +71,7 @@ final class VestigoModel: ObservableObject {
     @Published var watchlistResetToken = UUID()
     @Published var collectionsResetToken = UUID()
     @Published var imageRefreshToken = 0
-    @Published var showNotificationOnboarding = false
     @Published var showStreamingSetup = false
-    @Published var notificationOnboardingDismissToken = UUID()
     @Published var calendarEventIDs: [MediaKey: String] = [:]
     @Published var showOMDbLimitAlert = false
 
@@ -338,41 +334,6 @@ final class VestigoModel: ObservableObject {
         }
     }
 
-    func markNotificationPromptSeen() {
-        settings.notificationPreferences.hasSeenPrompt = true
-        saveLocalSoon()
-    }
-
-    func setNotificationsEnabled(_ isEnabled: Bool, source: NotificationToggleSource = .settings) {
-        settings.notificationPreferences.isEnabled = isEnabled
-        settings.notificationPreferences.hasSeenPrompt = true
-        saveLocalSoon()
-
-        guard isEnabled else { return }
-        requestNotificationPermission(source: source)
-    }
-
-    func setNotificationKind(_ kind: NotificationKind, isEnabled: Bool) {
-        if isEnabled {
-            settings.notificationPreferences.enabledKinds.insert(kind)
-        } else {
-            settings.notificationPreferences.enabledKinds.remove(kind)
-        }
-        settings.notificationPreferences.hasSeenPrompt = true
-        saveLocalSoon()
-    }
-
-    func setNotificationLeadTime(_ leadTime: NotificationLeadTime, isEnabled: Bool) {
-        if isEnabled {
-            settings.notificationPreferences.watchlistLeadTimes.insert(leadTime)
-        } else {
-            // Always keep at least one lead time selected
-            guard settings.notificationPreferences.watchlistLeadTimes.count > 1 else { return }
-            settings.notificationPreferences.watchlistLeadTimes.remove(leadTime)
-        }
-        saveLocalSoon()
-    }
-
     func clearExternalRatingsCache() {
         externalRatingsCache = [:]
         UserDefaults.standard.removeObject(forKey: "Vestigo.externalRatings")
@@ -387,23 +348,6 @@ final class VestigoModel: ObservableObject {
             + moreLikeLastWatched + moreLikeFavourite + fromTopGenre + seriesNext
             + trySomethingNewRecommendations + searchResults)
         Task { await loadExternalRatings(for: visible) }
-    }
-
-    func postDevTestNotification(title: String, body: String, delay: TimeInterval = 1) {
-#if canImport(UserNotifications)
-        let content = UNMutableNotificationContent()
-        content.title = title
-        content.body = body
-        content.sound = .default
-        let trigger = UNTimeIntervalNotificationTrigger(timeInterval: max(1, delay), repeats: false)
-        let request = UNNotificationRequest(identifier: "vestigo.dev.\(UUID().uuidString)", content: content, trigger: trigger)
-        UNUserNotificationCenter.current().add(request) { _ in }
-#endif
-    }
-
-    func registerDeviceToken(_ token: String) {
-        settings.notificationPreferences.deviceToken = token
-        saveLocalSoon()
     }
 
     func addReleaseToCalendar(_ item: MediaItem) {
@@ -433,29 +377,6 @@ final class VestigoModel: ObservableObject {
         calendarEventIDs[item.key] != nil
     }
 
-    func openNotificationDeepLink(_ deepLink: URL) {
-        guard deepLink.scheme == "vestigo", let host = deepLink.host else { return }
-        let kind: MediaKind = host == "tv" ? .tv : .movie
-        let pathComponents = deepLink.pathComponents.filter { $0 != "/" }
-        guard let idStr = pathComponents.first, let id = Int(idStr), id > 0 else { return }
-        let key = MediaKey(id: id, kind: kind)
-
-        if let cached = library.items[key]
-            ?? trending.first(where: { $0.key == key })
-            ?? popular.first(where: { $0.key == key })
-            ?? newReleases.first(where: { $0.key == key })
-            ?? upcoming.first(where: { $0.key == key }) {
-            selectedItem = cached
-            return
-        }
-
-        Task {
-            if let items = try? await tmdb.items(for: [key]), let item = items.first {
-                selectedItem = item
-            }
-        }
-    }
-    
     func loadHome() async {
         applyCachedHomeFeedIfAvailable()
 
@@ -1221,7 +1142,7 @@ final class VestigoModel: ObservableObject {
                 group.addTask { [weak self] in
                     guard let self else { return }
                     do {
-                        let detail = try await self.tmdb.detail(for: item)
+                        let detail = try await self.tmdb.detail(for: item, regionCode: self.settings.streamingRegion.rawValue)
                         await MainActor.run { self.detailsCache[item.key] = detail }
                     } catch { }
                 }
@@ -2520,7 +2441,7 @@ final class VestigoModel: ObservableObject {
             }
             
             do {
-                let detail = try await tmdb.detail(for: item)
+                let detail = try await tmdb.detail(for: item, regionCode: settings.streamingRegion.rawValue)
                 detailsCache[item.key] = detail
                 enriched.append(item.withRuntime(detail.runtime))
             } catch {
@@ -2595,13 +2516,13 @@ final class VestigoModel: ObservableObject {
     func loadBasicDetailIfNeeded(_ item: MediaItem) async {
         guard detailsCache[item.key] == nil else { return }
         do {
-            detailsCache[item.key] = try await tmdb.detail(for: item)
+            detailsCache[item.key] = try await tmdb.detail(for: item, regionCode: settings.streamingRegion.rawValue)
         } catch { }
     }
-    
+
     func loadDetail(_ item: MediaItem) async {
         if detailsCache[item.key] == nil {
-            do { detailsCache[item.key] = try await tmdb.detail(for: item) } catch { }
+            do { detailsCache[item.key] = try await tmdb.detail(for: item, regionCode: settings.streamingRegion.rawValue) } catch { }
         }
         if item.kind == .movie, let detail = detailsCache[item.key], let collectionID = detail.tmdbCollectionID {
             do {
@@ -2645,14 +2566,17 @@ final class VestigoModel: ObservableObject {
         await loadExternalRatings(item, priority: true)
         if providerCache[item.key] == nil {
             do {
-                let pricedProviders = try await streaming.providers(for: item)
+                let pricedProviders = try await streaming.providers(for: item, regionCode: settings.streamingRegion.rawValue)
                 if pricedProviders.isEmpty, let tmdbProviders = detailsCache[item.key]?.tmdbProviders, !tmdbProviders.isEmpty {
                     providerCache[item.key] = tmdbProviders
+                    tmdbFallbackKeys.insert(item.key)
                 } else {
                     providerCache[item.key] = pricedProviders
                 }
             } catch {
-                providerCache[item.key] = detailsCache[item.key]?.tmdbProviders ?? []
+                let fallback = detailsCache[item.key]?.tmdbProviders ?? []
+                providerCache[item.key] = fallback
+                if !fallback.isEmpty { tmdbFallbackKeys.insert(item.key) }
             }
         }
         if relatedMediaCache[item.key] == nil {
@@ -2911,7 +2835,6 @@ final class VestigoModel: ObservableObject {
 
     func simulateFirstLaunch() {
         showStreamingSetup = true
-        showNotificationOnboarding = true
     }
 
     func loadExternalRatings(for items: [MediaItem], limit: Int = 80) async {
@@ -3447,9 +3370,6 @@ final class VestigoModel: ObservableObject {
     private func loadLocal() {
         library = Storage.load(UserLibrary.self, key: "Vestigo.library") ?? UserLibrary()
         settings = Storage.load(AppSettings.self, key: "Vestigo.settings") ?? AppSettings()
-        if let syncedNotificationPreferences = Storage.loadNotificationPreferences() {
-            settings.notificationPreferences = syncedNotificationPreferences
-        }
         externalRatingsCache = Storage.load([MediaKey: ExternalRatings].self, key: "Vestigo.externalRatings") ?? [:]
         calendarEventIDs = Storage.load([MediaKey: String].self, key: "Vestigo.calendarEventIDs") ?? [:]
         searchFilter = settings.defaultSearchFilter
@@ -3482,16 +3402,9 @@ final class VestigoModel: ObservableObject {
         Storage.save(snapshot.modifiedAt, key: "Vestigo.localSnapshotModifiedAt")
     }
 
-    private func offerNotificationOnboardingIfNeeded() {
-        guard !settings.notificationPreferences.hasSeenPrompt else { return }
-        showNotificationOnboarding = true
-    }
-
     private func offerStreamingSetupIfNeeded() {
         if !settings.hasSeenStreamingSetup {
             showStreamingSetup = true
-        } else {
-            offerNotificationOnboardingIfNeeded()
         }
     }
 
@@ -3499,7 +3412,6 @@ final class VestigoModel: ObservableObject {
         settings.hasSeenStreamingSetup = true
         showStreamingSetup = false
         saveLocalSoon()
-        offerNotificationOnboardingIfNeeded()
     }
 
     func toggleSubscribedService(_ serviceID: String) {
@@ -3511,58 +3423,6 @@ final class VestigoModel: ObservableObject {
         saveLocalSoon()
     }
 
-    private func requestNotificationPermission(source: NotificationToggleSource) {
-        #if canImport(UserNotifications) && os(iOS)
-        Task {
-            do {
-                let center = UNUserNotificationCenter.current()
-                let currentSettings = await center.notificationSettings()
-                let granted: Bool
-                let shouldOpenNotificationSettings: Bool
-
-                switch currentSettings.authorizationStatus {
-                case .authorized, .provisional, .ephemeral:
-                    granted = true
-                    shouldOpenNotificationSettings = false
-                case .notDetermined:
-                    granted = try await center.requestAuthorization(options: [.alert, .badge, .sound])
-                    shouldOpenNotificationSettings = false
-                case .denied:
-                    granted = false
-                    shouldOpenNotificationSettings = source == .settings
-                @unknown default:
-                    granted = false
-                    shouldOpenNotificationSettings = false
-                }
-
-                await MainActor.run {
-                    self.settings.notificationPreferences.isEnabled = granted
-                    self.saveLocalSoon()
-
-                    if granted {
-                        UIApplication.shared.registerForRemoteNotifications()
-                    } else {
-                        if source == .onboarding {
-                            self.notificationOnboardingDismissToken = UUID()
-                        } else {
-                            self.errorText = "Notifications are disabled in system settings."
-                        }
-
-                        if shouldOpenNotificationSettings {
-                            UIApplication.shared.openNotificationSettings()
-                        }
-                    }
-                }
-            } catch {
-                await MainActor.run {
-                    self.settings.notificationPreferences.isEnabled = false
-                    self.saveLocalSoon()
-                }
-            }
-        }
-        #endif
-    }
-    
     func saveSettings() {
         saveLocalSoon()
     }
@@ -3576,6 +3436,16 @@ final class VestigoModel: ObservableObject {
         }
     }
 
+    func savePickForMeRecentSearch(_ answers: PickForMeAnswers) {
+        let recent = PickForMeRecentSearch(date: Date(), answers: answers)
+        var searches = settings.pickForMeRecentSearches
+        searches.removeAll { $0.answers.summaryTags == recent.answers.summaryTags }
+        searches.insert(recent, at: 0)
+        if searches.count > 10 { searches = Array(searches.prefix(10)) }
+        settings.pickForMeRecentSearches = searches
+        saveLocalSoon()
+    }
+
     private func saveLocalSoon() {
         saveTask?.cancel()
         saveTask = Task { [weak self] in
@@ -3587,7 +3457,6 @@ final class VestigoModel: ObservableObject {
     private func saveLocal() {
         Storage.save(library, key: "Vestigo.library")
         Storage.save(settings, key: "Vestigo.settings")
-        Storage.saveNotificationPreferences(settings.notificationPreferences)
         Storage.save(externalRatingsCache, key: "Vestigo.externalRatings")
         Storage.save(calendarEventIDs, key: "Vestigo.calendarEventIDs")
 

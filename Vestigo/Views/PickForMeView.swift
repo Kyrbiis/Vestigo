@@ -26,6 +26,7 @@ struct PickForMeView: View {
     @State private var isReviewingAnswers = false
     @State private var isEditingAnswerFromReview = false
     @State private var showingInfoSheet = false
+    @State private var scrollToBottomToken = UUID()
 
     private var steps: [PickForMeStep] {
         PickForMeStep.steps(for: answers)
@@ -61,6 +62,8 @@ struct PickForMeView: View {
                     .padding(16)
                     .padding(.bottom, 28)
                     .frame(maxWidth: .infinity, alignment: .topLeading)
+
+                    Color.clear.frame(height: 0).id("pickForMeBottom")
                 }
                 .scrollContentBackground(.hidden)
                 .scrollIndicators(.hidden)
@@ -73,6 +76,9 @@ struct PickForMeView: View {
                 }
                 .onChange(of: results.isEmpty) { _, _ in
                     scrollToTop(with: proxy)
+                }
+                .onChange(of: scrollToBottomToken) { _, _ in
+                    withAnimation(.easeOut(duration: 0.3)) { proxy.scrollTo("pickForMeBottom", anchor: .bottom) }
                 }
             }
         }
@@ -270,7 +276,71 @@ struct PickForMeView: View {
                         .foregroundStyle(.secondary)
                 }
             }
+
+            if step == 0 {
+                recentSearchesSection
+            }
         }
+    }
+
+    @ViewBuilder private var recentSearchesSection: some View {
+        let recents = model.settings.pickForMeRecentSearches
+        if !recents.isEmpty {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Recent searches")
+                    .font(.subheadline.bold())
+                    .foregroundStyle(.secondary)
+
+                VStack(spacing: 8) {
+                    ForEach(recents) { search in
+                        Button {
+                            withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                                answers = search.answers
+                                isReviewingAnswers = true
+                            }
+                        } label: {
+                            HStack(spacing: 12) {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(recentSearchDateLabel(search.date))
+                                        .font(.caption2)
+                                        .foregroundStyle(.tertiary)
+                                    Text(search.answers.summaryTags.isEmpty ? "No preferences set" : search.answers.summaryTags.joined(separator: ", "))
+                                        .font(.caption.bold())
+                                        .foregroundStyle(.primary)
+                                        .lineLimit(2)
+                                        .multilineTextAlignment(.leading)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                    if !search.answers.detailTags.isEmpty {
+                                        Text(search.answers.detailTags.joined(separator: " · "))
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary)
+                                            .lineLimit(2)
+                                            .multilineTextAlignment(.leading)
+                                            .frame(maxWidth: .infinity, alignment: .leading)
+                                    }
+                                }
+                                Image(systemName: "arrow.right")
+                                    .font(.caption.bold())
+                                    .foregroundStyle(.secondary)
+                            }
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 12)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .liquidGlass(cornerRadius: 16)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+        }
+    }
+
+    private func recentSearchDateLabel(_ date: Date) -> String {
+        let cal = Calendar.current
+        let time = date.formatted(.dateTime.hour().minute())
+        if cal.isDateInToday(date) { return "Today at \(time)" }
+        if cal.isDateInYesterday(date) { return "Yesterday at \(time)" }
+        return date.formatted(.dateTime.month(.abbreviated).day()) + " at \(time)"
     }
 
     private var progressView: some View {
@@ -598,14 +668,12 @@ struct PickForMeView: View {
                     pruneAgeRatingsForCurrentFormat()
                     errorText = nil
                 }
-                .opacity(selection.wrappedValue != nil && selection.wrappedValue != .movie ? 0.35 : 1.0)
 
                 PickForMeOptionButton(title: MediaFilter.tv.title, subtitle: nil, isSelected: selection.wrappedValue == .tv) {
                     selection.wrappedValue = selection.wrappedValue == .tv ? nil : .tv
                     pruneAgeRatingsForCurrentFormat()
                     errorText = nil
                 }
-                .opacity(selection.wrappedValue != nil && selection.wrappedValue != .tv ? 0.35 : 1.0)
             }
 
             PickForMeOptionButton(title: MediaFilter.both.title, subtitle: nil, isSelected: selection.wrappedValue == .both) {
@@ -613,7 +681,6 @@ struct PickForMeView: View {
                 pruneAgeRatingsForCurrentFormat()
                 errorText = nil
             }
-            .opacity(selection.wrappedValue != nil && selection.wrappedValue != .both ? 0.35 : 1.0)
         }
     }
 
@@ -623,8 +690,8 @@ struct PickForMeView: View {
                 PickForMeOptionButton(title: option.title, subtitle: option.subtitle, isSelected: selection.wrappedValue == option) {
                     selection.wrappedValue = selection.wrappedValue == option ? nil : option
                     errorText = nil
+                    if selection.wrappedValue != nil { scrollToBottomToken = UUID() }
                 }
-                .opacity(selection.wrappedValue != nil && selection.wrappedValue != option ? 0.35 : 1.0)
             }
         }
     }
@@ -635,8 +702,8 @@ struct PickForMeView: View {
                 PickForMeOptionButton(title: option.title, subtitle: option.subtitle, isSelected: selection.wrappedValue == option) {
                     selection.wrappedValue = option
                     errorText = nil
+                    scrollToBottomToken = UUID()
                 }
-                .opacity(selection.wrappedValue != nil && selection.wrappedValue != option ? 0.35 : 1.0)
             }
         }
     }
@@ -650,8 +717,8 @@ struct PickForMeView: View {
                     selection.wrappedValue = [option]
                     answers.secondaryArchetypes.remove(option)
                     errorText = nil
+                    scrollToBottomToken = UUID()
                 }
-                .opacity(!selection.wrappedValue.isEmpty && !selection.wrappedValue.contains(option) ? 0.35 : 1.0)
             }
         }
     }
@@ -662,7 +729,7 @@ struct PickForMeView: View {
                 let selectedNonAny = selection.wrappedValue.filter { !$0.isAnyOption }
                 let anySelected = selection.wrappedValue.contains(where: { $0.isAnyOption })
                 let atMax = !option.isAnyOption && !selection.wrappedValue.contains(option) && selectedNonAny.count >= maxCount
-                let dimmed = atMax || (anySelected && !option.isAnyOption)
+                let atMaxOrAny = atMax || (anySelected && !option.isAnyOption)
                 PickForMeOptionButton(title: option.title, subtitle: option.subtitle, isSelected: selection.wrappedValue.contains(option)) {
                     guard !atMax else { return }
                     if option.isAnyOption {
@@ -677,7 +744,7 @@ struct PickForMeView: View {
                     }
                     errorText = nil
                 }
-                .opacity(dimmed ? 0.35 : 1.0)
+                .disabled(atMaxOrAny)
             }
         }
     }
@@ -810,6 +877,7 @@ struct PickForMeView: View {
             resultIndex = 0
             model.pickForMeSessionAnswers = answers
             model.pickForMeSessionResults = picked
+            model.savePickForMeRecentSearch(answers)
         }
     }
 

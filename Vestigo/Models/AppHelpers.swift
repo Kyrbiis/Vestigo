@@ -90,7 +90,6 @@ struct KVLibrarySnapshot: Codable {
 }
 
 enum Storage {
-    private static let notificationPreferencesKey = "Vestigo.notificationPreferences"
     private static let kvSnapshotKey = "Vestigo.kvSnapshot"
     private static let homeFeedCacheKeyPrefix = "Vestigo.homeFeedCaches"
 
@@ -116,25 +115,6 @@ enum Storage {
         store.synchronize()
         guard let data = store.data(forKey: kvSnapshotKey) else { return nil }
         return try? JSONDecoder().decode(KVLibrarySnapshot.self, from: data)
-    }
-
-    static func loadNotificationPreferences() -> NotificationPreferences? {
-        let cloudStore = NSUbiquitousKeyValueStore.default
-        cloudStore.synchronize()
-        if let cloudData = cloudStore.data(forKey: notificationPreferencesKey),
-           let preferences = try? JSONDecoder().decode(NotificationPreferences.self, from: cloudData) {
-            UserDefaults.standard.set(cloudData, forKey: notificationPreferencesKey)
-            return preferences
-        }
-        return load(NotificationPreferences.self, key: notificationPreferencesKey)
-    }
-
-    static func saveNotificationPreferences(_ preferences: NotificationPreferences) {
-        guard let data = try? JSONEncoder().encode(preferences) else { return }
-        UserDefaults.standard.set(data, forKey: notificationPreferencesKey)
-        let cloudStore = NSUbiquitousKeyValueStore.default
-        cloudStore.set(data, forKey: notificationPreferencesKey)
-        cloudStore.synchronize()
     }
 
     static func loadNewestHomeFeedCache(for filter: MediaFilter) -> HomeFeedCache? {

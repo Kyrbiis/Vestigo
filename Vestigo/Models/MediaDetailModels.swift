@@ -192,7 +192,7 @@ struct MediaDetail: Hashable {
     let mediumAPISimilarityKeys: Set<MediaKey>
     let sharedContributorKeys: Set<MediaKey>
 
-    init(response: TMDbDetailResponse, fallback: MediaItem) {
+    init(response: TMDbDetailResponse, fallback: MediaItem, regionCode: String = "US") {
         let crewList: [PersonDTO] = response.credits?.crew ?? []
         let castList: [PersonDTO] = response.credits?.cast ?? []
         tmdbCollectionID = response.belongsToCollection?.id
@@ -207,7 +207,7 @@ struct MediaDetail: Hashable {
         networkNames = (response.networks ?? []).map(\.name)
         trailers = TrailerVideo.ranked(from: response.videos?.results ?? [])
         imdbID = response.externalIDs?.imdbID
-        tmdbProviders = response.watchProviders?.usStreamingOptions ?? []
+        tmdbProviders = response.watchProviders?.streamingOptions(for: regionCode) ?? []
         sameFranchiseKeys = []
         sharedContributorKeys = []
 

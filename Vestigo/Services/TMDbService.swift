@@ -726,21 +726,21 @@ struct TMDbService {
             .filter { $0.shouldShowInDiscovery && !$0.isUpcoming }
     }
     
-    func detail(for item: MediaItem) async throws -> MediaDetail {
+    func detail(for item: MediaItem, regionCode: String = "US") async throws -> MediaDetail {
         let response: TMDbDetailResponse = try await fetch(path: "/\(item.kind.tmdbPath)/\(item.id)", query: [URLQueryItem(
             name: "append_to_response",
             value: item.kind == .movie
             ? "credits,similar,recommendations,keywords,watch/providers,release_dates,videos,external_ids"
             : "credits,similar,recommendations,keywords,watch/providers,content_ratings,videos,external_ids,networks"
         )])
-        
+
         guard item.kind == .tv else {
-            return MediaDetail(response: response, fallback: item)
+            return MediaDetail(response: response, fallback: item, regionCode: regionCode)
         }
-        
+
         let seasonsWithEpisodes = try await hydratedSeasons(for: item, baseSeasons: response.seasons ?? [])
         let hydratedResponse = response.replacingSeasons(seasonsWithEpisodes)
-        return MediaDetail(response: hydratedResponse, fallback: item)
+        return MediaDetail(response: hydratedResponse, fallback: item, regionCode: regionCode)
     }
     
     private func hydratedSeasons(for item: MediaItem, baseSeasons: [SeasonDTO]) async throws -> [SeasonDTO] {

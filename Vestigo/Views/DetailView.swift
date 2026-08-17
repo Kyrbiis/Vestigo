@@ -34,6 +34,7 @@ struct DetailView: View {
     
     private var detail: MediaDetail? { model.detailsCache[item.key] }
     private var providers: [StreamingOption]? { model.providerCache[item.key] }
+    private var isTMDbFallback: Bool { model.tmdbFallbackKeys.contains(item.key) }
     private var visibleProviders: [StreamingOption]? {
         guard let filtered = providers?.filter({ !$0.serviceName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) else { return nil }
         let subscribed = model.settings.subscribedServiceNames
@@ -402,9 +403,9 @@ struct DetailView: View {
         if item.isUpcoming {
             StatusBubble(title: "Theatrical status", text: "This release is upcoming. Streaming availability may not exist yet.")
         } else if providers == nil {
-            LoadingBubble(title: "Checking availability", text: "Loading US streaming options and prices.")
+            LoadingBubble(title: "Checking availability", text: "Loading \(model.settings.streamingRegion.displayName) streaming options and prices.")
         } else if visibleProviders?.isEmpty != false {
-            StatusBubble(title: "No streaming prices found", text: "No US provider data with price and quality was returned for this title.")
+            StatusBubble(title: "No streaming prices found", text: "No \(model.settings.streamingRegion.displayName) provider data with price and quality was returned for this title.")
         }
     }
     
@@ -412,6 +413,15 @@ struct DetailView: View {
         if let visibleProviders, !visibleProviders.isEmpty {
             ForEach(visibleProviders.prefix(12)) { provider in
                 ProviderRow(option: provider)
+            }
+            .allowsHitTesting(!isTMDbFallback)
+            .opacity(isTMDbFallback ? 0.45 : 1)
+            if isTMDbFallback {
+                Text("Availability data from TMDb — no prices or direct links. Watchmode data unavailable for this title.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.top, 2)
             }
         }
     }
@@ -486,6 +496,11 @@ private struct TrailersSection: View {
         withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) { currentIndex = next }
     }
 
+    private func handleTrailerError(_ code: Int) {
+        guard [100, 101, 150, 152].contains(code), currentIndex < trailers.count - 1 else { return }
+        withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) { currentIndex += 1 }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Trailer")
@@ -504,9 +519,10 @@ private struct TrailersSection: View {
                     .disabled(currentIndex == 0)
                 }
 
-                YouTubeTrailerPlayer(videoKey: currentTrailer.key, title: currentTrailer.displayTitle)
+                YouTubeTrailerPlayer(videoKey: currentTrailer.key, title: currentTrailer.displayTitle, onError: handleTrailerError)
                     .id(currentTrailer.id)
                     .aspectRatio(16 / 9, contentMode: .fit)
+                    .frame(maxHeight: 200)
                     .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
                     .overlay {
                         RoundedRectangle(cornerRadius: 18, style: .continuous)
@@ -556,25 +572,29 @@ private struct TrailersSection: View {
 struct YouTubeTrailerPlayer: NSViewRepresentable {
     let videoKey: String
     let title: String
+    let onError: ((Int) -> Void)?
+
+    func makeCoordinator() -> YouTubeErrorCoordinator { YouTubeErrorCoordinator(onError: onError) }
 
     func makeNSView(context: Context) -> WKWebView {
-        let webView = WKWebView(frame: .zero, configuration: webViewConfiguration)
+        let webView = WKWebView(frame: .zero, configuration: webViewConfiguration(coordinator: context.coordinator))
         webView.setValue(false, forKey: "drawsBackground")
         webView.loadHTMLString(html, baseURL: URL(string: "https://www.youtube-nocookie.com"))
         return webView
     }
 
-    func updateNSView(_ webView: WKWebView, context: Context) {
-        webView.loadHTMLString(html, baseURL: URL(string: "https://www.youtube-nocookie.com"))
-    }
+    func updateNSView(_ webView: WKWebView, context: Context) { }
 }
 #else
 struct YouTubeTrailerPlayer: UIViewRepresentable {
     let videoKey: String
     let title: String
+    let onError: ((Int) -> Void)?
+
+    func makeCoordinator() -> YouTubeErrorCoordinator { YouTubeErrorCoordinator(onError: onError) }
 
     func makeUIView(context: Context) -> WKWebView {
-        let webView = WKWebView(frame: .zero, configuration: webViewConfiguration)
+        let webView = WKWebView(frame: .zero, configuration: webViewConfiguration(coordinator: context.coordinator))
         webView.backgroundColor = .clear
         webView.isOpaque = false
         webView.scrollView.isScrollEnabled = false
@@ -582,16 +602,24 @@ struct YouTubeTrailerPlayer: UIViewRepresentable {
         return webView
     }
 
-    func updateUIView(_ webView: WKWebView, context: Context) {
-        webView.loadHTMLString(html, baseURL: URL(string: "https://www.youtube-nocookie.com"))
-    }
+    func updateUIView(_ webView: WKWebView, context: Context) { }
 }
 #endif
 
+final class YouTubeErrorCoordinator: NSObject, WKScriptMessageHandler {
+    let onError: ((Int) -> Void)?
+    init(onError: ((Int) -> Void)?) { self.onError = onError }
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        guard message.name == "ytError", let code = message.body as? Int else { return }
+        DispatchQueue.main.async { self.onError?(code) }
+    }
+}
+
 extension YouTubeTrailerPlayer {
-    var webViewConfiguration: WKWebViewConfiguration {
+    func webViewConfiguration(coordinator: YouTubeErrorCoordinator) -> WKWebViewConfiguration {
         let configuration = WKWebViewConfiguration()
         configuration.allowsInlineMediaPlayback = true
+        configuration.userContentController.add(coordinator, name: "ytError")
         #if os(iOS)
         configuration.mediaTypesRequiringUserActionForPlayback = []
         #endif
@@ -599,40 +627,35 @@ extension YouTubeTrailerPlayer {
     }
 
     var html: String {
-        let escapedTitle = title
-            .replacingOccurrences(of: "&", with: "&amp;")
-            .replacingOccurrences(of: "\"", with: "&quot;")
-            .replacingOccurrences(of: "<", with: "&lt;")
-            .replacingOccurrences(of: ">", with: "&gt;")
-
+        let escapedKey = videoKey
+            .replacingOccurrences(of: "\"", with: "")
+            .replacingOccurrences(of: "'", with: "")
         return """
         <!doctype html>
         <html>
         <head>
             <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
             <style>
-                html, body {
-                    margin: 0;
-                    padding: 0;
-                    width: 100%;
-                    height: 100%;
-                    overflow: hidden;
-                    background: #000;
-                }
-                iframe {
-                    border: 0;
-                    width: 100%;
-                    height: 100%;
-                }
+                html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #000; }
+                iframe { border: 0; width: 100%; height: 100%; }
             </style>
         </head>
         <body>
             <iframe
-                title="\(escapedTitle)"
-                src="https://www.youtube-nocookie.com/embed/\(videoKey)?playsinline=1&rel=0&modestbranding=1"
+                src="https://www.youtube-nocookie.com/embed/\(escapedKey)?playsinline=1&rel=0&modestbranding=1&enablejsapi=1"
                 allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
                 allowfullscreen>
             </iframe>
+            <script>
+                window.addEventListener('message', function(e) {
+                    try {
+                        var d = JSON.parse(e.data);
+                        if (d.event === 'onError' && d.error != null) {
+                            window.webkit.messageHandlers.ytError.postMessage(d.error);
+                        }
+                    } catch(_) {}
+                });
+            </script>
         </body>
         </html>
         """
@@ -642,6 +665,7 @@ extension YouTubeTrailerPlayer {
 struct YouTubeTrailerPlayer: View {
     let videoKey: String
     let title: String
+    let onError: ((Int) -> Void)?
 
     var body: some View {
         StatusBubble(title: "Trailer unavailable", text: "This platform cannot display embedded web video.")

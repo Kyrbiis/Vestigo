@@ -34,7 +34,6 @@ struct AppSettings: Codable, Hashable {
     var warnBeforeReplacingFavourite = true
     var promptToRateAfterMarkingWatched = true
     var preferredRatingSource: RatingSource = .imdb
-    var notificationPreferences = NotificationPreferences()
     var homeCarouselOrder: [HomeCarousel] = HomeCarousel.allCases
     var homeCarouselHidden: Set<HomeCarousel> = []
     var forYouCarouselOrder: [ForYouCarousel] = ForYouCarousel.allCases
@@ -47,6 +46,8 @@ struct AppSettings: Codable, Hashable {
     var omdbLastRequestDate: String = ""
     var subscribedServiceNames: Set<String> = []
     var hasSeenStreamingSetup: Bool = false
+    var streamingRegion: StreamingRegion = .us
+    var pickForMeRecentSearches: [PickForMeRecentSearch] = []
     enum CodingKeys: String, CodingKey {
         case recommendationStrength
         case appearance
@@ -81,7 +82,6 @@ struct AppSettings: Codable, Hashable {
         case warnBeforeReplacingFavourite
         case promptToRateAfterMarkingWatched
         case preferredRatingSource
-        case notificationPreferences
         case homeCarouselOrder
         case homeCarouselHidden
         case forYouCarouselOrder
@@ -94,6 +94,8 @@ struct AppSettings: Codable, Hashable {
         case omdbLastRequestDate
         case subscribedServiceNames
         case hasSeenStreamingSetup
+        case streamingRegion
+        case pickForMeRecentSearches
     }
 
     init() {}
@@ -134,7 +136,6 @@ struct AppSettings: Codable, Hashable {
         warnBeforeReplacingFavourite = try container.decodeIfPresent(Bool.self, forKey: .warnBeforeReplacingFavourite) ?? warnBeforeReplacingFavourite
         promptToRateAfterMarkingWatched = try container.decodeIfPresent(Bool.self, forKey: .promptToRateAfterMarkingWatched) ?? promptToRateAfterMarkingWatched
         preferredRatingSource = try container.decodeIfPresent(RatingSource.self, forKey: .preferredRatingSource) ?? preferredRatingSource
-        notificationPreferences = try container.decodeIfPresent(NotificationPreferences.self, forKey: .notificationPreferences) ?? notificationPreferences
 
         let savedHomeOrder = try container.decodeIfPresent([HomeCarousel].self, forKey: .homeCarouselOrder) ?? []
         homeCarouselOrder = Self.mergedOrder(saved: savedHomeOrder, defaults: HomeCarousel.allCases)
@@ -154,6 +155,8 @@ struct AppSettings: Codable, Hashable {
         omdbLastRequestDate = try container.decodeIfPresent(String.self, forKey: .omdbLastRequestDate) ?? omdbLastRequestDate
         subscribedServiceNames = try container.decodeIfPresent(Set<String>.self, forKey: .subscribedServiceNames) ?? subscribedServiceNames
         hasSeenStreamingSetup = try container.decodeIfPresent(Bool.self, forKey: .hasSeenStreamingSetup) ?? hasSeenStreamingSetup
+        streamingRegion = try container.decodeIfPresent(StreamingRegion.self, forKey: .streamingRegion) ?? streamingRegion
+        pickForMeRecentSearches = try container.decodeIfPresent([PickForMeRecentSearch].self, forKey: .pickForMeRecentSearches) ?? pickForMeRecentSearches
     }
 
     private static func mergedOrder<T: Hashable>(saved: [T], defaults: [T]) -> [T] {

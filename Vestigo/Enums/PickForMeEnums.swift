@@ -17,7 +17,7 @@ extension MediaFilter: PickForMeOption {}
 
 // MARK: - PickForMe Answers
 
-struct PickForMeAnswers: Hashable {
+struct PickForMeAnswers: Hashable, Codable {
     var mediaFormat: PickForMeMediaFormat?
     var archetypes: Set<PickForMeArchetype> = []
     var secondaryArchetypes: Set<PickForMeArchetype> = []
@@ -206,6 +206,40 @@ struct PickForMeAnswers: Hashable {
         guard !lines.isEmpty else { return nil }
         return lines.joined(separator: "\n")
     }
+
+    var summaryTags: [String] {
+        var tags: [String] = []
+        if let format = mediaFormat { tags.append(format.title) }
+        let archetypeTags = archetypes.filter { $0 != .surprise && $0 != .noPreference }
+            .map(\.title).sorted()
+        tags.append(contentsOf: archetypeTags.prefix(3))
+        if tags.count < 5 {
+            let genreTags = genrePreferences.filter { $0 != .noPreference }
+                .map(\.title).sorted()
+            tags.append(contentsOf: genreTags.prefix(5 - tags.count))
+        }
+        return tags
+    }
+
+    var detailTags: [String] {
+        var tags: [String] = []
+        let secTags = secondaryArchetypes.filter { !$0.isAnyOption }.map(\.title).sorted()
+        if !secTags.isEmpty { tags.append(contentsOf: secTags.prefix(2)) }
+        if let fp = fictionPreference, fp != .noPreference { tags.append(fp.title) }
+        if let sm = sourceMaterial, sm != .noPreference { tags.append(sm.title) }
+        if let ra = releaseAge, ra != .noPreference { tags.append(ra.title) }
+        if runtimeRange.hasConstraint { tags.append(runtimeRange.displayString) }
+        if let mr = minimumRating, mr != .any { tags.append("Min \(mr.title)") }
+        let db = dealBreakers.filter { !$0.isAnyOption }.map { "No \($0.title.lowercased())" }.sorted()
+        if !db.isEmpty { tags.append(contentsOf: db.prefix(2)) }
+        return tags
+    }
+}
+
+struct PickForMeRecentSearch: Codable, Hashable, Identifiable {
+    var id: UUID = UUID()
+    var date: Date
+    var answers: PickForMeAnswers
 }
 
 // MARK: - PickForMe Steps
@@ -282,7 +316,7 @@ enum PickForMeStep: CaseIterable {
 
 // MARK: - PickForMe Option Enums
 
-enum PickForMeMediaFormat: String, CaseIterable, PickForMeOption {
+enum PickForMeMediaFormat: String, CaseIterable, Codable, PickForMeOption {
     case movies, series, both
 
     init(_ filter: MediaFilter) {
@@ -314,7 +348,7 @@ enum PickForMeMediaFormat: String, CaseIterable, PickForMeOption {
     }
 }
 
-enum PickForMeArchetype: String, CaseIterable, PickForMeOption {
+enum PickForMeArchetype: String, CaseIterable, Codable, PickForMeOption {
     case feelGood, comedy, mystery, thriller, smartProblems, mission, heist, adventure, characterRelationships, humanTriumph, documentary, historical, war, epicSpectacle, mindBending, horror, thoughtfulSciFi, surprise, noPreference
     var id: String { rawValue }
     var title: String {
@@ -426,7 +460,7 @@ enum PickForMeArchetype: String, CaseIterable, PickForMeOption {
     }
 }
 
-enum PickForMeGenrePreference: String, CaseIterable, PickForMeOption {
+enum PickForMeGenrePreference: String, CaseIterable, Codable, PickForMeOption {
     case space, fantasy, sciFi, action, history, crime, war, romance, animation, family, horror, comedy, noPreference
     var id: String { rawValue }
     var title: String {
@@ -467,7 +501,7 @@ enum PickForMeGenrePreference: String, CaseIterable, PickForMeOption {
     }
 }
 
-enum PickForMeFictionPreference: String, CaseIterable, PickForMeOption {
+enum PickForMeFictionPreference: String, CaseIterable, Codable, PickForMeOption {
     case fiction, basedOnTrueStory, nonFiction, noPreference
     var id: String { rawValue }
     var title: String {
@@ -489,7 +523,7 @@ enum PickForMeFictionPreference: String, CaseIterable, PickForMeOption {
     var isAnyOption: Bool { self == .noPreference }
 }
 
-enum PickForMeSourceMaterial: String, CaseIterable, PickForMeOption {
+enum PickForMeSourceMaterial: String, CaseIterable, Codable, PickForMeOption {
     case book, game, noPreference
     var id: String { rawValue }
     var title: String {
@@ -509,7 +543,7 @@ enum PickForMeSourceMaterial: String, CaseIterable, PickForMeOption {
     }
 }
 
-struct PickForMeRuntimeRange: Hashable {
+struct PickForMeRuntimeRange: Hashable, Codable {
     var minMinutes: Int  // 0 = no minimum
     var maxMinutes: Int  // 0 = no maximum
 
@@ -543,7 +577,7 @@ struct PickForMeRuntimeRange: Hashable {
     }
 }
 
-enum PickForMeReleaseAge: String, CaseIterable, PickForMeOption {
+enum PickForMeReleaseAge: String, CaseIterable, Codable, PickForMeOption {
     case newReleases, lastFiveYears, olderThanFiveYears, lastTenYears, olderThanTenYears, lastFifteenYears, olderThanFifteenYears, lastTwentyFiveYears, olderThanTwentyFiveYears, noPreference
     var id: String { rawValue }
     var title: String {
@@ -581,7 +615,7 @@ enum PickForMeReleaseAge: String, CaseIterable, PickForMeOption {
     }
 }
 
-enum PickForMeContentRating: String, CaseIterable, PickForMeOption {
+enum PickForMeContentRating: String, CaseIterable, Codable, PickForMeOption {
     case g, pg, pg13, r, nc17, any
     var id: String { rawValue }
     var title: String {
@@ -633,7 +667,7 @@ enum PickForMeContentRating: String, CaseIterable, PickForMeOption {
     }
 }
 
-enum PickForMeMinimumRating: String, CaseIterable, PickForMeOption {
+enum PickForMeMinimumRating: String, CaseIterable, Codable, PickForMeOption {
     case eight, sevenHalf, seven, sixHalf, any
     var id: String { rawValue }
     var title: String {
@@ -657,7 +691,7 @@ enum PickForMeMinimumRating: String, CaseIterable, PickForMeOption {
     }
 }
 
-enum PickForMeDealBreaker: String, CaseIterable, PickForMeOption {
+enum PickForMeDealBreaker: String, CaseIterable, Codable, PickForMeOption {
     case horror, romanceHeavy, animation, documentary, war, graphicViolence, sexualContent, superhero, verySad, foreignLanguage, longRuntime, sciFi, heavyFantasy, none
     var id: String { rawValue }
     var title: String {

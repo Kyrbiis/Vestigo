@@ -305,8 +305,10 @@ struct TMDbExternalIDsResponse: Decodable, Hashable {
 struct TMDbWatchProvidersResponse: Decodable, Hashable {
     let results: [String: TMDbWatchProviderRegion]
 
-    var usStreamingOptions: [StreamingOption] {
-        guard let region = results["US"] ?? results["us"] else { return [] }
+    var usStreamingOptions: [StreamingOption] { streamingOptions(for: "US") }
+
+    func streamingOptions(for regionCode: String) -> [StreamingOption] {
+        guard let region = results[regionCode.uppercased()] ?? results[regionCode.lowercased()] else { return [] }
 
         let groups: [(type: String, price: String, providers: [TMDbWatchProvider])] = [
             ("subscription", "Included", region.flatrate ?? []),

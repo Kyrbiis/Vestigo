@@ -135,41 +135,18 @@ struct SettingsView: View {
                         Text("Ratings source")
                             .font(.headline.bold())
                         let imdbAvailable = !model.settings.omdbPrimaryKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                        HStack(spacing: 0) {
-                            Button { model.settings.preferredRatingSource = .tmdb } label: {
-                                Text("TMDb")
-                                    .font(.subheadline.bold())
-                                    .frame(maxWidth: .infinity)
-                                    .padding(.vertical, 8)
-                                    .background(
-                                        model.settings.preferredRatingSource == .tmdb
-                                            ? model.settings.accentColor.opacity(0.85) : .clear,
-                                        in: RoundedRectangle(cornerRadius: 14, style: .continuous)
-                                    )
-                                    .foregroundStyle(model.settings.preferredRatingSource == .tmdb ? .white : .primary)
-                            }
-                            Button { model.settings.preferredRatingSource = .imdb } label: {
-                                Text("IMDb")
-                                    .font(.subheadline.bold())
-                                    .frame(maxWidth: .infinity)
-                                    .padding(.vertical, 8)
-                                    .background(
-                                        model.settings.preferredRatingSource == .imdb
-                                            ? model.settings.accentColor.opacity(0.85) : .clear,
-                                        in: RoundedRectangle(cornerRadius: 14, style: .continuous)
-                                    )
-                                    .foregroundStyle(
-                                        model.settings.preferredRatingSource == .imdb
-                                            ? AnyShapeStyle(.white)
-                                            : imdbAvailable
-                                                ? AnyShapeStyle(.primary)
-                                                : AnyShapeStyle(.tertiary)
-                                    )
-                            }
-                            .disabled(!imdbAvailable)
+                        Picker("Ratings source", selection: $model.settings.preferredRatingSource) {
+                            Text("TMDb").tag(RatingSource.tmdb)
+                            Text("IMDb").tag(RatingSource.imdb)
                         }
-                        .padding(4)
+                        .pickerStyle(.segmented)
+                        .labelsHidden()
                         .liquidGlass(cornerRadius: 18)
+                        .onChange(of: model.settings.preferredRatingSource) { _, new in
+                            if new == .imdb && !imdbAvailable {
+                                model.settings.preferredRatingSource = .tmdb
+                            }
+                        }
                         Text(imdbAvailable
                             ? "IMDb scores from OMDb are used for rating displays, filters, and sorts where available."
                             : "Add an OMDb API key below to enable IMDb ratings.")
@@ -243,8 +220,13 @@ struct SettingsView: View {
                                 .background(.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
                                 .opacity(primaryTrimmed.isEmpty ? 0.4 : 1)
                             }
-                            .onChange(of: primaryTrimmed) { _, new in
-                                if new.isEmpty { model.settings.omdbBackupKey = "" }
+                            .onChange(of: primaryTrimmed) { old, new in
+                                if new.isEmpty {
+                                    model.settings.omdbBackupKey = ""
+                                    model.settings.preferredRatingSource = .tmdb
+                                } else if old.isEmpty {
+                                    model.settings.preferredRatingSource = .imdb
+                                }
                             }
                             .onChange(of: primaryKeyFocused) { _, focused in
                                 if focused {
@@ -557,14 +539,6 @@ struct SettingsView: View {
                 }
                 }
 
-                if selectedCategory == .notifications {
-                    Text("Notifications")
-                        .sectionTitle()
-                        .padding(.top, 6)
-
-                    NotificationPreferencesContent(model: model, isOnboarding: false)
-                }
-                
                 if selectedCategory == .data {
                 Text("Data")
                     .sectionTitle()
@@ -797,7 +771,7 @@ struct SettingsView: View {
     }
 
     private var visibleCategories: [SettingsCategory] {
-        SettingsCategory.allCases.filter { $0 != .dev || devMode }
+        SettingsCategory.allCases.filter { $0 != .notifications && ($0 != .dev || devMode) }
     }
 
     private var settingsCategoryPills: some View {
@@ -1039,8 +1013,17 @@ struct HiddenItemsReviewView: View {
                             HiddenItemRow(
                                 item: entry.item,
                                 status: entry.status,
+                                ratingText: model.ratingDisplayText(for: entry.item),
                                 accentColor: model.settings.accentColor,
                                 onOpen: { model.selectedItem = entry.item },
+                                onChangeStatus: {
+                                    switch entry.status {
+                                    case .neverShow:
+                                        model.toggleNotInterested(entry.item)
+                                    case .notInterested:
+                                        model.toggleNeverShowAgain(entry.item)
+                                    }
+                                },
                                 onRestore: {
                                     switch entry.status {
                                     case .neverShow:
@@ -1084,13 +1067,22 @@ struct HiddenItemsReviewView: View {
 struct HiddenItemRow: View {
     let item: MediaItem
     let status: HiddenItemsReviewView.HiddenStatus
+    let ratingText: String
     let accentColor: Color
     let onOpen: () -> Void
+    let onChangeStatus: () -> Void
     let onRestore: () -> Void
     @Environment(\.imageRefreshToken) private var imageRefreshToken
 
+    private var statusBinding: Binding<HiddenItemsReviewView.HiddenStatus> {
+        Binding(
+            get: { status },
+            set: { newStatus in if newStatus != status { onChangeStatus() } }
+        )
+    }
+
     var body: some View {
-        HStack(alignment: .center, spacing: 12) {
+        VStack(alignment: .leading, spacing: 10) {
             Button(action: onOpen) {
                 HStack(alignment: .center, spacing: 12) {
                     posterThumbnail
@@ -1106,14 +1098,11 @@ struct HiddenItemRow: View {
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
 
-                        HStack(spacing: 6) {
-                            Image(systemName: status.iconName)
-                                .font(.caption2.bold())
-                            Text(status.label)
+                        if !ratingText.isEmpty {
+                            Text(ratingText)
                                 .font(.caption.bold())
+                                .foregroundStyle(.secondary)
                         }
-                        .foregroundStyle(accentColor)
-                        .padding(.top, 2)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
@@ -1121,15 +1110,28 @@ struct HiddenItemRow: View {
             }
             .buttonStyle(.plain)
 
-            Button(action: onRestore) {
-                Image(systemName: "arrow.uturn.backward.circle.fill")
-                    .font(.system(size: 26, weight: .semibold))
-                    .foregroundStyle(accentColor)
-                    .frame(width: 42, height: 42)
-                    .contentShape(Rectangle())
+            HStack(spacing: 10) {
+                Picker("Status", selection: statusBinding) {
+                    Text("Not interested").tag(HiddenItemsReviewView.HiddenStatus.notInterested)
+                    Text("Never show").tag(HiddenItemsReviewView.HiddenStatus.neverShow)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .liquidGlass(cornerRadius: 18)
+
+                Button(action: onRestore) {
+                    ZStack {
+                        Circle()
+                            .fill(accentColor)
+                            .frame(width: 36, height: 36)
+                        Image(systemName: "arrow.uturn.backward")
+                            .font(.system(size: 13, weight: .bold))
+                            .foregroundStyle(.white)
+                    }
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Restore \(item.title)")
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Restore \(item.title)")
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -1225,7 +1227,6 @@ struct AboutInfoView: View {
             VStack(alignment: .center, spacing: 6) {
                 Text("Your library and preferences are stored on-device and in iCloud where enabled.")
                 Text("Vestigo was vibe coded: AI assisted with code implementation, while the product thinking, decisions, review, and non-coding work were all done by people.")
-                Text("Notifications are optional and can be changed anytime in Settings.")
                 Text("Vestigo is not affiliated with TMDB, IMDb, OMDb, TheTVDB, Watchmode, YouTube, Wikimedia, or their parent companies.")
             }
             .font(.caption)
@@ -1484,25 +1485,6 @@ struct StreamingServicesSetupSheet: View {
                 }
 
                 StreamingServicesPicker(model: model)
-
-                if isOnboarding {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Toggle(isOn: Binding(
-                            get: { model.settings.notificationPreferences.notifyOnlyForSubscribedServices },
-                            set: { model.settings.notificationPreferences.notifyOnlyForSubscribedServices = $0; model.saveSettings() }
-                        )) {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text("Only notify for my services")
-                                    .font(.headline.bold())
-                                Text("Streaming availability alerts will only fire when a saved title arrives on one of your selected services.")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
-                        .tint(model.settings.accentColor)
-                    }
-                    .settingBubble()
-                }
             }
             .padding(18)
             .padding(.bottom, 110)
@@ -1665,16 +1647,24 @@ private struct StreamingServicesSettingsSection: View {
                     .foregroundStyle(model.settings.accentColor)
             }
 
-            if !model.settings.subscribedServiceNames.isEmpty {
-                Toggle(isOn: Binding(
-                    get: { model.settings.notificationPreferences.notifyOnlyForSubscribedServices },
-                    set: { model.settings.notificationPreferences.notifyOnlyForSubscribedServices = $0; model.saveSettings() }
+            Divider().opacity(0.3)
+
+            HStack {
+                Text("Region")
+                    .font(.subheadline)
+                Spacer()
+                Picker("Region", selection: Binding(
+                    get: { model.settings.streamingRegion },
+                    set: { model.settings.streamingRegion = $0; model.saveSettings(); model.providerCache = [:] }
                 )) {
-                    Text("Only notify for my services")
-                        .font(.subheadline)
+                    ForEach(StreamingRegion.allCases) { region in
+                        Text(region.displayName).tag(region)
+                    }
                 }
-                .tint(model.settings.accentColor)
+                .pickerStyle(.menu)
+                .foregroundStyle(model.settings.accentColor)
             }
+
         }
         .settingBubble()
         .sheet(isPresented: $showSheet) {
@@ -1683,143 +1673,6 @@ private struct StreamingServicesSettingsSection: View {
     }
 }
 
-struct NotificationPreferencesSheet: View {
-    @ObservedObject var model: VestigoModel
-    @Environment(\.dismiss) private var dismiss
-    let isOnboarding: Bool
-
-    var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                HStack(alignment: .center) {
-                    Text("Notifications")
-                        .font(.title2.bold())
-                    Spacer()
-                    HStack(spacing: 16) {
-                        Button(isOnboarding ? "Not now" : "Cancel") {
-                            if isOnboarding { model.markNotificationPromptSeen() }
-                            dismiss()
-                        }
-                        .foregroundStyle(.secondary)
-                        Button("Done") {
-                            model.markNotificationPromptSeen()
-                            dismiss()
-                        }
-                        .fontWeight(.semibold)
-                        .foregroundStyle(model.settings.accentColor)
-                    }
-                }
-
-                Text("Vestigo can alert you about releases, trailers, where-to-watch updates, new seasons, and franchise continuations. You can enable, disable, or tune each notification type anytime in Settings.")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-
-                NotificationPreferencesContent(model: model, isOnboarding: isOnboarding)
-            }
-            .padding(18)
-            .padding(.bottom, 110)
-        }
-        .scrollClipDisabled()
-        .scrollDismissesKeyboard(.immediately)
-        .scrollIndicators(.hidden)
-        .safeAreaInset(edge: .top, spacing: 0) {
-            Capsule()
-                .fill(.white.opacity(0.46))
-                .frame(width: 48, height: 5)
-                .frame(maxWidth: .infinity)
-                .padding(.top, 12)
-                .padding(.bottom, 8)
-                .background(.clear)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .sheetLiquidGlass(cornerRadius: 48)
-        .ignoresSafeArea(edges: .bottom)
-        .presentationBackground(.clear)
-        .presentationCornerRadius(54)
-        .onChange(of: model.notificationOnboardingDismissToken) { _, _ in
-            guard isOnboarding else { return }
-            dismiss()
-        }
-    }
-}
-
-struct NotificationPreferencesContent: View {
-    @ObservedObject var model: VestigoModel
-    let isOnboarding: Bool
-
-    private var preferences: NotificationPreferences {
-        model.settings.notificationPreferences
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            VStack(alignment: .leading, spacing: 8) {
-                Toggle("Allow notifications", isOn: Binding(
-                    get: { preferences.isEnabled },
-                    set: { model.setNotificationsEnabled($0, source: isOnboarding ? .onboarding : .settings) }
-                ))
-                .font(.headline.bold())
-                .tint(model.settings.accentColor)
-
-                Text("This is opt-in only. Turning this off disables every notification type below without changing your individual choices.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            .settingBubble()
-
-            VStack(alignment: .leading, spacing: 10) {
-                ForEach(NotificationKind.allCases) { kind in
-                    VStack(alignment: .leading, spacing: 0) {
-                        Toggle(isOn: Binding(
-                            get: { preferences.enabledKinds.contains(kind) },
-                            set: { model.setNotificationKind(kind, isEnabled: $0) }
-                        )) {
-                            VStack(alignment: .leading, spacing: 3) {
-                                Text(kind.title)
-                                    .font(.subheadline.bold())
-                                Text(kind.description)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                        }
-                        .tint(model.settings.accentColor)
-
-                        if kind == .watchlistRelease && preferences.enabledKinds.contains(.watchlistRelease) {
-                            VStack(alignment: .leading, spacing: 6) {
-                                Text("Remind me:")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                    .padding(.top, 8)
-
-                                ForEach(NotificationLeadTime.allCases) { leadTime in
-                                    Button {
-                                        model.setNotificationLeadTime(leadTime, isEnabled: !preferences.watchlistLeadTimes.contains(leadTime))
-                                    } label: {
-                                        HStack(spacing: 8) {
-                                            Image(systemName: preferences.watchlistLeadTimes.contains(leadTime) ? "checkmark.square.fill" : "square")
-                                                .foregroundStyle(preferences.watchlistLeadTimes.contains(leadTime) ? model.settings.accentColor : .secondary)
-                                            Text(leadTime.label)
-                                                .font(.caption)
-                                                .foregroundStyle(.primary)
-                                            Spacer()
-                                        }
-                                    }
-                                    .buttonStyle(.plain)
-                                }
-                            }
-                            .padding(.top, 4)
-                            .padding(.leading, 4)
-                        }
-                    }
-                }
-            }
-            .disabled(!preferences.isEnabled)
-            .opacity(preferences.isEnabled ? 1 : 0.45)
-            .settingBubble()
-        }
-    }
-}
 
 struct ShortFilmsSettingsGroup: View {
         @ObservedObject var model: VestigoModel
@@ -2112,10 +1965,6 @@ private struct DevToolsPanel: View {
     @State private var isCheckingBackend = false
     @State private var backendResult: String = ""
     @State private var iCloudPushResult: String = ""
-    @State private var pendingNotificationsText: String = ""
-    @State private var isFetchingNotifications = false
-    @State private var notifStatusText: String = ""
-    @State private var notifAuthStatus: UNAuthorizationStatus = .notDetermined
 
     @State private var showLibraryImportPicker = false
     @State private var showSettingsImportPicker = false
@@ -2124,35 +1973,33 @@ private struct DevToolsPanel: View {
     @State private var isRestartingConnection = false
     @State private var restartResult: String = ""
 
-    @State private var groqCallCount: Int = 0
-    @State private var isLoadingGroqUsage = false
+    @State private var cerebrasCallCount: Int = 0
+    @State private var isLoadingCerebrasUsage = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
 
-            // MARK: Groq Usage
-            devSectionLabel("Groq (Describe It)")
+            // MARK: Cerebras Usage
+            devSectionLabel("Cerebras (Pick For Me)")
 
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
-                    Text("Today's calls (UTC)")
+                    Text("Requests used")
                         .font(.subheadline)
                     Spacer()
-                    Text("\(groqCallCount) / \(ThematicSearchService.dailyLimit.formatted())")
+                    Text("\(cerebrasCallCount)")
                         .font(.caption.bold().monospacedDigit())
-                        .foregroundStyle(groqCallCount > 12_000 ? .red : groqCallCount > 8_000 ? .orange : .secondary)
+                        .foregroundStyle(.secondary)
                 }
-                ProgressView(value: Double(groqCallCount), total: Double(ThematicSearchService.dailyLimit))
-                    .tint(groqCallCount > 12_000 ? .red : groqCallCount > 8_000 ? .orange : model.settings.accentColor)
-                Button(isLoadingGroqUsage ? "Loading…" : "Refresh") {
-                    fetchGroqUsage()
+                Button(isLoadingCerebrasUsage ? "Loading…" : "Refresh") {
+                    fetchCerebrasUsage()
                 }
                 .font(.caption.bold())
                 .foregroundStyle(model.settings.accentColor)
-                .disabled(isLoadingGroqUsage)
+                .disabled(isLoadingCerebrasUsage)
             }
             .settingBubble()
-            .onAppear { fetchGroqUsage() }
+            .onAppear { fetchCerebrasUsage() }
 
             // MARK: Snapshots
             devSectionLabel("Snapshots")
@@ -2254,15 +2101,6 @@ private struct DevToolsPanel: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .settingBubble()
 
-            Button("Send test notification") {
-                model.postDevTestNotification(
-                    title: "Vestigo test notification",
-                    body: "Fired from Developer tools at \(Date().formatted(date: .omitted, time: .standard))."
-                )
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .settingBubble()
-
             Button("Simulate OMDb limit alert") {
                 model.showOMDbLimitAlert = true
             }
@@ -2273,59 +2111,6 @@ private struct DevToolsPanel: View {
 
             // MARK: Diagnostics
             devSectionLabel("Diagnostics")
-
-            VStack(alignment: .leading, spacing: 8) {
-                Button("Check notification status") {
-                    checkNotificationStatus()
-                }
-                if !notifStatusText.isEmpty {
-                    Text(notifStatusText)
-                        .font(.caption.monospaced())
-                        .foregroundStyle(.secondary)
-                        .lineLimit(nil)
-                        .fixedSize(horizontal: false, vertical: true)
-
-                    if notifAuthStatus == .notDetermined {
-                        Button("Request system permission now") {
-                            model.setNotificationsEnabled(true, source: .settings)
-                            Task {
-                                try? await Task.sleep(nanoseconds: 500_000_000)
-                                checkNotificationStatus()
-                            }
-                        }
-                        .font(.caption.bold())
-                        .foregroundStyle(model.settings.accentColor)
-                    } else if notifAuthStatus == .denied {
-                        Button("Open system Settings to enable") {
-                            #if canImport(UIKit)
-                            UIApplication.shared.openNotificationSettings()
-                            #endif
-                        }
-                        .font(.caption.bold())
-                        .foregroundStyle(.orange)
-                    }
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .settingBubble()
-
-            VStack(alignment: .leading, spacing: 6) {
-                Button(isFetchingNotifications ? "Fetching..." : "Fetch pending notifications") {
-                    fetchPendingNotifications()
-                }
-                .disabled(isFetchingNotifications)
-
-
-                if !pendingNotificationsText.isEmpty {
-                    Text(pendingNotificationsText)
-                        .font(.caption.monospaced())
-                        .foregroundStyle(.secondary)
-                        .lineLimit(nil)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .settingBubble()
 
             VStack(alignment: .leading, spacing: 6) {
                 Button(isRestartingConnection ? "Restarting…" : "Restart backend connection") {
@@ -2480,66 +2265,6 @@ private struct DevToolsPanel: View {
         }
     }
 
-    private func checkNotificationStatus() {
-#if canImport(UserNotifications)
-        Task {
-            let sysSettings = await UNUserNotificationCenter.current().notificationSettings()
-            let status = sysSettings.authorizationStatus
-            let authLabel: String
-            switch status {
-            case .authorized:    authLabel = "✓ authorized"
-            case .denied:        authLabel = "✗ denied — fix in Settings app"
-            case .notDetermined: authLabel = "⚠ not determined — permission never requested"
-            case .provisional:   authLabel = "provisional"
-            case .ephemeral:     authLabel = "ephemeral"
-            @unknown default:    authLabel = "unknown"
-            }
-            let prefs = model.settings.notificationPreferences
-            let upcomingWatchlist = model.library.watchlistItems.filter { $0.isUpcoming }.count
-            await MainActor.run {
-                notifAuthStatus = status
-                notifStatusText = """
-                system: \(authLabel)
-                app enabled: \(prefs.isEnabled)
-                kinds enabled: \(prefs.enabledKinds.count)/\(NotificationKind.allCases.count)
-                upcoming watchlist: \(upcomingWatchlist) item(s)
-                """
-            }
-        }
-#endif
-    }
-
-    private func fetchPendingNotifications() {
-#if canImport(UserNotifications)
-        isFetchingNotifications = true
-        pendingNotificationsText = ""
-        Task {
-            let requests = await UNUserNotificationCenter.current().pendingNotificationRequests()
-            let lines: String
-            if requests.isEmpty {
-                lines = "None"
-            } else {
-                lines = requests.map { req in
-                    let fireDate: String
-                    if let trigger = req.trigger as? UNCalendarNotificationTrigger,
-                       let next = trigger.nextTriggerDate() {
-                        fireDate = next.formatted(date: .abbreviated, time: .shortened)
-                    } else if let trigger = req.trigger as? UNTimeIntervalNotificationTrigger {
-                        fireDate = "in \(Int(trigger.timeInterval))s"
-                    } else {
-                        fireDate = "unknown"
-                    }
-                    return "\(req.identifier.prefix(30))\n  → \(req.content.title) [\(fireDate)]"
-                }.joined(separator: "\n")
-            }
-            await MainActor.run {
-                pendingNotificationsText = lines
-                isFetchingNotifications = false
-            }
-        }
-#endif
-    }
-
     private func restartBackendConnection() {
         isRestartingConnection = true
         restartResult = ""
@@ -2572,15 +2297,15 @@ private struct DevToolsPanel: View {
         }
     }
 
-    private func fetchGroqUsage() {
-        isLoadingGroqUsage = true
+    private func fetchCerebrasUsage() {
+        isLoadingCerebrasUsage = true
         Task {
-            defer { Task { @MainActor in isLoadingGroqUsage = false } }
-            guard let url = URL(string: "https://mtttuyvpjyugudkevchj.supabase.co/functions/v1/vestigo-api/groq-usage") else { return }
+            defer { Task { @MainActor in isLoadingCerebrasUsage = false } }
+            guard let url = URL(string: "https://mtttuyvpjyugudkevchj.supabase.co/functions/v1/vestigo-api/cerebras-usage") else { return }
             guard let (data, _) = try? await URLSession.shared.data(from: url) else { return }
             struct Resp: Decodable { let count: Int }
             if let resp = try? JSONDecoder().decode(Resp.self, from: data) {
-                await MainActor.run { groqCallCount = resp.count }
+                await MainActor.run { cerebrasCallCount = resp.count }
             }
         }
     }
@@ -2599,16 +2324,25 @@ private struct DevToolsPanel: View {
                 let ms = Int(Date().timeIntervalSince(start) * 1000)
                 let status = (response as? HTTPURLResponse)?.statusCode ?? 0
                 guard status == 200,
-                      let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                      let secrets = json["secrets"] as? [String: Any] else {
+                      let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
                     await MainActor.run {
                         backendResult = "⚠ HTTP \(status) (\(ms)ms)"
                     }
                     return
                 }
-                let lines = secrets.sorted(by: { $0.key < $1.key }).map { key, val -> String in
-                    let present = (val as? [String: Any])?["exists"] as? Bool ?? false
-                    return present ? "✓  \(key)" : "✗  \(key)  ← missing"
+                let lines = json.sorted(by: { $0.key < $1.key }).compactMap { key, val -> String? in
+                    if let dict = val as? [String: Any] {
+                        if let present = dict["exists"] as? Bool {
+                            return present ? "✓  \(key)" : "✗  \(key)  ← missing"
+                        }
+                        let inner = dict.sorted(by: { $0.key < $1.key })
+                            .map { "\($0.key): \($0.value)" }.joined(separator: ", ")
+                        return "\(key): { \(inner) }"
+                    } else if let b = val as? Bool {
+                        return "\(key): \(b)"
+                    } else {
+                        return "\(key): \(val)"
+                    }
                 }
                 await MainActor.run {
                     backendResult = lines.joined(separator: "\n") + "\n(\(ms)ms)"

@@ -1113,7 +1113,7 @@ Deno.serve(async (req) => {
           WATCHMODE_API_KEY: previewSecret("WATCHMODE_API_KEY"),
           TASTEDIVE_API_KEY: previewSecret("TASTEDIVE_API_KEY"),
           AMC_API_KEY: previewSecret("AMC_API_KEY"),
-          GROQ_API_KEY: previewSecret("GROQ_API_KEY")
+          CEREBRAS_API_KEY: previewSecret("CEREBRAS_API_KEY")
         }
       })
     }
@@ -1553,9 +1553,9 @@ Deno.serve(async (req) => {
     }
 
     if (url.pathname.endsWith("/thematic-recommend")) {
-      const groqKey = Deno.env.get("GROQ_API_KEY")
+      const groqKey = Deno.env.get("CEREBRAS_API_KEY")
       if (!groqKey) {
-        return Response.json({ ok: false, error: "GROQ_API_KEY not configured" }, { status: 500 })
+        return Response.json({ ok: false, error: "CEREBRAS_API_KEY not configured" }, { status: 500 })
       }
 
       const body = await req.json().catch(() => null)
@@ -1639,9 +1639,9 @@ Rules:
     }
 
     if (url.pathname.endsWith("/groq-rerank")) {
-      const groqKey = Deno.env.get("GROQ_API_KEY")
+      const groqKey = Deno.env.get("CEREBRAS_API_KEY")
       if (!groqKey) {
-        return Response.json({ ok: false, error: "GROQ_API_KEY not configured" }, { status: 500 })
+        return Response.json({ ok: false, error: "CEREBRAS_API_KEY not configured" }, { status: 500 })
       }
 
       const body = await req.json().catch(() => null)
@@ -1718,9 +1718,9 @@ Rules:
     }
 
     if (url.pathname.endsWith("/thematic-parse")) {
-      const groqKey = Deno.env.get("GROQ_API_KEY")
+      const groqKey = Deno.env.get("CEREBRAS_API_KEY")
       if (!groqKey) {
-        return Response.json({ ok: false, error: "GROQ_API_KEY not configured" }, { status: 500 })
+        return Response.json({ ok: false, error: "CEREBRAS_API_KEY not configured" }, { status: 500 })
       }
 
       const body = await req.json().catch(() => null)

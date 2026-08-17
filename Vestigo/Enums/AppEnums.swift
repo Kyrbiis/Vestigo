@@ -122,9 +122,20 @@ enum HomeSectionKind: Hashable {
     case upcoming
 }
 
-enum NotificationToggleSource {
-    case onboarding
-    case settings
+// MARK: - Streaming Region
+
+enum StreamingRegion: String, Codable, CaseIterable, Identifiable {
+    case us = "US"
+    case gb = "GB"
+    case ca = "CA"
+    var id: String { rawValue }
+    var displayName: String {
+        switch self {
+        case .us: return "US"
+        case .gb: return "UK"
+        case .ca: return "Canada"
+        }
+    }
 }
 
 // MARK: - Ratings & People
