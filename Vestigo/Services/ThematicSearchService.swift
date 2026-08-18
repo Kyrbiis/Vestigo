@@ -2,7 +2,7 @@ import Foundation
 
 // MARK: - Result
 
-struct ThematicSearchResult: Identifiable {
+struct ThematicSearchResult: Identifiable, Codable {
     let item: MediaItem
     let matchedFacets: [String]
     let penaltySignals: [String]
@@ -19,14 +19,7 @@ struct ThematicSearchService {
     static let dailyLimit = 14_400
 
     func search(rawQuery: String, filter: MediaFilter) async throws -> [ThematicSearchResult] {
-        async let movieItems = fetchItems(rawQuery: rawQuery, filterParam: "movie")
-        async let tvItems    = fetchItems(rawQuery: rawQuery, filterParam: "tv")
-        let (movies, tv) = try await (movieItems, tvItems)
-
-        var seen = Set<MediaKey>()
-        return (movies + tv)
-            .sorted { $0.score > $1.score }
-            .filter { seen.insert($0.item.key).inserted }
+        return try await fetchItems(rawQuery: rawQuery, filterParam: "both")
     }
 
     // MARK: - Backend fetch
@@ -80,7 +73,7 @@ struct ThematicSearchService {
 
     private struct RecommendResponse: Decodable {
         let ok: Bool
-        let items: [ThematicItem]
+        let titles: [ThematicItem]
     }
 
     private func fetchItems(rawQuery: String, filterParam: String) async throws -> [ThematicSearchResult] {
@@ -93,11 +86,19 @@ struct ThematicSearchService {
 
         let (data, response) = try await URLSession.shared.data(for: req)
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
-            throw URLError(.badServerResponse)
+            let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
+            let message: String
+            if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let errorField = json["error"] as? String {
+                message = errorField
+            } else {
+                message = String(data: data, encoding: .utf8) ?? "Unknown error"
+            }
+            throw NSError(domain: "VestigoBackend", code: statusCode, userInfo: [NSLocalizedDescriptionKey: message])
         }
         let decoded = try JSONDecoder().decode(RecommendResponse.self, from: data)
 
-        return decoded.items
+        return decoded.titles
             .filter { !($0.title ?? $0.name ?? "").isEmpty }
             .enumerated()
             .map { index, item in
@@ -105,7 +106,7 @@ struct ThematicSearchService {
                     item: item.asMediaItem,
                     matchedFacets: [],
                     penaltySignals: [],
-                    score: Double(decoded.items.count - index)
+                    score: Double(decoded.titles.count - index)
                 )
             }
     }

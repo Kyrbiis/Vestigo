@@ -283,14 +283,23 @@ struct MediaTile: View {
     var openItem: ((MediaItem) -> Void)? = nil
     var swipeContext: SwipeContext = .none
     @State private var showCollections = false
-    
+
     var body: some View {
+        if swipeContext == .watchlist {
+            tileCore
+                .swipeToDelete(cornerRadius: 26) { model.toggleWatchlist(item) }
+        } else {
+            tileCore
+        }
+    }
+
+    private var tileCore: some View {
         VStack(alignment: .leading, spacing: 8) {
             Button { openTileItem() } label: {
                 PosterView(item: item, width: 148, height: 214, isFavourite: model.library.isFavourite(item))
             }
             .buttonStyle(.plain)
-            
+
             .contextMenu {
                 MediaItemContextMenuActions(item: item, hideWatched: hideWatched, model: model, swipeContext: swipeContext) {
                     showCollections = true
@@ -299,23 +308,23 @@ struct MediaTile: View {
             .sheet(isPresented: $showCollections) {
                 AddToCollectionSheet(item: item, model: model)
             }
-            
+
             Text(item.title)
                 .font(.subheadline.bold())
                 .lineLimit(2)
                 .frame(width: 148, alignment: .topLeading)
                 .frame(minHeight: 36, alignment: .topLeading)
-            
+
             Text(tileMetadataText)
                 .font(.caption2.bold())
                 .foregroundStyle(.secondary)
                 .frame(width: 148, alignment: .leading)
-            
+
             HStack(spacing: 7) {
                 TileIconButton(systemName: model.library.isInWatchlist(item.key) ? "bookmark.fill" : "bookmark") {
                     model.toggleWatchlist(item)
                 }
-                
+
                 if !hideWatched && !item.isUpcoming {
                     TileIconButton(systemName: model.library.isWatched(item.key) ? "checkmark.circle.fill" : "checkmark.circle") {
                         model.toggleWatched(item)
@@ -1228,6 +1237,58 @@ final class RemoteImageMemoryCache {
     }
 }
 
+
+// MARK: - Swipe To Delete Modifier
+
+private struct SwipeToDeleteModifier: ViewModifier {
+    let cornerRadius: CGFloat
+    let action: () -> Void
+    @State private var offset: CGFloat = 0
+    private let threshold: CGFloat = 72
+
+    func body(content: Content) -> some View {
+        ZStack(alignment: .trailing) {
+            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                .fill(.red)
+                .overlay(alignment: .trailing) {
+                    Image(systemName: "trash")
+                        .font(.system(size: 16, weight: .bold))
+                        .foregroundStyle(.white)
+                        .padding(.trailing, 16)
+                        .opacity(min(1.0, abs(offset) / 32))
+                }
+
+            content
+                .offset(x: offset)
+        }
+        .clipped()
+        .gesture(
+            DragGesture(minimumDistance: 12)
+                .onChanged { value in
+                    let dx = value.translation.width
+                    let dy = value.translation.height
+                    guard dx < 0, abs(dx) > abs(dy) else { return }
+                    withAnimation(.interactiveSpring(response: 0.25, dampingFraction: 0.85)) {
+                        offset = max(-threshold * 1.5, dx)
+                    }
+                }
+                .onEnded { _ in
+                    if offset < -threshold {
+                        withAnimation(.easeIn(duration: 0.16)) { offset = -500 }
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.16) { action() }
+                    } else {
+                        withAnimation(.spring(response: 0.3, dampingFraction: 0.75)) { offset = 0 }
+                    }
+                }
+        )
+    }
+}
+
+extension View {
+    func swipeToDelete(cornerRadius: CGFloat = 16, action: @escaping () -> Void) -> some View {
+        modifier(SwipeToDeleteModifier(cornerRadius: cornerRadius, action: action))
+    }
+}
 
 // MARK: - LiquidGlass Modifier
 

@@ -1,5 +1,6 @@
 import SwiftUI
 
+
 struct ThematicSearchView: View {
     @ObservedObject var model: VestigoModel
 
@@ -9,7 +10,7 @@ struct ThematicSearchView: View {
     @State private var hasSearched = false
     @State private var errorMessage: String?
     @State private var selectedNestedItem: MediaItem?
-    @State private var detectedKind: MediaFilter = .both
+    @State private var selectedFilter: MediaFilter = .both
     @FocusState private var inputFocused: Bool
 
     private var canSearch: Bool {
@@ -45,6 +46,8 @@ struct ThematicSearchView: View {
                         StatusBubble(title: "No matches found", text: "Try rewording your description or adding more detail.")
                     } else if hasSearched {
                         resultContent
+                    } else {
+                        recentSearchesSection
                     }
                 }
                 .padding(18)
@@ -75,7 +78,7 @@ struct ThematicSearchView: View {
 
     @ViewBuilder
     private var resultContent: some View {
-        switch detectedKind {
+        switch selectedFilter {
         case .both:
             // Interleaved by score — no section headers
             ForEach(results.sorted { $0.score > $1.score }) { result in
@@ -84,14 +87,50 @@ struct ThematicSearchView: View {
 
         case .movie:
             sectionBlock("Movies", results: movieResults)
-            if !tvResults.isEmpty {
-                sectionBlock("Series", results: tvResults, topPadding: movieResults.isEmpty ? 0 : 6)
-            }
 
         case .tv:
             sectionBlock("Series", results: tvResults)
-            if !movieResults.isEmpty {
-                sectionBlock("Movies", results: movieResults, topPadding: tvResults.isEmpty ? 0 : 6)
+        }
+    }
+
+    @ViewBuilder
+    private var recentSearchesSection: some View {
+        let recents = model.settings.describeItRecentSearches
+        if !recents.isEmpty {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Recent searches")
+                    .font(.subheadline.bold())
+                    .foregroundStyle(.secondary)
+
+                VStack(spacing: 8) {
+                    ForEach(recents, id: \.self) { search in
+                        Button {
+                            query = search
+                            performSearch()
+                        } label: {
+                            HStack(spacing: 12) {
+                                Image(systemName: "clock")
+                                    .font(.caption)
+                                    .foregroundStyle(.tertiary)
+                                Text(search)
+                                    .font(.subheadline)
+                                    .foregroundStyle(.primary)
+                                    .lineLimit(2)
+                                    .multilineTextAlignment(.leading)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                Image(systemName: "arrow.right")
+                                    .font(.caption.bold())
+                                    .foregroundStyle(.secondary)
+                            }
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 12)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .liquidGlass(cornerRadius: 16)
+                        }
+                        .buttonStyle(.plain)
+                        .swipeToDelete(cornerRadius: 16) { model.removeDescribeItRecentSearch(search) }
+                    }
+                }
             }
         }
     }
@@ -111,7 +150,7 @@ struct ThematicSearchView: View {
     }
 
     private var inputPanel: some View {
-        HStack(alignment: .bottom, spacing: 10) {
+        VStack(spacing: 10) {
             ZStack(alignment: .topLeading) {
                 TextEditor(text: $query)
                     .focused($inputFocused)
@@ -132,33 +171,67 @@ struct ThematicSearchView: View {
             }
             .liquidGlass(cornerRadius: 18)
 
-            Button(action: performSearch) {
-                ZStack {
-                    Circle()
-                        .fill(canSearch ? Color.blue : Color.secondary.opacity(0.35))
-                        .frame(width: 38, height: 38)
-                    Image(systemName: "arrow.up")
-                        .font(.system(size: 14, weight: .bold))
-                        .foregroundStyle(.white)
+            HStack(spacing: 10) {
+                Picker("", selection: $selectedFilter) {
+                    Text("Movies & TV").tag(MediaFilter.both)
+                    Text("Movies").tag(MediaFilter.movie)
+                    Text("TV Shows").tag(MediaFilter.tv)
                 }
+                .pickerStyle(.segmented)
+
+                Button(action: performSearch) {
+                    ZStack {
+                        Circle()
+                            .fill(canSearch ? Color.blue : Color.secondary.opacity(0.35))
+                            .frame(width: 38, height: 38)
+                        Image(systemName: "arrow.up")
+                            .font(.system(size: 14, weight: .bold))
+                            .foregroundStyle(.white)
+                    }
+                }
+                .disabled(!canSearch)
             }
-            .disabled(!canSearch)
         }
+    }
+
+    private func detectMediaFilter(from text: String) -> MediaFilter? {
+        let lower = text.lowercased()
+        let movieWords = ["movie", "movies", "film", "films", "cinema"]
+        let tvWords = ["show", "shows", "series", "tv show", "tv series", "television", "episode", "episodes", "season", "seasons"]
+        let hasMovie = movieWords.contains { lower.contains($0) }
+        let hasTV = tvWords.contains { lower.contains($0) }
+        if hasMovie && !hasTV { return .movie }
+        if hasTV && !hasMovie { return .tv }
+        return nil
     }
 
     private func performSearch() {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
 
-        detectedKind = Self.detectKind(from: trimmed)
+        if let detected = detectMediaFilter(from: trimmed) {
+            selectedFilter = detected
+        }
+
         inputFocused = false
+
+        let cacheKey = trimmed.lowercased()
+        if let cached = model.describeItResultsCache[cacheKey] {
+            results = cached
+            hasSearched = true
+            return
+        }
+
         isLoading = true
         errorMessage = nil
         results = []
 
         Task {
             do {
-                results = try await model.thematicSearch(query: trimmed, filter: .both)
+                let fetched = try await model.thematicSearch(query: trimmed, filter: .both)
+                results = fetched
+                model.describeItResultsCache[cacheKey] = fetched
+                model.saveDescribeItRecentSearch(trimmed) // also triggers saveLocalSoon
                 hasSearched = true
             } catch {
                 errorMessage = error.localizedDescription
@@ -166,17 +239,6 @@ struct ThematicSearchView: View {
             }
             isLoading = false
         }
-    }
-
-    private static func detectKind(from text: String) -> MediaFilter {
-        let lower = text.lowercased()
-        let movieSignals = ["movie", "film", "cinema", "feature film"]
-        let tvSignals = ["tv show", "tv series", "television", "sitcom", "show", "series", "episode", "season"]
-        let hasMovie = movieSignals.contains { lower.contains($0) }
-        let hasTV    = tvSignals.contains    { lower.contains($0) }
-        if hasMovie && !hasTV { return .movie }
-        if hasTV && !hasMovie { return .tv }
-        return .both
     }
 }
 

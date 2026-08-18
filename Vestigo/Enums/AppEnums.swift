@@ -76,7 +76,7 @@ enum GenreSort: String, Codable, CaseIterable, Identifiable {
     var tmdbSort: String { self == .tmdbRating ? "popularity.desc" : "primary_release_date.desc" }
 }
 
-enum SwipeContext { case none, watchlist, collection(UUID) }
+enum SwipeContext: Equatable { case none, watchlist, collection(UUID) }
 
 // MARK: - Appearance
 

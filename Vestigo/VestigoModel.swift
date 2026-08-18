@@ -43,6 +43,7 @@ final class VestigoModel: ObservableObject {
     @Published var detailsCache: [MediaKey: MediaDetail] = [:]
     @Published var externalRatingsCache: [MediaKey: ExternalRatings] = [:]
     @Published var providerCache: [MediaKey: [StreamingOption]] = [:]
+    var describeItResultsCache: [String: [ThematicSearchResult]] = [:]
     @Published var tmdbFallbackKeys: Set<MediaKey> = []
     @Published var relatedMediaCache: [MediaKey: [RelatedMediaSection]] = [:]
     @Published var personCreditsCache: [Int: [MediaItem]] = [:]
@@ -2808,6 +2809,11 @@ final class VestigoModel: ObservableObject {
         }
     }
 
+    func clearDescribeItCache() {
+        describeItResultsCache = [:]
+        saveLocalSoon()
+    }
+
     func clearAllCaches() {
         detailsCache = [:]
         providerCache = [:]
@@ -2817,6 +2823,7 @@ final class VestigoModel: ObservableObject {
         collectionRecommendations = [:]
         tmdbExpandedSimilarCache = [:]
         franchiseRecommendationCache = [:]
+        describeItResultsCache = [:]
         pickForMeThematicCache = [:]
         clearHomeFeedCache()
     }
@@ -2848,10 +2855,6 @@ final class VestigoModel: ObservableObject {
         if settings.preferredRatingSource == .imdb {
             if let imdbRating = externalRatingsCache[item.key]?.imdbRating {
                 return "IMDb \(imdbRating.formatted(.number.precision(.fractionLength(1))))"
-            }
-            let hasKey = !settings.omdbPrimaryKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            if hasKey && externalRatingsCache[item.key] == nil && item.voteAverage > 0 {
-                return "IMDb loading"
             }
         }
         guard item.voteAverage > 0 else { return "" }
@@ -3372,6 +3375,7 @@ final class VestigoModel: ObservableObject {
         settings = Storage.load(AppSettings.self, key: "Vestigo.settings") ?? AppSettings()
         externalRatingsCache = Storage.load([MediaKey: ExternalRatings].self, key: "Vestigo.externalRatings") ?? [:]
         calendarEventIDs = Storage.load([MediaKey: String].self, key: "Vestigo.calendarEventIDs") ?? [:]
+        describeItResultsCache = Storage.load([String: [ThematicSearchResult]].self, key: "Vestigo.describeItCache") ?? [:]
         searchFilter = settings.defaultSearchFilter
         mediaFilter = settings.defaultHomeFilter
     }
@@ -3446,6 +3450,26 @@ final class VestigoModel: ObservableObject {
         saveLocalSoon()
     }
 
+    func saveDescribeItRecentSearch(_ query: String) {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        var searches = settings.describeItRecentSearches
+        searches.removeAll { $0.caseInsensitiveCompare(trimmed) == .orderedSame }
+        searches.insert(trimmed, at: 0)
+        settings.describeItRecentSearches = Array(searches.prefix(10))
+        saveLocalSoon()
+    }
+
+    func removePickForMeRecentSearch(_ search: PickForMeRecentSearch) {
+        settings.pickForMeRecentSearches.removeAll { $0.id == search.id }
+        saveLocalSoon()
+    }
+
+    func removeDescribeItRecentSearch(_ query: String) {
+        settings.describeItRecentSearches.removeAll { $0.caseInsensitiveCompare(query) == .orderedSame }
+        saveLocalSoon()
+    }
+
     private func saveLocalSoon() {
         saveTask?.cancel()
         saveTask = Task { [weak self] in
@@ -3459,6 +3483,7 @@ final class VestigoModel: ObservableObject {
         Storage.save(settings, key: "Vestigo.settings")
         Storage.save(externalRatingsCache, key: "Vestigo.externalRatings")
         Storage.save(calendarEventIDs, key: "Vestigo.calendarEventIDs")
+        Storage.save(describeItResultsCache, key: "Vestigo.describeItCache")
 
         guard !isApplyingCloudSnapshot else { return }
 

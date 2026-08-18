@@ -48,6 +48,7 @@ struct AppSettings: Codable, Hashable {
     var hasSeenStreamingSetup: Bool = false
     var streamingRegion: StreamingRegion = .us
     var pickForMeRecentSearches: [PickForMeRecentSearch] = []
+    var describeItRecentSearches: [String] = []
     enum CodingKeys: String, CodingKey {
         case recommendationStrength
         case appearance
@@ -96,6 +97,7 @@ struct AppSettings: Codable, Hashable {
         case hasSeenStreamingSetup
         case streamingRegion
         case pickForMeRecentSearches
+        case describeItRecentSearches
     }
 
     init() {}
@@ -157,6 +159,7 @@ struct AppSettings: Codable, Hashable {
         hasSeenStreamingSetup = try container.decodeIfPresent(Bool.self, forKey: .hasSeenStreamingSetup) ?? hasSeenStreamingSetup
         streamingRegion = try container.decodeIfPresent(StreamingRegion.self, forKey: .streamingRegion) ?? streamingRegion
         pickForMeRecentSearches = try container.decodeIfPresent([PickForMeRecentSearch].self, forKey: .pickForMeRecentSearches) ?? pickForMeRecentSearches
+        describeItRecentSearches = try container.decodeIfPresent([String].self, forKey: .describeItRecentSearches) ?? describeItRecentSearches
     }
 
     private static func mergedOrder<T: Hashable>(saved: [T], defaults: [T]) -> [T] {

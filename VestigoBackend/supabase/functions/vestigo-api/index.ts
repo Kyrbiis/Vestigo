@@ -1070,18 +1070,31 @@ function todayUTC(): string {
   return new Date().toISOString().slice(0, 10)
 }
 
-async function incrementGroqUsage() {
+function extractJSON(text: string): any {
+  // Try direct parse first
+  try { return JSON.parse(text) } catch {}
+  // Strip markdown code fences
+  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/)
+  if (fenced) { try { return JSON.parse(fenced[1].trim()) } catch {} }
+  // Find first {...} block
+  const start = text.indexOf("{")
+  const end = text.lastIndexOf("}")
+  if (start !== -1 && end > start) { try { return JSON.parse(text.slice(start, end + 1)) } catch {} }
+  throw new Error("No valid JSON found in response")
+}
+
+async function incrementAIUsage() {
   try {
     const kv = await Deno.openKv()
-    await kv.atomic().sum(["groq_calls", todayUTC()], 1n).commit()
+    await kv.atomic().sum(["ai_calls", todayUTC()], 1n).commit()
   } catch {
     // Non-fatal — don't fail the request if KV is unavailable
   }
 }
 
-async function getGroqUsage(date: string): Promise<number> {
+async function getAIUsage(date: string): Promise<number> {
   const kv = await Deno.openKv()
-  const entry = await kv.get<Deno.KvU64>(["groq_calls", date])
+  const entry = await kv.get<Deno.KvU64>(["ai_calls", date])
   return Number(entry.value ?? 0n)
 }
 
@@ -1089,10 +1102,10 @@ Deno.serve(async (req) => {
   const url = new URL(req.url)
 
   try {
-    if (url.pathname.endsWith("/groq-usage")) {
+    if (url.pathname.endsWith("/ai-usage")) {
       const date = url.searchParams.get("date") ?? todayUTC()
-      const count = await getGroqUsage(date)
-      return Response.json({ ok: true, date, count, limit: 14400 })
+      const count = await getAIUsage(date)
+      return Response.json({ ok: true, date, count })
     }
 
     if (url.pathname.endsWith("/health")) {
@@ -1113,7 +1126,8 @@ Deno.serve(async (req) => {
           WATCHMODE_API_KEY: previewSecret("WATCHMODE_API_KEY"),
           TASTEDIVE_API_KEY: previewSecret("TASTEDIVE_API_KEY"),
           AMC_API_KEY: previewSecret("AMC_API_KEY"),
-          CEREBRAS_API_KEY: previewSecret("CEREBRAS_API_KEY")
+          OPENROUTER_API_KEY: previewSecret("OPENROUTER_API_KEY"),
+          OPENROUTER_BACKUP_KEY: previewSecret("OPENROUTER_BACKUP_KEY")
         }
       })
     }
@@ -1553,9 +1567,10 @@ Deno.serve(async (req) => {
     }
 
     if (url.pathname.endsWith("/thematic-recommend")) {
-      const groqKey = Deno.env.get("CEREBRAS_API_KEY")
-      if (!groqKey) {
-        return Response.json({ ok: false, error: "CEREBRAS_API_KEY not configured" }, { status: 500 })
+      const aiKey = Deno.env.get("OPENROUTER_API_KEY")
+      const aiKeyBackup = Deno.env.get("OPENROUTER_BACKUP_KEY")
+      if (!aiKey) {
+        return Response.json({ ok: false, error: "OPENROUTER_API_KEY not configured" }, { status: 500 })
       }
 
       const body = await req.json().catch(() => null)
@@ -1568,80 +1583,119 @@ Deno.serve(async (req) => {
 
       const mediaScope = filter === "movie" ? "movies only" : filter === "tv" ? "TV shows only" : "movies and TV shows"
 
-      const systemPrompt = `Today's date is July 2026. The current year is 2026.
-You are a film and television recommendation expert. Think of this like a knowledgeable film-fan friend being asked: "find me something that is [genre_flavor] AND [mood]" — they want titles that genuinely satisfy ALL the stated preferences together.
+      const systemPrompt = `You are a film and TV recommendation expert. Based on the user's description, list real, existing ${mediaScope} that best match.
 
-The query uses these fields:
-- genre_flavor: HARD setting/genre requirement — listed FIRST because it is the primary filter. Every single title you return MUST belong to or be prominently set in this genre. The description in parentheses is the exact definition. Example: "Space (set in outer space — spacecraft, astronauts, alien worlds)" means ONLY films/shows actually set in space — not Earth-based sci-fi, not just any futuristic story. If genre_flavor says Space, 100% of results must be space films. No exceptions.
-- mood: primary emotional archetype. "Feel-Good" = uplifting/heartwarming; "Comedy" = primarily comedic; "Mystery" = whodunit/secrets; "Thriller" = tension/suspense/danger; "Smart people solving problems" = experts using intelligence; "Mission" = specific objective/operation/survival; "Heist" = robbery/con/caper; "Adventure" = exploration/excitement; "Character and Relationships" = relationship dynamics/personal growth; "Human Triumph" = underdog/resilience; "Documentary" = nonfiction only; "Historical" = set during real historical events; "War" = combat/military; "Epic / Spectacle" = grand scale/visuals; "Mind-Bending" = twists/unreliable narrators; "Horror" = fear/dread; "Thought-Provoking Sci-Fi" = idea-driven sci-fi exploring ethics, technology, or consciousness
-- secondary: secondary mood layers to blend in alongside the primary mood
-- realism: "Real-world only" = no fantasy/sci-fi/superpowers; "Mostly realistic" = grounded; "Some sci-fi or fantasy" = speculative ok; "Completely fictional" = fantastical preferred
-- release_window: hard release date constraint with an explicit cutoff year — do not suggest any title outside this window, even by one year
-- source: preferred source material ("Based on a true story", "Based on a book", "Based on a game")
-- avoid: absolute exclusions — return ZERO titles from these categories, no exceptions
-
-Return ONLY a valid JSON object:
-{
-  "titles": [
-    { "title": "Interstellar", "year": 2014, "reason": "space travel, mind-bending time dilation" },
-    { "title": "2001: A Space Odyssey", "year": 1968, "reason": "philosophical space epic" }
-  ]
-}
+Return one title per line in this exact format:
+Title|Year
 
 Rules:
-- Return 80-100 REAL, EXISTING titles. They must actually exist.
-- Return ${mediaScope}.
-- genre_flavor is NON-NEGOTIABLE: if genre_flavor is set, every single title must satisfy it — do not include anything that doesn't genuinely fit the genre_flavor definition, even if it's a perfect mood match.
-- HOLISTIC matching: after satisfying genre_flavor, titles should also satisfy mood and secondary as best as possible.
-- Lead with the strongest all-around matches. Think like a knowledgeable film fan, not a keyword matcher.
-- Strictly obey "avoid" — zero of these in the output, no exceptions.
-- Respect "realism": if "Real-world only", return nothing with magic, aliens, superpowers, or fantasy.
-- Prefer well-regarded, critically acclaimed titles. Avoid films that are widely considered poor quality.
-- reason: 3-6 words, lowercase, captures the core fit.
-- year: actual release year as a number, not a string.
-- Include both well-known and less obvious titles. Aim for variety — don't cluster around the same director or franchise.
-- Return ONLY the raw JSON object, nothing else.`
+- Return 20-25 titles. Must be real and actually exist.
+- Lead with the strongest matches first.
+- Prefer well-regarded titles. Vary directors, franchises, and eras.
+- Return ONLY the list. No JSON, no markdown, no numbering, no explanations.`
 
-      const groqResp = await fetchWithTimeout("https://api.groq.com/openai/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${groqKey}`
-        },
-        body: JSON.stringify({
-          model: "llama-3.3-70b-versatile",
-          max_tokens: 6000,
-          messages: [
-            { role: "system", content: systemPrompt },
-            { role: "user", content: query }
-          ]
+      const openRouterBody = JSON.stringify({
+        models: [
+          "poolside/laguna-xs-2.1:free",
+          "nvidia/nemotron-3.5-lightning:free",
+          "liquid/lfm-2.5-2.6b:free"
+        ],
+        max_tokens: 800,
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: query }
+        ]
+      })
+
+      async function callOpenRouter(key: string): Promise<string | null> {
+        try {
+          const resp = await fetchWithTimeout("https://openrouter.ai/api/v1/chat/completions", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Authorization": `Bearer ${key}`,
+              "HTTP-Referer": "https://vestigo.app",
+              "X-Title": "Vestigo"
+            },
+            body: openRouterBody
+          }, 50000)
+          if (!resp.ok) return null
+          const data = await resp.json()
+          return (data?.choices?.[0]?.message?.content ?? "").trim() || null
+        } catch {
+          return null
+        }
+      }
+
+      let text = await callOpenRouter(aiKey)
+      if (!text && aiKeyBackup) {
+        text = await callOpenRouter(aiKeyBackup)
+      }
+      if (!text) {
+        return Response.json({ ok: false, error: "Service is busy, please try again in a moment" }, { status: 503 })
+      }
+
+      const llmTitles = text
+        .split('\n')
+        .map((l: string) => l.replace(/^```[a-z]*/, '').replace(/^[0-9]+[.)]\s*/, '').replace(/^[-*•]\s*/, '').trim())
+        .filter((l: string) => l.length > 0 && !l.startsWith('```') && l.includes('|'))
+        .map((line: string) => {
+          const pipeIdx = line.indexOf('|')
+          const title = line.slice(0, pipeIdx).trim()
+          const year = Number(line.slice(pipeIdx + 1).trim())
+          return { title, year: Number.isFinite(year) && year > 1900 ? year : null }
         })
-      }, 20000)
+        .filter((item: any) => item.title.length > 0)
 
-      if (!groqResp.ok) {
-        const text = await groqResp.text()
-        return Response.json({ ok: false, error: `Groq error: ${groqResp.status} ${text}` }, { status: 502 })
+      if (llmTitles.length === 0) {
+        return Response.json({ ok: false, error: "Service is busy, please try again in a moment" }, { status: 503 })
       }
 
-      const groqData = await groqResp.json()
-      const text = (groqData?.choices?.[0]?.message?.content ?? "").trim()
-
-      let parsed: any
-      try {
-        parsed = JSON.parse(text)
-      } catch {
-        return Response.json({ ok: false, error: "Failed to parse Groq response as JSON", raw: rawText }, { status: 502 })
+      async function enrichOneTitle(item: any): Promise<any | null> {
+        const titleStr = String(item.title ?? "").trim()
+        if (!titleStr) return null
+        try {
+          if (filter === "tv") {
+            const params: Record<string, string> = { query: titleStr, include_adult: "false" }
+            if (typeof item.year === "number") params.first_air_date_year = String(item.year)
+            const result = await fetchTMDb("/search/tv", params)
+            const hit = Array.isArray(result.results) ? result.results[0] : null
+            return hit && typeof hit.id === "number" ? { ...hit, media_type: "tv" } : null
+          } else if (filter === "movie") {
+            const params: Record<string, string> = { query: titleStr, include_adult: "false" }
+            if (typeof item.year === "number") params.year = String(item.year)
+            const result = await fetchTMDb("/search/movie", params)
+            const hit = Array.isArray(result.results) ? result.results[0] : null
+            return hit && typeof hit.id === "number" ? { ...hit, media_type: "movie" } : null
+          } else {
+            const result = await fetchTMDb("/search/multi", { query: titleStr, include_adult: "false" })
+            const results = Array.isArray(result.results) ? result.results : []
+            const hit = results.find((r: any) => r.media_type === "movie" || r.media_type === "tv") ?? null
+            return hit && typeof hit.id === "number" ? hit : null
+          }
+        } catch {
+          return null
+        }
       }
 
-      const titles = Array.isArray(parsed?.titles) ? parsed.titles : []
-      await incrementGroqUsage()
+      const enriched = await Promise.all(llmTitles.slice(0, 20).map(enrichOneTitle))
+      const seen = new Set<string>()
+      const titles = enriched.filter((item: any): item is NonNullable<typeof item> => {
+        if (!item) return false
+        const key = `${item.media_type ?? "unknown"}-${item.id}`
+        if (seen.has(key)) return false
+        seen.add(key)
+        return true
+      })
+
+      await incrementAIUsage()
       return Response.json({ ok: true, titles })
     }
 
     if (url.pathname.endsWith("/groq-rerank")) {
-      const groqKey = Deno.env.get("CEREBRAS_API_KEY")
-      if (!groqKey) {
-        return Response.json({ ok: false, error: "CEREBRAS_API_KEY not configured" }, { status: 500 })
+      const aiKey = Deno.env.get("OPENROUTER_API_KEY")
+      if (!aiKey) {
+        return Response.json({ ok: false, error: "OPENROUTER_API_KEY not configured" }, { status: 500 })
       }
 
       const body = await req.json().catch(() => null)
@@ -1681,14 +1735,16 @@ Rules:
 - Strictly exclude anything in "avoid". Zero exceptions.
 - Return ONLY the raw JSON object, nothing else.`
 
-      const rerankResp = await fetchWithTimeout("https://api.groq.com/openai/v1/chat/completions", {
+      const rerankResp = await fetchWithTimeout("https://openrouter.ai/api/v1/chat/completions", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "Authorization": `Bearer ${groqKey}`
+          "Authorization": `Bearer ${aiKey}`,
+          "HTTP-Referer": "https://vestigo.app",
+          "X-Title": "Vestigo"
         },
         body: JSON.stringify({
-          model: "llama-3.3-70b-versatile",
+          model: "poolside/laguna-xs-2.1:free",
           max_tokens: 2048,
           messages: [
             { role: "system", content: rerankSystemPrompt },
@@ -1699,7 +1755,7 @@ Rules:
 
       if (!rerankResp.ok) {
         const text = await rerankResp.text()
-        return Response.json({ ok: false, error: `Groq error: ${rerankResp.status} ${text}` }, { status: 502 })
+        return Response.json({ ok: false, error: `AI error: ${rerankResp.status} ${text}` }, { status: 502 })
       }
 
       const rerankData = await rerankResp.json()
@@ -1707,20 +1763,20 @@ Rules:
 
       let rerankParsed: any
       try {
-        rerankParsed = JSON.parse(rerankText)
+        rerankParsed = extractJSON(rerankText)
       } catch {
-        return Response.json({ ok: false, error: "Failed to parse Groq response as JSON", raw: rerankText }, { status: 502 })
+        return Response.json({ ok: false, error: "Failed to parse AI response as JSON", raw: rerankText }, { status: 502 })
       }
 
       const rankings = Array.isArray(rerankParsed?.rankings) ? rerankParsed.rankings : []
-      await incrementGroqUsage()
+      await incrementAIUsage()
       return Response.json({ ok: true, rankings })
     }
 
     if (url.pathname.endsWith("/thematic-parse")) {
-      const groqKey = Deno.env.get("CEREBRAS_API_KEY")
-      if (!groqKey) {
-        return Response.json({ ok: false, error: "CEREBRAS_API_KEY not configured" }, { status: 500 })
+      const aiKey = Deno.env.get("OPENROUTER_API_KEY")
+      if (!aiKey) {
+        return Response.json({ ok: false, error: "OPENROUTER_API_KEY not configured" }, { status: 500 })
       }
 
       const body = await req.json().catch(() => null)
@@ -1761,14 +1817,16 @@ Rules:
 - Infer themes from liked/disliked aspects: "I liked the heist planning" → positiveThemes: ["heist"]
 - Return ONLY the raw JSON object, nothing else.`
 
-      const groqResp = await fetchWithTimeout("https://api.groq.com/openai/v1/chat/completions", {
+      const aiResp = await fetchWithTimeout("https://openrouter.ai/api/v1/chat/completions", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "Authorization": `Bearer ${groqKey}`
+          "Authorization": `Bearer ${aiKey}`,
+          "HTTP-Referer": "https://vestigo.app",
+          "X-Title": "Vestigo"
         },
         body: JSON.stringify({
-          model: "llama-3.3-70b-versatile",
+          model: "poolside/laguna-xs-2.1:free",
           max_tokens: 512,
           messages: [
             { role: "system", content: systemPrompt },
@@ -1777,22 +1835,22 @@ Rules:
         })
       }, 15000)
 
-      if (!groqResp.ok) {
-        const text = await groqResp.text()
-        return Response.json({ ok: false, error: `Groq error: ${groqResp.status} ${text}` }, { status: 502 })
+      if (!aiResp.ok) {
+        const text = await aiResp.text()
+        return Response.json({ ok: false, error: `AI error: ${aiResp.status} ${text}` }, { status: 502 })
       }
 
-      const groqData = await groqResp.json()
-      const text = groqData?.choices?.[0]?.message?.content ?? ""
+      const aiData = await aiResp.json()
+      const text = aiData?.choices?.[0]?.message?.content ?? ""
 
       let parsed: any
       try {
-        parsed = JSON.parse(text)
+        parsed = extractJSON(text)
       } catch {
-        return Response.json({ ok: false, error: "Failed to parse Groq response as JSON", raw: text }, { status: 502 })
+        return Response.json({ ok: false, error: "Failed to parse AI response as JSON", raw: text }, { status: 502 })
       }
 
-      await incrementGroqUsage()
+      await incrementAIUsage()
       return Response.json({ ok: true, ...parsed })
     }
 

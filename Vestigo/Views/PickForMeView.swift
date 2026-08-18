@@ -329,6 +329,7 @@ struct PickForMeView: View {
                             .liquidGlass(cornerRadius: 16)
                         }
                         .buttonStyle(.plain)
+                        .swipeToDelete(cornerRadius: 16) { model.removePickForMeRecentSearch(search) }
                     }
                 }
             }

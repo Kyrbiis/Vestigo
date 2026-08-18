@@ -2052,6 +2052,7 @@ private struct DevToolsPanel: View {
                 cacheRow("Person details",    count: model.personDetails.count)          { model.personDetails = [:] }
                 cacheRow("Collection recs",   count: model.collectionRecommendations.count) { model.collectionRecommendations = [:] }
                 cacheRow("Home feed",         count: nil)                                { model.clearHomeFeedCache() }
+                cacheRow("Describe It",       count: model.describeItResultsCache.count) { model.clearDescribeItCache() }
                 Divider().opacity(0.3)
                 Button("Clear all caches") {
                     model.clearAllCaches()
@@ -2176,6 +2177,7 @@ private struct DevToolsPanel: View {
         streaming:   \(model.providerCache.count)
         related:     \(model.relatedMediaCache.count)
         people:      \(model.personCreditsCache.count)
+        describe it: \(model.describeItResultsCache.count)
         """
     }
 
