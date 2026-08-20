@@ -728,9 +728,7 @@ struct PickForMeView: View {
         VStack(spacing: 10) {
             ForEach(options) { option in
                 let selectedNonAny = selection.wrappedValue.filter { !$0.isAnyOption }
-                let anySelected = selection.wrappedValue.contains(where: { $0.isAnyOption })
                 let atMax = !option.isAnyOption && !selection.wrappedValue.contains(option) && selectedNonAny.count >= maxCount
-                let atMaxOrAny = atMax || (anySelected && !option.isAnyOption)
                 PickForMeOptionButton(title: option.title, subtitle: option.subtitle, isSelected: selection.wrappedValue.contains(option)) {
                     guard !atMax else { return }
                     if option.isAnyOption {
@@ -745,7 +743,7 @@ struct PickForMeView: View {
                     }
                     errorText = nil
                 }
-                .disabled(atMaxOrAny)
+                .disabled(atMax)
             }
         }
     }
@@ -1010,7 +1008,7 @@ struct PickForMeView: View {
         case .sourceMaterial:
             return answers.sourceMaterial != nil
         case .runtime:
-            return answers.runtimeRange.hasConstraint
+            return true
         case .releaseAge:
             return answers.releaseAge != nil
         case .ageRating:

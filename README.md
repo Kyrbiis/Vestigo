@@ -55,9 +55,9 @@ Tap any poster anywhere in the app to open its detail view, where you can save i
 
 ## Installation
 
-**TestFlight** — public beta coming soon.
+**TestFlight** — https://testflight.apple.com/join/zbvP2WEx.
 
-**Build from source** — clone the repo, open `Vestigo.xcodeproj` in Xcode, and run on a simulator or device. You will need a [TMDb API key](https://developer.themoviedb.org/docs/getting-started) and optionally, an [OMDb API key](https://www.omdbapi.com/apikey.aspx) for IMDb ratings. Add these in the app's Settings tab.
+**Build from source** — clone the repo, open `Vestigo.xcodeproj` in Xcode, and run on a simulator or device. No API keys are required — the app connects to the same shared backend as the distributed version. Optionally, add an [OMDb API key](https://www.omdbapi.com/apikey.aspx) in Settings to enable IMDb ratings.
 
 <br>
 

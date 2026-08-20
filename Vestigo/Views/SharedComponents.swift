@@ -285,12 +285,7 @@ struct MediaTile: View {
     @State private var showCollections = false
 
     var body: some View {
-        if swipeContext == .watchlist {
-            tileCore
-                .swipeToDelete(cornerRadius: 26) { model.toggleWatchlist(item) }
-        } else {
-            tileCore
-        }
+        tileCore
     }
 
     private var tileCore: some View {
@@ -1248,21 +1243,25 @@ private struct SwipeToDeleteModifier: ViewModifier {
 
     func body(content: Content) -> some View {
         ZStack(alignment: .trailing) {
-            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                .fill(.red)
-                .overlay(alignment: .trailing) {
-                    Image(systemName: "trash")
-                        .font(.system(size: 16, weight: .bold))
-                        .foregroundStyle(.white)
-                        .padding(.trailing, 16)
-                        .opacity(min(1.0, abs(offset) / 32))
-                }
+            if offset < -2 {
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .fill(.red)
+                    // Cap at threshold * 1.5 so the ZStack never expands beyond the row width during fly-out
+                    .frame(width: min(max(0, -offset), threshold * 1.5))
+                    .overlay(alignment: .center) {
+                        Image(systemName: "trash.fill")
+                            .font(.system(size: 15, weight: .bold))
+                            .foregroundStyle(.white)
+                            .opacity(min(1.0, max(0, (abs(offset) - 24) / 20)))
+                    }
+            }
 
             content
                 .offset(x: offset)
         }
-        .clipped()
-        .gesture(
+        .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+        .contentShape(Rectangle())
+        .simultaneousGesture(
             DragGesture(minimumDistance: 12)
                 .onChanged { value in
                     let dx = value.translation.width

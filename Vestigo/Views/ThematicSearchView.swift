@@ -35,7 +35,7 @@ struct ThematicSearchView: View {
             Divider().opacity(0.3)
 
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 10) {
+                VStack(alignment: .leading, spacing: 10) {
                     if isLoading {
                         ProgressView()
                             .frame(maxWidth: .infinity)
@@ -53,7 +53,6 @@ struct ThematicSearchView: View {
                 .padding(18)
                 .padding(.bottom, 110)
             }
-            .scrollDismissesKeyboard(.immediately)
             .scrollIndicators(.hidden)
         }
         .safeAreaInset(edge: .top, spacing: 0) {
@@ -72,6 +71,13 @@ struct ThematicSearchView: View {
         .presentationCornerRadius(54)
         .sheet(item: $selectedNestedItem) { item in
             DetailView(item: item, model: model)
+        }
+        .onChange(of: query) { _, newValue in
+            if newValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                hasSearched = false
+                results = []
+                errorMessage = nil
+            }
         }
         .onAppear { inputFocused = true }
     }
@@ -167,6 +173,20 @@ struct ThematicSearchView: View {
                         .padding(.horizontal, 12)
                         .padding(.vertical, 12)
                         .allowsHitTesting(false)
+                }
+            }
+            .overlay(alignment: .bottomTrailing) {
+                if !query.isEmpty {
+                    Button {
+                        query = ""
+                        inputFocused = true
+                    } label: {
+                        Text("Clear")
+                            .font(.caption.bold())
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .padding(10)
                 }
             }
             .liquidGlass(cornerRadius: 18)
