@@ -130,6 +130,12 @@ struct ForYouView: View {
                 forYouFilter = .both
                 forYouPath.removeAll()
             }
+            .onChange(of: model.pendingPickForMe) { _, isPending in
+                if isPending {
+                    forYouPath.append(.pickForMe)
+                    model.pendingPickForMe = false
+                }
+            }
         }
     }
 

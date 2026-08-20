@@ -507,17 +507,15 @@ private struct TrailersSection: View {
                 .sectionTitle()
 
             HStack(spacing: 4) {
-                if trailers.count > 1 {
-                    Button { navigate(by: -1) } label: {
-                        Image(systemName: "chevron.left")
-                            .font(.system(size: 11, weight: .bold))
-                            .padding(6)
-                            .background(.white.opacity(0.12), in: Circle())
-                    }
-                    .buttonStyle(.plain)
-                    .opacity(currentIndex > 0 ? 1 : 0)
-                    .disabled(currentIndex == 0)
+                Button { navigate(by: -1) } label: {
+                    Image(systemName: "chevron.left")
+                        .font(.system(size: 11, weight: .bold))
+                        .padding(6)
+                        .background(.white.opacity(0.12), in: Circle())
                 }
+                .buttonStyle(.plain)
+                .opacity(trailers.count > 1 && currentIndex > 0 ? 1 : 0)
+                .disabled(trailers.count <= 1 || currentIndex == 0)
 
                 YouTubeTrailerPlayer(videoKey: currentTrailer.key, title: currentTrailer.displayTitle, onError: handleTrailerError)
                     .id(currentTrailer.id)
@@ -529,17 +527,15 @@ private struct TrailersSection: View {
                             .stroke(.white.opacity(0.12), lineWidth: 1)
                     }
 
-                if trailers.count > 1 {
-                    Button { navigate(by: 1) } label: {
-                        Image(systemName: "chevron.right")
-                            .font(.system(size: 11, weight: .bold))
-                            .padding(6)
-                            .background(.white.opacity(0.12), in: Circle())
-                    }
-                    .buttonStyle(.plain)
-                    .opacity(currentIndex < trailers.count - 1 ? 1 : 0)
-                    .disabled(currentIndex >= trailers.count - 1)
+                Button { navigate(by: 1) } label: {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 11, weight: .bold))
+                        .padding(6)
+                        .background(.white.opacity(0.12), in: Circle())
                 }
+                .buttonStyle(.plain)
+                .opacity(trailers.count > 1 && currentIndex < trailers.count - 1 ? 1 : 0)
+                .disabled(trailers.count <= 1 || currentIndex >= trailers.count - 1)
             }
             .padding(.horizontal, -14)
             .gesture(

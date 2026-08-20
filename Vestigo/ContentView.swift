@@ -33,6 +33,18 @@ struct ContentView: View {
         )
     }
 
+    private func handleShortcut(_ type: String) {
+        switch type {
+        case "openWatchlist": model.selectTab(.watchlist)
+        case "openSearch": model.selectTab(.search)
+        case "openForYou": model.selectTab(.forYou)
+        case "openPickForMe":
+            model.selectTab(.forYou)
+            model.pendingPickForMe = true
+        default: break
+        }
+    }
+
     var body: some View {
         TabView(selection: selectedTabBinding) {
             AppTabRoot(tab: .home, model: model)
@@ -80,6 +92,11 @@ struct ContentView: View {
             model.refreshImages()
         })
         .task { await model.bootstrap() }
+        .onReceive(NotificationCenter.default.publisher(for: .vestigoShortcut)) { notification in
+            if let type = notification.object as? String {
+                handleShortcut(type)
+            }
+        }
         .sheet(item: $model.selectedItem) { item in
             DetailView(item: item, model: model)
         }

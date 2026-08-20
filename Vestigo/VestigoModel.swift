@@ -9,6 +9,7 @@ import FoundationModels
 final class VestigoModel: ObservableObject {
     @Published var selectedTab: AppTab = .home
     @Published var tabTransitionDirection: TabTransitionDirection = .forward
+    @Published var pendingPickForMe = false
     @Published var mediaFilter: MediaFilter = .both
     @Published var homeViewMode: ViewMode = .tile
     @Published var searchViewMode: ViewMode = .tile

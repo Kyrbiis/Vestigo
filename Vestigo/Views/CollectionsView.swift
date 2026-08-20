@@ -288,6 +288,7 @@ struct FranchiseCollectionsView: View {
     @State private var tmdbCollectionFranchises: [FranchiseCollection] = []
     @State private var exactProviderFranchises: [FranchiseCollection] = []
     @State private var tvdbLoadError: String?
+    @State private var isLoadingFranchises = false
     private let backendClient = VestigoBackendClient()
 
     private var activeFranchiseSourceItems: [MediaItem] {
@@ -362,10 +363,16 @@ struct FranchiseCollectionsView: View {
                 switch screenMode {
                 case .all:
                     if franchises.isEmpty {
-                        StatusBubble(
-                            title: screenMode.emptyTitle,
-                            text: screenMode.emptyText
-                        )
+                        if isLoadingFranchises {
+                            ProgressView()
+                                .frame(maxWidth: .infinity)
+                                .padding(.top, 40)
+                        } else {
+                            StatusBubble(
+                                title: screenMode.emptyTitle,
+                                text: screenMode.emptyText
+                            )
+                        }
                     } else {
                         if !seriesFranchises.isEmpty {
                             Text("Franchises")
@@ -405,10 +412,16 @@ struct FranchiseCollectionsView: View {
 
                 case .series:
                     if seriesFranchises.isEmpty {
-                        StatusBubble(
-                            title: screenMode.emptyTitle,
-                            text: screenMode.emptyText
-                        )
+                        if isLoadingFranchises {
+                            ProgressView()
+                                .frame(maxWidth: .infinity)
+                                .padding(.top, 40)
+                        } else {
+                            StatusBubble(
+                                title: screenMode.emptyTitle,
+                                text: screenMode.emptyText
+                            )
+                        }
                     } else {
                         ForEach(seriesFranchises) { franchise in
                             Button {
@@ -425,10 +438,16 @@ struct FranchiseCollectionsView: View {
 
                 case .universes:
                     if universeFranchises.isEmpty {
-                        StatusBubble(
-                            title: screenMode.emptyTitle,
-                            text: screenMode.emptyText
-                        )
+                        if isLoadingFranchises {
+                            ProgressView()
+                                .frame(maxWidth: .infinity)
+                                .padding(.top, 40)
+                        } else {
+                            StatusBubble(
+                                title: screenMode.emptyTitle,
+                                text: screenMode.emptyText
+                            )
+                        }
                     } else {
                         ForEach(universeFranchises) { franchise in
                             Button {
@@ -449,9 +468,12 @@ struct FranchiseCollectionsView: View {
             FranchiseDetailView(franchise: franchise, model: model)
         }
         .task(id: screenMode.title) {
-            await loadDiscoveredTMDbCollections()
-            await loadExactProviderFranchises()
-            await loadTVDBFranchises()
+            isLoadingFranchises = true
+            async let tmdb: () = loadDiscoveredTMDbCollections()
+            async let provider: () = loadExactProviderFranchises()
+            async let tvdb: () = loadTVDBFranchises()
+            _ = await (tmdb, provider, tvdb)
+            isLoadingFranchises = false
         }
     }
 
