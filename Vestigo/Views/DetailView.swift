@@ -367,7 +367,7 @@ struct DetailView: View {
     
     @ViewBuilder private var episodeSection: some View {
         if item.kind == .tv {
-            EpisodeProgressView(show: item, model: model, seasons: detail?.seasons ?? [], providers: visibleProviders ?? [], isLoading: detail == nil)
+            EpisodeProgressView(show: item, model: model, seasons: detail?.seasons ?? [], isLoading: detail == nil)
         }
     }
     
@@ -1225,7 +1225,6 @@ struct EpisodeProgressView: View {
     let show: MediaItem
     @ObservedObject var model: VestigoModel
     let seasons: [SeasonInfo]
-    let providers: [StreamingOption]
     let isLoading: Bool
     @State private var expandedSeasonNumbers = Set<Int>()
     
@@ -1246,7 +1245,6 @@ struct EpisodeProgressView: View {
                         SeasonDropdownView(
                             show: show,
                             season: season,
-                            providers: providers,
                             isExpanded: expandedSeasonNumbers.contains(season.number),
                             model: model
                         ) {
@@ -1268,11 +1266,8 @@ struct EpisodeProgressView: View {
 struct SeasonDropdownView: View {
     let show: MediaItem
     let season: SeasonInfo
-    let providers: [StreamingOption]
     let isExpanded: Bool
     @ObservedObject var model: VestigoModel
-    @Environment(\.openURL) private var openURL
-    @State private var isProviderDialogPresented = false
     let toggle: () -> Void
     
     var body: some View {
@@ -1295,31 +1290,6 @@ struct SeasonDropdownView: View {
                     
                     Spacer()
 
-                    Button {
-                        isProviderDialogPresented = true
-                    } label: {
-                        Image(systemName: "arrow.up.forward.app")
-                            .font(.caption.bold())
-                            .foregroundStyle(.secondary)
-                            .frame(width: 34, height: 34)
-                            .contentShape(Circle())
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(providerLinks.isEmpty)
-                    .opacity(providerLinks.isEmpty ? 0.45 : 1.0)
-                    .accessibilityLabel("Open \(season.name)")
-                    .confirmationDialog("Open \(season.name)", isPresented: $isProviderDialogPresented, titleVisibility: .visible) {
-                        ForEach(providerLinks.prefix(12)) { provider in
-                            Button(provider.dialogTitle) {
-                                guard let url = provider.tappableURL else { return }
-                                openURL(url)
-                            }
-                        }
-                        Button("Cancel", role: .cancel) { }
-                    } message: {
-                        Text("Choose a streaming app from Where to watch.")
-                    }
-                    
                     Button(isSeasonWatched ? "Unwatch" : "Mark") {
                         model.markSeason(
                             show: show,
@@ -1351,7 +1321,7 @@ struct SeasonDropdownView: View {
                 
                 VStack(spacing: 8) {
                     ForEach(episodeRows) { episode in
-                        EpisodeRowView(show: show, seasonNumber: season.number, episode: episode, providers: providers, model: model)
+                        EpisodeRowView(show: show, seasonNumber: season.number, episode: episode, model: model)
                     }
                 }
                 .padding(12)
@@ -1382,19 +1352,13 @@ struct SeasonDropdownView: View {
         }
     }
 
-    private var providerLinks: [StreamingOption] {
-        providers.filter { $0.tappableURL != nil }
-    }
 }
 
 struct EpisodeRowView: View {
     let show: MediaItem
     let seasonNumber: Int
     let episode: EpisodeInfo
-    let providers: [StreamingOption]
     @ObservedObject var model: VestigoModel
-    @Environment(\.openURL) private var openURL
-    @State private var isProviderDialogPresented = false
     
     var body: some View {
         Button {
@@ -1402,13 +1366,13 @@ struct EpisodeRowView: View {
         } label: {
             HStack(alignment: .center, spacing: 12) {
                 EpisodeThumbnailView(url: episode.stillURL)
-                
+
                 VStack(alignment: .leading, spacing: 4) {
                     Text("\(episode.number). \(episode.title)")
                         .font(.subheadline.bold())
                         .foregroundStyle(.primary)
                         .lineLimit(2)
-                    
+
                     if !episodeMetadataText.isEmpty {
                         Text(episodeMetadataText)
                             .font(.caption.bold())
@@ -1417,43 +1381,17 @@ struct EpisodeRowView: View {
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
-                
-                Spacer(minLength: 8)
 
-                Button {
-                    isProviderDialogPresented = true
-                } label: {
-                    Image(systemName: "arrow.up.forward.app")
-                        .font(.caption.bold())
-                        .foregroundStyle(.secondary)
-                        .frame(width: 34, height: 34)
-                        .contentShape(Circle())
-                }
-                .buttonStyle(.plain)
-                .disabled(providerLinks.isEmpty)
-                .opacity(providerLinks.isEmpty ? 0.45 : 1.0)
-                .accessibilityLabel("Open \(episode.title)")
-                .confirmationDialog("Open \(episode.title)", isPresented: $isProviderDialogPresented, titleVisibility: .visible) {
-                    ForEach(providerLinks.prefix(12)) { provider in
-                        Button(provider.dialogTitle) {
-                            guard let url = provider.tappableURL else { return }
-                            openURL(url)
-                        }
-                    }
-                    Button("Cancel", role: .cancel) { }
-                } message: {
-                    Text("Choose a streaming app from Where to watch.")
-                }
-                
-                Image(systemName: isWatched ? "checkmark.circle.fill" : "circle")
+                Image(systemName: episode.isUpcoming ? "clock" : (isWatched ? "checkmark.circle.fill" : "circle"))
                     .font(.title3.bold())
-                    .foregroundStyle(isWatched ? model.settings.accentColor : .secondary)
+                    .foregroundStyle(episode.isUpcoming ? AnyShapeStyle(.tertiary) : (isWatched ? AnyShapeStyle(model.settings.accentColor) : AnyShapeStyle(.secondary)))
             }
             .padding(10)
             .background(.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .disabled(episode.isUpcoming)
     }
     
     private var isWatched: Bool {
@@ -1474,9 +1412,6 @@ struct EpisodeRowView: View {
         return parts.joined(separator: " • ")
     }
 
-    private var providerLinks: [StreamingOption] {
-        providers.filter { $0.tappableURL != nil }
-    }
 }
 
 struct EpisodeThumbnailView: View {

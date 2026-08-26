@@ -354,6 +354,48 @@ struct MediaTile: View {
 
 
 
+// MARK: - Cached Image Loading
+
+#if canImport(UIKit)
+struct CachedAsyncImage<Content: View, Placeholder: View>: View {
+    let url: URL?
+    @ViewBuilder let content: (Image) -> Content
+    @ViewBuilder let placeholder: () -> Placeholder
+    @State private var uiImage: UIImage?
+
+    var body: some View {
+        Group {
+            if let uiImage {
+                content(Image(uiImage: uiImage))
+            } else {
+                placeholder()
+            }
+        }
+        .task(id: url?.absoluteString) {
+            await load()
+        }
+    }
+
+    private func load() async {
+        guard let url else { return }
+        if let cached = ImageCache.shared[url] {
+            uiImage = cached
+            return
+        }
+        guard let (data, _) = try? await URLSession.shared.data(from: url),
+              let raw = UIImage(data: data) else { return }
+        let decoded = await Task.detached(priority: .userInitiated) {
+            raw.preparingForDisplay() ?? raw
+        }.value
+        guard !Task.isCancelled else { return }
+        ImageCache.shared[url] = decoded
+        uiImage = decoded
+    }
+}
+#endif
+
+// MARK: - Poster & Person Images
+
 struct PosterView: View {
     let item: MediaItem
     let width: CGFloat
@@ -365,15 +407,12 @@ struct PosterView: View {
         ZStack {
             RoundedRectangle(cornerRadius: width * 0.18, style: .continuous)
                 .fill(item.genreGradient)
-            AsyncImage(url: item.posterURL?.refreshedImageURL(token: imageRefreshToken)) { phase in
-                switch phase {
-                case .success(let image):
-                    image.resizable().scaledToFill()
-                default:
-                    Image(systemName: item.kind == .movie ? "film" : "tv")
-                        .font(.system(size: width * 0.25, weight: .bold))
-                        .foregroundStyle(.white.opacity(0.8))
-                }
+            CachedAsyncImage(url: item.posterURL(displayWidth: width)?.refreshedImageURL(token: imageRefreshToken)) { image in
+                image.resizable().scaledToFill()
+            } placeholder: {
+                Image(systemName: item.kind == .movie ? "film" : "tv")
+                    .font(.system(size: width * 0.25, weight: .bold))
+                    .foregroundStyle(.white.opacity(0.8))
             }
             LinearGradient(colors: [.clear, .black.opacity(0.42)], startPoint: .center, endPoint: .bottom)
             
@@ -410,15 +449,12 @@ struct PersonImageView: View {
             RoundedRectangle(cornerRadius: width * 0.18, style: .continuous)
                 .fill(.white.opacity(0.12))
             
-            AsyncImage(url: person.profileURL?.refreshedImageURL(token: imageRefreshToken)) { phase in
-                switch phase {
-                case .success(let image):
-                    image.resizable().scaledToFill()
-                default:
-                    Image(systemName: "person.fill")
-                        .font(.system(size: width * 0.32, weight: .bold))
-                        .foregroundStyle(.secondary)
-                }
+            CachedAsyncImage(url: person.profileURL?.refreshedImageURL(token: imageRefreshToken)) { image in
+                image.resizable().scaledToFill()
+            } placeholder: {
+                Image(systemName: "person.fill")
+                    .font(.system(size: width * 0.32, weight: .bold))
+                    .foregroundStyle(.secondary)
             }
         }
         .frame(width: width, height: height)
@@ -1300,7 +1336,6 @@ struct LiquidGlassModifier: ViewModifier {
         if #available(iOS 26.0, *) {
             content
                 .padding(1)
-                .background(.clear, in: shape)
                 .glassEffect(.regular, in: shape)
                 .overlay { shape.fill(colorScheme == .light ? .black.opacity(0.11) : .clear) }
                 .overlay { shape.stroke(colorScheme == .light ? .black.opacity(0.22) : .clear, lineWidth: 1) }

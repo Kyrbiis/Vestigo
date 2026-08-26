@@ -18,6 +18,7 @@ struct SearchView: View {
     @State private var showingThematicSearch = false
     @FocusState private var searchIsFocused: Bool
     private let maxSearchHistoryCount = 8
+    @State private var searchTask: Task<Void, Never>? = nil
     
     var body: some View {
         BaseScreen(title: "Search", filter: .constant(model.searchFilter.mediaFilter ?? .movie), settings: model.settings, onRefresh: {
@@ -27,7 +28,14 @@ struct SearchView: View {
                 SearchBubble(text: $model.searchText, isFocused: $searchIsFocused) {
                     commitSearchInput()
                 }
-                .onChange(of: model.searchText) { _, _ in model.updateSearch() }
+                .onChange(of: model.searchText) { _, _ in
+                    searchTask?.cancel()
+                    searchTask = Task {
+                        try? await Task.sleep(for: .milliseconds(300))
+                        guard !Task.isCancelled else { return }
+                        model.updateSearch()
+                    }
+                }
                 .onChange(of: searchIsFocused) { _, newValue in
                     if !newValue {
                         commitSearchInput()
@@ -119,6 +127,8 @@ struct SearchView: View {
     }
     
     private func commitSearchInput() {
+        searchTask?.cancel()
+        searchTask = nil
         searchIsFocused = false
         model.searchFieldIsFocused = false
         model.searchText = model.searchText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -525,7 +535,7 @@ struct PeopleSearchResults: View {
         if people.isEmpty {
             StatusBubble(title: "No people found", text: "No actors, directors, producers, or other credited people matched this search.")
         } else {
-            VStack(spacing: 12) {
+            LazyVStack(spacing: 12) {
                 ForEach(people) { person in
                     Button {
                         model.selectedPerson = person

@@ -232,7 +232,13 @@ struct PickForMeView: View {
                     .foregroundStyle(.secondary)
             }
 
-            answerOptions
+            if #available(iOS 26.0, *) {
+                GlassEffectContainer(spacing: 8) {
+                    answerOptions
+                }
+            } else {
+                answerOptions
+            }
 
             if let errorText {
                 StatusBubble(title: "Choose an answer", text: errorText)
@@ -544,6 +550,43 @@ struct PickForMeView: View {
         }
     }
 
+    private var reviewRows: some View {
+        VStack(spacing: 10) {
+            ForEach(Array(steps.enumerated()), id: \.element) { index, reviewStep in
+                Button {
+                    step = index
+                    isEditingAnswerFromReview = true
+                    errorText = nil
+                } label: {
+                    HStack(alignment: .center, spacing: 12) {
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text(reviewStep.title)
+                                .font(.subheadline.bold())
+                                .foregroundStyle(.primary)
+                                .lineLimit(2)
+
+                            Text(answerSummary(for: reviewStep))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(3)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+
+                        Image(systemName: "chevron.right")
+                            .font(.caption.bold())
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 13)
+                    .frame(maxWidth: .infinity, minHeight: 58, alignment: .leading)
+                    .liquidGlass(cornerRadius: 24)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+
     private var answerReviewContent: some View {
         VStack(alignment: .leading, spacing: 16) {
             Button {
@@ -561,38 +604,13 @@ struct PickForMeView: View {
                 .font(.title2.bold())
                 .frame(maxWidth: .infinity, alignment: .leading)
 
-            VStack(spacing: 10) {
-                ForEach(Array(steps.enumerated()), id: \.element) { index, reviewStep in
-                    Button {
-                        step = index
-                        isEditingAnswerFromReview = true
-                        errorText = nil
-                    } label: {
-                        HStack(alignment: .center, spacing: 12) {
-                            VStack(alignment: .leading, spacing: 5) {
-                                Text(reviewStep.title)
-                                    .font(.subheadline.bold())
-                                    .foregroundStyle(.primary)
-                                    .lineLimit(2)
-
-                                Text(answerSummary(for: reviewStep))
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(3)
-                            }
-                            .frame(maxWidth: .infinity, alignment: .leading)
-
-                            Image(systemName: "chevron.right")
-                                .font(.caption.bold())
-                                .foregroundStyle(.secondary)
-                        }
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 13)
-                        .frame(maxWidth: .infinity, minHeight: 58, alignment: .leading)
-                        .liquidGlass(cornerRadius: 24)
-                        .contentShape(Rectangle())
+            Group {
+                if #available(iOS 26.0, *) {
+                    GlassEffectContainer(spacing: 8) {
+                        reviewRows
                     }
-                    .buttonStyle(.plain)
+                } else {
+                    reviewRows
                 }
             }
 
@@ -1080,7 +1098,7 @@ struct PickForMeInfoSheet: View {
                 Text("Getting better results")
                     .font(.title2.bold())
 
-                Text("Genre flavor and deal breakers are hard cuts — every extra one reduces the pool. Mood and secondary are layered — more gives Groq more surface area to match against.")
+                Text("Genre flavor and deal breakers are hard cuts — every extra one reduces the pool. Mood and secondary are layered — more gives Describe It more surface area to match against.")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
 
@@ -1158,10 +1176,6 @@ struct PickForMeOptionButton: View {
             .padding(.vertical, 13)
             .frame(maxWidth: .infinity, minHeight: 58, alignment: .leading)
             .liquidGlass(cornerRadius: 28)
-            .overlay {
-                RoundedRectangle(cornerRadius: 28, style: .continuous)
-                    .stroke(.primary.opacity(isSelected ? 0.45 : 0), lineWidth: 1.5)
-            }
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)

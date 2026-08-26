@@ -111,12 +111,15 @@ struct TMDbService {
     
     func contextualSearch(query: String, filter: MediaFilter, includeAdult: Bool = false) async throws -> [MediaItem] {
         let found = try await search(query: query, filter: filter, includeAdult: includeAdult)
-        var more: [MediaItem] = []
-        for item in found {
-            more += (try? await recommendations(for: item.key)) ?? []
-            more += (try? await sameSeriesOrSimilar(for: item.key)) ?? []
+        return await withTaskGroup(of: [MediaItem].self) { group in
+            for item in found {
+                group.addTask { (try? await self.recommendations(for: item.key)) ?? [] }
+                group.addTask { (try? await self.sameSeriesOrSimilar(for: item.key)) ?? [] }
+            }
+            var more: [MediaItem] = []
+            for await batch in group { more += batch }
+            return more
         }
-        return more
     }
     
     func discover(genreID: Int, filter: MediaFilter, sort: GenreSort) async throws -> [MediaItem] {
@@ -744,23 +747,24 @@ struct TMDbService {
     }
     
     private func hydratedSeasons(for item: MediaItem, baseSeasons: [SeasonDTO]) async throws -> [SeasonDTO] {
-        var hydratedSeasons: [SeasonDTO] = []
-        
-        for season in baseSeasons {
-            guard let seasonNumber = season.seasonNumber, seasonNumber > 0 else {
-                hydratedSeasons.append(season)
-                continue
+        var indexed: [(Int, SeasonDTO)] = []
+        await withTaskGroup(of: (Int, SeasonDTO?).self) { group in
+            for (index, season) in baseSeasons.enumerated() {
+                group.addTask {
+                    guard let seasonNumber = season.seasonNumber, seasonNumber > 0 else {
+                        return (index, nil)
+                    }
+                    let hydrated: SeasonDTO? = try? await self.fetch(path: "/tv/\(item.id)/season/\(seasonNumber)", query: [])
+                    return (index, hydrated)
+                }
             }
-            
-            do {
-                let hydratedSeason: SeasonDTO = try await fetch(path: "/tv/\(item.id)/season/\(seasonNumber)", query: [])
-                hydratedSeasons.append(season.mergingEpisodes(from: hydratedSeason))
-            } catch {
-                hydratedSeasons.append(season)
+            // mergingEpisodes is @MainActor – run it here in the group body (inherits caller's actor)
+            for await (index, hydrated) in group {
+                let base = baseSeasons[index]
+                indexed.append((index, hydrated.map { base.mergingEpisodes(from: $0) } ?? base))
             }
         }
-        
-        return hydratedSeasons
+        return indexed.sorted { $0.0 < $1.0 }.map(\.1)
     }
     
     func personCredits(personID: Int) async throws -> [MediaItem] {

@@ -480,14 +480,23 @@ struct FranchiseCollectionsView: View {
     private func loadExactProviderFranchises() async {
         var collectionsByMembership: [String: FranchiseCollection] = [:]
 
-        for item in activeFranchiseSourceItems {
-            do {
-                let items = try await backendClient.exactFranchiseRecommendations(
-                    id: "\(item.kind.rawValue)-\(item.id)",
-                    matching: item.title
-                )
-                .uniqued()
-                .filter(\.shouldShowInDiscovery)
+        // Tasks fetch network data only; @MainActor property accesses stay in the for-await body
+        await withTaskGroup(of: (MediaItem, [MediaItem])?.self) { group in
+            for item in activeFranchiseSourceItems {
+                group.addTask {
+                    guard let raw = try? await self.backendClient.exactFranchiseRecommendations(
+                        id: "\(item.kind.rawValue)-\(item.id)",
+                        matching: item.title
+                    ).uniqued() else { return nil }
+                    return (item, raw)
+                }
+            }
+
+            // for-await runs on the caller's actor (@MainActor for SwiftUI task), so
+            // shouldShowInDiscovery, posterURL, tmdbPath, and FranchiseCollection init are all safe here
+            for await result in group {
+                guard let (item, rawItems) = result else { continue }
+                let items = rawItems.filter(\.shouldShowInDiscovery)
                 guard items.count >= 2 else { continue }
 
                 let collection = FranchiseCollection(
@@ -512,8 +521,6 @@ struct FranchiseCollectionsView: View {
                 } else {
                     collectionsByMembership[membershipKey] = collection
                 }
-            } catch {
-                continue
             }
         }
 
@@ -526,11 +533,18 @@ struct FranchiseCollectionsView: View {
 
     private func loadTVDBFranchises() async {
         do {
-            var loaded: [String: TVDBFranchiseList] = [:]
-            for franchise in FranchiseLibrary.seedFranchises {
-                if let list = try await backendClient.franchiseList(id: franchise.id, matching: franchise.tvdbListQuery) {
-                    loaded[franchise.id] = list
+            let loaded = try await withThrowingTaskGroup(of: (String, TVDBFranchiseList?).self) { group in
+                for franchise in FranchiseLibrary.seedFranchises {
+                    group.addTask {
+                        let list = try await self.backendClient.franchiseList(id: franchise.id, matching: franchise.tvdbListQuery)
+                        return (franchise.id, list)
+                    }
                 }
+                var result: [String: TVDBFranchiseList] = [:]
+                for try await (id, list) in group {
+                    if let list { result[id] = list }
+                }
+                return result
             }
 
             await MainActor.run {
@@ -558,13 +572,12 @@ struct FranchiseCollectionsView: View {
             .filter { $0.kind == .movie && $0.shouldShowInDiscovery }
         var collectionsByID: [Int: BackendTMDbCollectionDTO] = [:]
 
-        for item in movieItems {
-            do {
-                if let collection = try await backendClient.tmdbCollection(for: item) {
-                    collectionsByID[collection.id] = collection
-                }
-            } catch {
-                continue
+        await withTaskGroup(of: BackendTMDbCollectionDTO?.self) { group in
+            for item in movieItems {
+                group.addTask { try? await self.backendClient.tmdbCollection(for: item) }
+            }
+            for await collection in group {
+                if let collection { collectionsByID[collection.id] = collection }
             }
         }
 

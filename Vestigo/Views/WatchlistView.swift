@@ -15,25 +15,17 @@ import UserNotifications
 struct WatchlistView: View {
     @ObservedObject var model: VestigoModel
 
-    var sortedItems: [MediaItem] {
-        model.library.watchlistItems.sorted(
+    var body: some View {
+        let sortedItems = model.library.watchlistItems.sorted(
             using: model.sortOption,
             ratings: model.library.ratings,
             externalRatings: model.externalRatingsCache,
             ratingSource: model.settings.preferredRatingSource,
             direction: model.sortDirection
         )
-    }
+        let unwatchedItems = sortedItems.filter { !model.library.isWatched($0.key) }
+        let watchedItems = sortedItems.filter { model.library.isWatched($0.key) }
 
-    var unwatchedItems: [MediaItem] {
-        sortedItems.filter { !model.library.isWatched($0.key) }
-    }
-
-    var watchedItems: [MediaItem] {
-        sortedItems.filter { model.library.isWatched($0.key) }
-    }
-
-    var body: some View {
         BaseScreen(title: "Watchlist", filter: .constant(.both), settings: model.settings, onRefresh: {
             await model.loadExternalRatings(for: model.library.watchlistItems, limit: 120)
         }) {
@@ -48,15 +40,15 @@ struct WatchlistView: View {
                     if !unwatchedItems.isEmpty {
                         Text("Unwatched")
                             .sectionTitle()
-                        
+
                         MediaGridOrList(items: unwatchedItems, hideWatchedForUpcoming: false, model: model, swipeContext: .watchlist)
                     }
-                    
+
                     if !watchedItems.isEmpty {
                         Text("Watched")
                             .sectionTitle()
                             .padding(.top, unwatchedItems.isEmpty ? 0 : 8)
-                        
+
                         MediaGridOrList(items: watchedItems, hideWatchedForUpcoming: false, model: model, swipeContext: .watchlist)
                     }
                 }

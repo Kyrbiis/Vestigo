@@ -65,6 +65,16 @@ struct MediaItem: Identifiable, Codable, Hashable {
 
     var key: MediaKey { MediaKey(id: id, kind: kind) }
     var posterURL: URL? { posterPath.flatMap { URL(string: "https://image.tmdb.org/t/p/w500\($0)") } }
+
+    func posterURL(displayWidth: CGFloat) -> URL? {
+        let size: String
+        switch displayWidth {
+        case ..<100: size = "w185"
+        case ..<220: size = "w342"
+        default:     size = "w500"
+        }
+        return posterPath.flatMap { URL(string: "https://image.tmdb.org/t/p/\(size)\($0)") }
+    }
     var releaseDateValue: Date? { DateParser.parse(releaseDate) }
     var releaseYearText: String { releaseDateValue.map { String(Calendar.current.component(.year, from: $0)) } ?? "TBA" }
     var releaseYearInt: Int? { Int(releaseYearText) }

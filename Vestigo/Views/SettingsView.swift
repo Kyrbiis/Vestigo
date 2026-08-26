@@ -25,7 +25,11 @@ struct SettingsView: View {
     @State private var showImportWarningAlert = false
     @State private var showImportFilePicker = false
     @State private var isImporting = false
+    @State private var importAmbiguities: [ImportAmbiguity] = []
+    @State private var currentAmbiguitySelections: [MediaKey] = []
     @State private var pendingImportFormat: WatchedImportEntry.ImportFormat = .automatic
+    @State private var showDuplicateWarningAlert = false
+    @State private var duplicateWarningCount = 0
     @State private var selectedCategory: SettingsCategory = .content
     @State private var importPlaceholderIndex = 0
     @State private var omdbKeysExpanded = true
@@ -58,8 +62,8 @@ struct SettingsView: View {
 
     private var importPlaceholderText: String {
         let examples = [
-            "Star Wars 5 f m\nRed Notice 4.5\nThe Flash 4 s",
-            "Star Wars 5 f m, Red Notice 4.5, The Flash 4 s"
+            "Star Wars m 5 f\nRed Notice m 4.5\nThe Flash s 4",
+            "Star Wars m 5 f, Red Notice m 4.5, The Flash s 4"
         ]
         return examples[importPlaceholderIndex % examples.count]
     }
@@ -546,17 +550,26 @@ struct SettingsView: View {
                 
                 VStack(alignment: .leading, spacing: 10) {
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("Import watched titles as title, star rating, optional f for favourite, and m for movie or s for series. Type in the text field with the format or import files. .txt can use one item per line or commas; .csv uses commas only.")
+                        Text("Import watched titles as title, m for movie or s for series, star rating, and optional f for favourite. Type in the text field with the format or import files. .txt can use one item per line or commas; .csv uses commas only.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
 
                         
-                        TextField(importPlaceholderText, text: $importText, axis: .vertical)
-                            .lineLimit(3...5)
-                            .textFieldStyle(.plain)
-                            .padding(12)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .liquidGlass(cornerRadius: 18)
+                        ZStack(alignment: .topLeading) {
+                            if importText.isEmpty {
+                                Text(importPlaceholderText)
+                                    .foregroundStyle(.tertiary)
+                                    .allowsHitTesting(false)
+                                    .padding(.top, 8)
+                                    .padding(.leading, 4)
+                            }
+                            TextEditor(text: $importText)
+                                .frame(minHeight: 72, maxHeight: 120)
+                                .scrollContentBackground(.hidden)
+                        }
+                        .padding(12)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .liquidGlass(cornerRadius: 18)
                         
                         Button {
                             importWatchedData(importText)
@@ -605,6 +618,10 @@ struct SettingsView: View {
                         }
                         .buttonStyle(.plain)
                         .disabled(isImporting)
+
+                        Text("If a title already exists in your library, its rating and favourite status will be overwritten with the imported data.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
                     .padding(10)
                     .liquidGlass(cornerRadius: 22)
@@ -666,6 +683,23 @@ struct SettingsView: View {
                         .contentShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
                     }
                     .buttonStyle(.plain)
+                    .settingBubble()
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        Button("Clear caches") {
+                            model.clearAllCaches()
+                            model.clearExternalRatingsCache()
+                            #if canImport(UIKit)
+                            ImageCache.shared.clear()
+                            #endif
+                        }
+                        .foregroundStyle(.red)
+
+                        Text("Frees up storage used by temporarily saved data such as ratings, streaming availability, and search results. Your watchlist, watched history, ratings, and collections are not affected. For a cache-by-cache breakdown, see the developer tab in About.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                     .settingBubble()
 
                     Button("Reset settings") {
@@ -739,7 +773,7 @@ struct SettingsView: View {
         } message: {
             Text("This removes watched items, ratings, watchlist, collections, episode progress, and settings from local storage.")
         }
-        .alert("The following items were not found", isPresented: $showImportNotFoundAlert) {
+        .alert("Some items couldn't be imported", isPresented: $showImportNotFoundAlert) {
             Button("OK", role: .cancel) { }
         } message: {
             Text(importNotFound.joined(separator: "\n"))
@@ -759,6 +793,26 @@ struct SettingsView: View {
         } message: {
             Text(importWarningMessage)
         }
+        .alert("Duplicate entries detected", isPresented: $showDuplicateWarningAlert) {
+            Button("Skip") {
+                if let pendingImportText {
+                    let textToImport = deduplicated(pendingImportText, format: pendingImportFormat)
+                    let formatToImport = pendingImportFormat
+                    self.pendingImportText = nil
+                    importWatchedData(textToImport, format: formatToImport, skipsWarnings: true, skipsDuplicateWarning: true)
+                }
+            }
+            Button("Continue") {
+                if let pendingImportText {
+                    let textToImport = pendingImportText
+                    let formatToImport = pendingImportFormat
+                    self.pendingImportText = nil
+                    importWatchedData(textToImport, format: formatToImport, skipsWarnings: true, skipsDuplicateWarning: true)
+                }
+            }
+        } message: {
+            Text("Your list contains titles that appear more than once. Skip to only use the first occurrence of each, or Continue to be prompted for each duplicate.")
+        }
         .fileImporter(isPresented: $showImportFilePicker, allowedContentTypes: [.plainText, .commaSeparatedText], allowsMultipleSelection: false) { result in
             switch result {
             case .success(let urls):
@@ -766,6 +820,111 @@ struct SettingsView: View {
                 importWatchedFile(url)
             case .failure:
                 break
+            }
+        }
+        .overlay {
+            if isImporting {
+                ZStack {
+                    Color.black.opacity(0.45)
+                        .ignoresSafeArea()
+                    ProgressView()
+                        .progressViewStyle(.circular)
+                        .tint(.white)
+                        .scaleEffect(1.5)
+                }
+                .transition(.opacity)
+                .animation(.easeInOut(duration: 0.2), value: isImporting)
+            } else if let current = importAmbiguities.first {
+                ZStack {
+                    Color.black.opacity(0.35)
+                        .ignoresSafeArea()
+                        .onTapGesture { }
+
+                    VStack(alignment: .leading, spacing: 16) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Ambiguous match")
+                                .font(.title3.bold())
+                            if current.occurrenceCount > 1 {
+                                let allSameRating = current.entries.allSatisfy { $0.rating == current.primaryEntry.rating }
+                                let subtitle: String = allSameRating
+                                    ? "You added this \(current.occurrenceCount) times — tap to pick which versions you meant."
+                                    : "Tap in order: 1st pick gets \(current.entries.enumerated().map { "★\($0.element.rating.formatted(.number.precision(.fractionLength(0...1))))" }.joined(separator: ", then "))"
+                                Text(subtitle)
+                                    .font(.subheadline)
+                                    .foregroundStyle(.secondary)
+                            } else {
+                                Text("Which \u{201C}\(current.primaryEntry.title)\u{201D} did you mean?")
+                                    .font(.subheadline)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+
+                        let maxSelectable = min(current.occurrenceCount, current.candidates.count)
+                        VStack(spacing: 8) {
+                            ForEach(current.candidates) { candidate in
+                                let selectionIdx = currentAmbiguitySelections.firstIndex(of: candidate.key)
+                                let badge: (number: Int, rating: Double)? = (maxSelectable > 1 && selectionIdx != nil)
+                                    ? (number: selectionIdx! + 1, rating: current.entries[min(selectionIdx!, current.entries.count - 1)].rating)
+                                    : nil
+                                ImportCandidateRow(
+                                    item: candidate,
+                                    isSelected: currentAmbiguitySelections.contains(candidate.key),
+                                    accentColor: model.settings.accentColor,
+                                    badge: badge
+                                ) {
+                                    if let idx = currentAmbiguitySelections.firstIndex(of: candidate.key) {
+                                        currentAmbiguitySelections.remove(at: idx)
+                                    } else if currentAmbiguitySelections.count < maxSelectable {
+                                        currentAmbiguitySelections.append(candidate.key)
+                                    }
+                                }
+                            }
+                        }
+
+                        HStack(spacing: 10) {
+                            Button {
+                                advanceAmbiguity()
+                            } label: {
+                                Text("Skip")
+                                    .font(.subheadline.bold())
+                                    .frame(maxWidth: .infinity)
+                                    .frame(height: 48)
+                                    .contentShape(Rectangle())
+                                    .liquidGlass(cornerRadius: 22)
+                            }
+                            .buttonStyle(.plain)
+
+                            Button {
+                                // Preserve tap order so entry[0]'s rating goes to the first-tapped candidate
+                                let choices = currentAmbiguitySelections.compactMap { key in
+                                    current.candidates.first { $0.key == key }
+                                }
+                                if !choices.isEmpty {
+                                    model.commitAmbiguousImport(current, choices: choices)
+                                    advanceAmbiguity()
+                                }
+                            } label: {
+                                let confirmLabel = maxSelectable > 1
+                                    ? "Confirm (\(currentAmbiguitySelections.count)/\(maxSelectable))"
+                                    : "Confirm"
+                                Text(confirmLabel)
+                                    .font(.headline.bold())
+                                    .frame(maxWidth: .infinity)
+                                    .frame(height: 48)
+                                    .contentShape(Rectangle())
+                                    .liquidGlass(cornerRadius: 22)
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(currentAmbiguitySelections.isEmpty)
+                            .opacity(currentAmbiguitySelections.isEmpty ? 0.4 : 1)
+                        }
+                    }
+                    .padding(20)
+                    .liquidGlass(cornerRadius: 28)
+                    .padding(.horizontal, 20)
+                }
+                .transition(.opacity.combined(with: .scale(scale: 0.96)))
+                .animation(.spring(response: 0.3, dampingFraction: 0.85), value: importAmbiguities.first?.id)
             }
         }
     }
@@ -784,7 +943,7 @@ struct SettingsView: View {
         .liquidGlass(cornerRadius: 18)
     }
 
-    private func importWatchedData(_ text: String, format: WatchedImportEntry.ImportFormat = .automatic, skipsWarnings: Bool = false) {
+    private func importWatchedData(_ text: String, format: WatchedImportEntry.ImportFormat = .automatic, skipsWarnings: Bool = false, skipsDuplicateWarning: Bool = false) {
         let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedText.isEmpty else { return }
 
@@ -797,12 +956,24 @@ struct SettingsView: View {
             return
         }
 
+        if !skipsDuplicateWarning && hasDuplicates(in: report.entries) {
+            pendingImportText = trimmedText
+            pendingImportFormat = format
+            showDuplicateWarningAlert = true
+            return
+        }
+
         isImporting = true
         Task {
-            let notFound = await model.importWatchedText(trimmedText, format: format)
+            let result = await model.importWatchedText(trimmedText, format: format)
+            let malformed = WatchedImportEntry.report(for: trimmedText, format: format).malformed
+            let leftBehind = result.notFound + malformed
             await MainActor.run {
-                importNotFound = notFound
-                showImportNotFoundAlert = !notFound.isEmpty
+                importNotFound = leftBehind
+                showImportNotFoundAlert = !leftBehind.isEmpty
+                importText = leftBehind.joined(separator: "\n")
+                importAmbiguities = result.ambiguous
+                currentAmbiguitySelections = []
                 isImporting = false
             }
         }
@@ -821,6 +992,105 @@ struct SettingsView: View {
         let fileExtension = url.pathExtension.lowercased()
         let format: WatchedImportEntry.ImportFormat = fileExtension == "csv" ? .commaSeparated : .automatic
         importWatchedData(text, format: format)
+    }
+
+    private func advanceAmbiguity() {
+        importAmbiguities.removeFirst()
+        currentAmbiguitySelections = []
+    }
+
+    private func hasDuplicates(in entries: [WatchedImportEntry]) -> Bool {
+        var seen: Set<String> = []
+        for entry in entries {
+            let norm = WatchedImportEntry.normalizedTitle(entry.title)
+            let typeKey = entry.mediaFilter == .movie ? "m" : "s"
+            let key = norm + ":" + typeKey
+            if seen.contains(key) { return true }
+            seen.insert(key)
+        }
+        return false
+    }
+
+    private func deduplicated(_ text: String, format: WatchedImportEntry.ImportFormat) -> String {
+        let report = WatchedImportEntry.report(for: text, format: format)
+        var seen: Set<String> = []
+        var kept: [String] = []
+        for entry in report.entries {
+            let norm = WatchedImportEntry.normalizedTitle(entry.title)
+            let typeKey = entry.mediaFilter == .movie ? "m" : "s"
+            let key = norm + ":" + typeKey
+            guard !seen.contains(key) else { continue }
+            seen.insert(key)
+            kept.append(entry.rawText)
+        }
+        return kept.joined(separator: "\n")
+    }
+}
+
+private struct ImportCandidateRow: View {
+    let item: MediaItem
+    let isSelected: Bool
+    let accentColor: Color
+    var badge: (number: Int, rating: Double)? = nil
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 12) {
+                AsyncImage(url: item.posterURL(displayWidth: 40)) { phase in
+                    switch phase {
+                    case .success(let img): img.resizable().scaledToFill()
+                    default: RoundedRectangle(cornerRadius: 6, style: .continuous).fill(.white.opacity(0.12))
+                    }
+                }
+                .frame(width: 36, height: 54)
+                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(item.title)
+                        .font(.subheadline.bold())
+                        .foregroundStyle(.primary)
+                        .lineLimit(2)
+
+                    Text("\(item.releaseYearText) · \(item.kind == .tv ? "Series" : "Movie")")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+                if let badge {
+                    VStack(spacing: 2) {
+                        ZStack {
+                            Circle()
+                                .fill(accentColor)
+                                .frame(width: 24, height: 24)
+                            Text("\(badge.number)")
+                                .font(.caption.bold())
+                                .foregroundStyle(.white)
+                        }
+                        Text("★\(badge.rating.formatted(.number.precision(.fractionLength(0...1))))")
+                            .font(.caption2.bold())
+                            .foregroundStyle(accentColor)
+                    }
+                } else {
+                    Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                        .font(.body.bold())
+                        .foregroundStyle(isSelected ? AnyShapeStyle(accentColor) : AnyShapeStyle(.tertiary))
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .background(isSelected ? accentColor.opacity(0.1) : Color.clear,
+                        in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .stroke(accentColor, lineWidth: 1.5)
+                    .opacity(isSelected ? 1 : 0)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .animation(.easeInOut(duration: 0.15), value: isSelected)
     }
 }
 
@@ -1179,6 +1449,7 @@ struct HiddenItemRow: View {
 struct AboutInfoView: View {
     @AppStorage("Vestigo.devMode") private var devMode: Bool = false
     @State private var titleTapCount = 0
+    @State private var showFeedbackFallback = false
 
     private var versionText: String {
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String
@@ -1224,10 +1495,42 @@ struct AboutInfoView: View {
                 url: URL(string: "https://github.com/Kyrbiis/Vestigo")!
             )
 
+            Button {
+                let url = URL(string: "mailto:vestigosupport@gmail.com")!
+                #if canImport(UIKit)
+                UIApplication.shared.open(url) { success in
+                    if !success { showFeedbackFallback = true }
+                }
+                #endif
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "envelope")
+                        .font(.system(size: 14, weight: .semibold))
+                    Text("Send Feedback")
+                        .font(.caption.bold())
+                }
+                .foregroundStyle(.primary)
+                .padding(.horizontal, 12)
+                .frame(height: 34)
+                .contentShape(RoundedRectangle(cornerRadius: 17, style: .continuous))
+            }
+            .buttonStyle(.plain)
+            .liquidGlass(cornerRadius: 17)
+            .alert("Send Feedback", isPresented: $showFeedbackFallback) {
+                Button("Copy Email") {
+                    #if canImport(UIKit)
+                    UIPasteboard.general.string = "vestigosupport@gmail.com"
+                    #endif
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("Email us at vestigosupport@gmail.com")
+            }
+
             VStack(alignment: .center, spacing: 6) {
                 Text("Your library and preferences are stored on-device and in iCloud where enabled.")
                 Text("Vestigo was vibe coded: AI assisted with code implementation, while the product thinking, decisions, review, and non-coding work were all done by people.")
-                Text("Vestigo is not affiliated with TMDB, IMDb, OMDb, TheTVDB, Watchmode, YouTube, Wikimedia, or their parent companies.")
+                Text("Vestigo is not affiliated with TMDB, IMDb, OMDb, TheTVDB, Watchmode, YouTube, Brandfetch, Wikimedia, or their parent companies.")
             }
             .font(.caption)
             .foregroundStyle(.secondary)
@@ -1397,7 +1700,8 @@ struct AttributionProvider: Identifiable {
             url: URL(string: "https://thetvdb.com/")!,
             logoURL: URL(string: "https://www.thetvdb.com/images/attribution/logo1.png"),
             logoAssetName: nil,
-            logoText: nil
+            logoText: nil,
+            logoHeight: 46
         ),
         AttributionProvider(
             id: "omdb",
@@ -1433,6 +1737,17 @@ struct AttributionProvider: Identifiable {
             url: URL(string: "https://www.youtube.com/")!,
             logoURL: nil,
             logoAssetName: "YouTubeLogo",
+            logoText: nil,
+            logoHeight: 30
+        ),
+        AttributionProvider(
+            id: "brandfetch",
+            name: "Brandfetch",
+            shortLabel: "BF",
+            description: "Streaming service brand logos and assets are powered by Brandfetch.",
+            url: URL(string: "https://brandfetch.com/")!,
+            logoURL: nil,
+            logoAssetName: "BrandfetchLogo",
             logoText: nil,
             logoHeight: 30
         ),

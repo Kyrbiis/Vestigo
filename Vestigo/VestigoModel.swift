@@ -116,6 +116,9 @@ final class VestigoModel: ObservableObject {
     func refreshImages() {
         imageRefreshToken &+= 1
         URLCache.shared.removeAllCachedResponses()
+        #if canImport(UIKit)
+        ImageCache.shared.clear()
+        #endif
     }
     
     var filteredSearchResults: [MediaItem] {
@@ -317,6 +320,11 @@ final class VestigoModel: ObservableObject {
     }
     
     func bootstrap() async {
+        URLCache.shared = URLCache(
+            memoryCapacity: 50 * 1024 * 1024,
+            diskCapacity: 300 * 1024 * 1024
+        )
+
         loadLocal()
         offerStreamingSetupIfNeeded()
 
@@ -433,6 +441,8 @@ final class VestigoModel: ObservableObject {
            let firstError = loadErrors.first {
             errorText = firstError
         }
+
+        prefetchPosters(for: trending + popular + newReleases + recommendations + moreLikeLastWatched + moreLikeFavourite)
     }
 
     private func loadHomeSection(_ section: HomeSectionKind) async -> HomeSectionLoadResult {
@@ -525,6 +535,25 @@ final class VestigoModel: ObservableObject {
         await loadHome()
     }
     
+    private func prefetchPosters(for items: [MediaItem]) {
+        let urls = items.prefix(50).compactMap { $0.posterURL(displayWidth: 148) }
+        Task.detached(priority: .utility) {
+            await withTaskGroup(of: Void.self) { group in
+                for url in urls {
+                    group.addTask {
+                        #if canImport(UIKit)
+                        guard ImageCache.shared[url] == nil else { return }
+                        guard let (data, _) = try? await URLSession.shared.data(from: url),
+                              let raw = UIImage(data: data) else { return }
+                        let decoded = raw.preparingForDisplay() ?? raw
+                        ImageCache.shared[url] = decoded
+                        #endif
+                    }
+                }
+            }
+        }
+    }
+
     func loadSmartRecommendations() async {
         let watchedHistory = library.watchedItems
         guard watchedHistory.count >= 3 else {
@@ -3161,34 +3190,89 @@ final class VestigoModel: ObservableObject {
         saveLocalSoon()
     }
 
-    func importWatchedText(_ text: String, format: WatchedImportEntry.ImportFormat = .automatic) async -> [String] {
+    private enum ImportMatchOutcome {
+        case found(MediaItem)
+        case ambiguous([MediaItem])
+        case notFound
+    }
+
+    func importWatchedText(_ text: String, format: WatchedImportEntry.ImportFormat = .automatic) async -> ImportResult {
         let entries = WatchedImportEntry.report(for: text, format: format).entries
-        var notFound: [String] = []
+        guard !entries.isEmpty else { return ImportResult(notFound: [], ambiguous: []) }
 
+        // Local library index — used only as fallback when TMDb finds nothing
+        var localIndex: [String: MediaItem] = [:]
+        for item in library.watchedItems {
+            let key = WatchedImportEntry.normalizedTitle(item.title) + ":" + (item.kind == .tv ? "s" : "m")
+            localIndex[key] = item
+        }
+
+        // Group entries by (normalizedTitle:mediaFilter) key — deduplicates network searches
+        var entryGroups: [String: [WatchedImportEntry]] = [:]
+        var keyOrder: [String] = []
         for entry in entries {
-            do {
-                if let first = try await bestImportMatch(for: entry) {
-                    library.markWatched(first)
-                    library.recordWatchOrderChange(for: first)
+            let norm = WatchedImportEntry.normalizedTitle(entry.title)
+            let typeKey = entry.mediaFilter == .movie ? "m" : "s"
+            let key = norm + ":" + typeKey
+            if entryGroups[key] == nil { keyOrder.append(key) }
+            entryGroups[key, default: []].append(entry)
+        }
 
-                    library.ratings[first.key] = entry.rating
+        // Always search TMDb so ambiguous titles always surface the disambiguation popup,
+        // even if the title was previously imported and is already in the library.
+        var searchOutcomes: [String: ImportMatchOutcome] = [:]
+        await withTaskGroup(of: (String, ImportMatchOutcome).self) { group in
+            for key in keyOrder {
+                let entry = entryGroups[key]![0]
+                group.addTask { (key, (try? await self.findImportMatch(for: entry)) ?? .notFound) }
+            }
+            for await (key, outcome) in group {
+                searchOutcomes[key] = outcome
+            }
+        }
 
-                    if entry.isFavourite {
-                        library.favouriteKeys.insert(first.key)
-                    }
-
-                    generateDynamicCollections(from: first)
-                } else {
-                    notFound.append(entry.title)
-                }
-            } catch {
-                notFound.append(entry.title)
+        var notFound: [String] = []
+        var ambiguous: [ImportAmbiguity] = []
+        for key in keyOrder {
+            let groupEntries = entryGroups[key]!
+            // Fall back to the local library item only when TMDb finds nothing at all
+            let tmdbOutcome = searchOutcomes[key] ?? .notFound
+            let outcome: ImportMatchOutcome
+            if case .notFound = tmdbOutcome, let local = localIndex[key] {
+                outcome = .found(local)
+            } else {
+                outcome = tmdbOutcome
+            }
+            switch outcome {
+            case .found(let match):
+                library.markWatched(match)
+                library.recordWatchOrderChange(for: match)
+                library.ratings[match.key] = groupEntries[0].rating
+                if groupEntries[0].isFavourite { library.favouriteKeys.insert(match.key) }
+                generateDynamicCollections(from: match)
+            case .ambiguous(let candidates):
+                ambiguous.append(ImportAmbiguity(entries: groupEntries, candidates: candidates))
+            case .notFound:
+                notFound.append(contentsOf: groupEntries.map(\.rawText))
             }
         }
 
         saveLocalSoon()
         scheduleRecommendationsRefresh()
-        return notFound
+        return ImportResult(notFound: notFound, ambiguous: ambiguous)
+    }
+
+    func commitAmbiguousImport(_ ambiguity: ImportAmbiguity, choices: [MediaItem]) {
+        for (index, choice) in choices.enumerated() {
+            library.markWatched(choice)
+            library.recordWatchOrderChange(for: choice)
+            let entry = ambiguity.entries[min(index, ambiguity.entries.count - 1)]
+            library.ratings[choice.key] = entry.rating
+            if entry.isFavourite { library.favouriteKeys.insert(choice.key) }
+            generateDynamicCollections(from: choice)
+        }
+        saveLocalSoon()
+        scheduleRecommendationsRefresh()
     }
 
     func prepareExport(format: ExportFormat = .text) {
@@ -3207,24 +3291,29 @@ final class VestigoModel: ObservableObject {
         showExporter = true
     }
 
-    private func bestImportMatch(for entry: WatchedImportEntry) async throws -> MediaItem? {
-        let filter = entry.mediaFilter ?? .both
+    private func findImportMatch(for entry: WatchedImportEntry) async throws -> ImportMatchOutcome {
+        let filter = entry.mediaFilter
         let results = try await tmdb.search(query: entry.title, filter: filter, includeAdult: !settings.hideAdultResults)
         let normalizedTitle = WatchedImportEntry.normalizedTitle(entry.title)
 
-        return results
-            .filter { $0.kind == .movie || $0.kind == .tv }
-            .sorted { lhs, rhs in
-                let lhsScore = WatchedImportEntry.matchScore(lhs.title, normalizedTitle: normalizedTitle)
-                let rhsScore = WatchedImportEntry.matchScore(rhs.title, normalizedTitle: normalizedTitle)
+        let filtered = results.filter { $0.kind == .movie || $0.kind == .tv }
+        let exactMatches = filtered.filter {
+            WatchedImportEntry.matchScore($0.title, normalizedTitle: normalizedTitle) == 100
+        }
 
-                if lhsScore != rhsScore {
-                    return lhsScore > rhsScore
-                }
+        if exactMatches.count > 1 {
+            return .ambiguous(exactMatches)
+        } else if let one = exactMatches.first {
+            return .found(one)
+        }
 
-                return lhs.voteAverage > rhs.voteAverage
-            }
-            .first
+        let best = filtered.sorted { lhs, rhs in
+            let l = WatchedImportEntry.matchScore(lhs.title, normalizedTitle: normalizedTitle)
+            let r = WatchedImportEntry.matchScore(rhs.title, normalizedTitle: normalizedTitle)
+            return l != r ? l > r : lhs.voteAverage > rhs.voteAverage
+        }.first
+
+        return best.map { .found($0) } ?? .notFound
     }
 
     func clearAllData() {

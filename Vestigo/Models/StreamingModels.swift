@@ -285,6 +285,11 @@ struct EpisodeInfo: Identifiable, Hashable {
         DateParser.parse(airDate)?.formatted(.dateTime.month(.abbreviated).day().year())
     }
 
+    var isUpcoming: Bool {
+        guard let date = DateParser.parse(airDate) else { return false }
+        return date > .now
+    }
+
     var stillURL: URL? {
         guard let stillPath else { return nil }
         return URL(string: "https://image.tmdb.org/t/p/w300\(stillPath)")

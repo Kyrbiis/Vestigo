@@ -1,5 +1,33 @@
 import SwiftUI
 import Foundation
+#if canImport(UIKit)
+import UIKit
+
+final class ImageCache: @unchecked Sendable {
+    static let shared = ImageCache()
+
+    private let cache: NSCache<NSString, UIImage> = {
+        let c = NSCache<NSString, UIImage>()
+        c.countLimit = 300
+        c.totalCostLimit = 120 * 1024 * 1024 // 120 MB decoded images
+        return c
+    }()
+
+    subscript(url: URL) -> UIImage? {
+        get { cache.object(forKey: url.absoluteString as NSString) }
+        set {
+            if let img = newValue {
+                let cost = Int(img.size.width * img.size.height * img.scale * img.scale * 4)
+                cache.setObject(img, forKey: url.absoluteString as NSString, cost: cost)
+            } else {
+                cache.removeObject(forKey: url.absoluteString as NSString)
+            }
+        }
+    }
+
+    func clear() { cache.removeAllObjects() }
+}
+#endif
 
 struct ImageRefreshTokenKey: EnvironmentKey {
     static let defaultValue = 0

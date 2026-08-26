@@ -6,11 +6,7 @@ struct WatchedImportEntry {
     let title: String
     let rating: Double
     let isFavourite: Bool
-    let mediaFilter: MediaFilter?
-
-    var isMissingMediaIdentifier: Bool {
-        mediaFilter == nil
-    }
+    let mediaFilter: MediaFilter
 
     private static let mediaIdentifierTokens = ["m", "s"]
 
@@ -64,11 +60,8 @@ struct WatchedImportEntry {
         var tokens = rawText.split(whereSeparator: { $0.isWhitespace }).map(String.init)
         guard tokens.count >= 2 else { return nil }
 
-        var mediaFilter: MediaFilter?
-        if let lastToken = tokens.last?.lowercased(), mediaIdentifierTokens.contains(lastToken) {
-            mediaFilter = lastToken == "m" ? .movie : .tv
-            tokens.removeLast()
-        }
+        // Format: [title] [m/s] [rating] [f?]
+        // Parse from the end: optional f, then rating, then optional m/s, then title
 
         var isFavourite = false
         if tokens.last?.localizedCaseInsensitiveCompare("f") == .orderedSame {
@@ -79,8 +72,14 @@ struct WatchedImportEntry {
         guard let lastToken = tokens.last, let parsedRating = Double(lastToken), (0...5).contains(parsedRating) else {
             return nil
         }
-
         tokens.removeLast()
+
+        guard let lastToken = tokens.last?.lowercased(), mediaIdentifierTokens.contains(lastToken) else {
+            return nil
+        }
+        let mediaFilter: MediaFilter = lastToken == "m" ? .movie : .tv
+        tokens.removeLast()
+
         let title = tokens.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
         guard !title.isEmpty else { return nil }
 
@@ -95,17 +94,17 @@ struct WatchedImportEntry {
 
     var mediaIdentifierText: String {
         switch mediaFilter {
-        case .movie:
-            return "m"
-        case .tv:
-            return "s"
-        case .both, .none:
-            return ""
+        case .movie: return "m"
+        case .tv: return "s"
+        case .both: return ""
         }
     }
 
     static func exportLine(for item: MediaItem, rating: Double?, isFavourite: Bool) -> String {
+        // Format: [title] [m/s] [rating] [f?]
         var parts = [item.title]
+
+        parts.append(item.kind == .tv ? "s" : "m")
 
         if let rating {
             parts.append(rating.formatted(.number.precision(.fractionLength(0...1))))
@@ -115,25 +114,12 @@ struct WatchedImportEntry {
             parts.append("f")
         }
 
-        parts.append(item.kind == .tv ? "s" : "m")
-
         return parts.joined(separator: " ")
     }
 
     static func warningMessage(for report: WatchedImportReport) -> String? {
-        var sections: [String] = []
-
-        if !report.unclearItems.isEmpty {
-            sections.append("The following items are unclear because they do not end in m for movie or s for series:\n\(report.unclearItems.joined(separator: "\n"))")
-        }
-
-        if !report.malformed.isEmpty {
-            sections.append("The following lines may be formatted incorrectly and could cause import errors:\n\(report.malformed.joined(separator: "\n"))")
-        }
-
-        guard !sections.isEmpty else { return nil }
-
-        return "\(sections.joined(separator: "\n\n"))\n\nDouble-check before pressing Continue."
+        guard !report.malformed.isEmpty else { return nil }
+        return "The following lines may be formatted incorrectly and could cause import errors:\n\(report.malformed.joined(separator: "\n"))\n\nDouble-check before pressing Continue."
     }
 }
 
@@ -141,16 +127,11 @@ struct WatchedImportReport {
     let entries: [WatchedImportEntry]
     let malformed: [String]
 
-    var unclearItems: [String] {
-        entries
-            .filter(\.isMissingMediaIdentifier)
-            .map(\.rawText)
-    }
-
     var hasWarnings: Bool {
-        !unclearItems.isEmpty || !malformed.isEmpty
+        !malformed.isEmpty
     }
 }
+
 
 struct CloudLibrarySnapshot: Codable {
     let modifiedAt: Date
@@ -229,4 +210,18 @@ extension WatchedImportEntry {
         if query.contains(normalized) { return 60 }
         return 0
     }
+}
+
+struct ImportAmbiguity: Identifiable {
+    let id = UUID()
+    let entries: [WatchedImportEntry]
+    let candidates: [MediaItem]
+
+    var primaryEntry: WatchedImportEntry { entries[0] }
+    var occurrenceCount: Int { entries.count }
+}
+
+struct ImportResult {
+    let notFound: [String]
+    let ambiguous: [ImportAmbiguity]
 }
