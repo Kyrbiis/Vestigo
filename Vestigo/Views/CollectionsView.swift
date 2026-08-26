@@ -123,7 +123,7 @@ struct CollectionsView: View {
                                     .font(.headline.bold())
                                     .foregroundStyle(.primary)
 
-                                Text(model.library.favouriteKeys.count == 1 ? "1 favourite title" : "\(model.library.favouriteKeys.count) favourite titles")
+                                Text(model.library.favouriteItems.count == 1 ? "1 favourite title" : "\(model.library.favouriteItems.count) favourite titles")
                                     .font(.subheadline)
                                     .foregroundStyle(.secondary)
                             }

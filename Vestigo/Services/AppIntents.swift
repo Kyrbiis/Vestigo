@@ -611,7 +611,7 @@ enum VestigoIntentBridge {
     }
 
     static func favouriteItems(kindFilter: VestigoMediaKindFilter) -> [VestigoMediaEntity] {
-        collectEntities(from: loadLibrary()?.favouriteKeys ?? [], kindFilter: kindFilter)
+        collectEntities(from: Set((loadLibrary()?.favouriteItems ?? []).map(\.key)), kindFilter: kindFilter)
     }
 
     static func watchedItems(kindFilter: VestigoMediaKindFilter) -> [VestigoMediaEntity] {
@@ -631,7 +631,7 @@ enum VestigoIntentBridge {
         guard let library = loadLibrary() else { return [] }
         var seenIDs = Set<String>()
         var results: [VestigoMediaEntity] = []
-        let keys = Array(library.watchlist) + Array(library.favouriteKeys)
+        let keys = Array(library.watchlist) + library.favouriteItems.map(\.key)
         for key in keys {
             guard let item = library.items[key] else { continue }
             let e = entity(from: item)

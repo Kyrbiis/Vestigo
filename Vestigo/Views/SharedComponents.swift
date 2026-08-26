@@ -750,11 +750,11 @@ struct StarRatingView: View {
     @Binding var rating: Double
     
     var body: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 5) {
             ForEach(1...5, id: \.self) { index in
                 Button { rating = nextRating(for: index) } label: {
                     Image(systemName: starName(index))
-                        .font(.title2)
+                        .font(.subheadline)
                         .foregroundStyle(.yellow)
                 }
                 .buttonStyle(.plain)
@@ -763,8 +763,9 @@ struct StarRatingView: View {
                 .font(.caption.bold())
                 .foregroundStyle(.secondary)
         }
-        .padding(12)
-        .liquidGlass(cornerRadius: 20)
+        .padding(.horizontal, 12)
+        .frame(height: 44)
+        .liquidGlass(cornerRadius: 22)
     }
     
     private func starName(_ index: Int) -> String {

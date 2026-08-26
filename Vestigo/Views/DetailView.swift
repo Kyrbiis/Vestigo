@@ -27,6 +27,7 @@ struct DetailView: View {
     @State private var showCollections = false
     @State private var selectedNestedItem: MediaItem?
     @State private var isPosterPreviewPresented = false
+    @State private var showWatchedDatePopover = false
     #if canImport(CoreLocation)
     @StateObject private var cinemaService = CinemaSearchService()
     @State private var cinemaSelectedDate: Date = Calendar.current.startOfDay(for: Date())
@@ -283,10 +284,36 @@ struct DetailView: View {
     
     @ViewBuilder private var ratingSection: some View {
         if model.library.isWatched(item.key) {
-            StarRatingView(rating: Binding(
-                get: { model.library.ratings[item.key] ?? 0 },
-                set: { model.setRating($0, for: item) }
-            ))
+            HStack(alignment: .center) {
+                StarRatingView(rating: Binding(
+                    get: { model.library.ratings[item.key] ?? 0 },
+                    set: { model.setRating($0, for: item) }
+                ))
+                Spacer()
+                Button {
+                    showWatchedDatePopover = true
+                } label: {
+                    if let date = model.library.watchedDates[item.key] {
+                        Label(date.formatted(.dateTime.day().month(.abbreviated).year()), systemImage: "calendar")
+                            .font(.caption.bold())
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Label("Add date", systemImage: "calendar.badge.plus")
+                            .font(.caption.bold())
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+                .buttonStyle(.plain)
+                .popover(isPresented: $showWatchedDatePopover) {
+                    WatchedDatePopover(
+                        date: Binding(
+                            get: { model.library.watchedDates[item.key] ?? .now },
+                            set: { model.setWatchedDate($0, for: item) }
+                        )
+                    )
+                    .presentationCompactAdaptation(.popover)
+                }
+            }
         }
     }
     
@@ -484,6 +511,19 @@ struct DetailView: View {
     }
 }
 
+private struct WatchedDatePopover: View {
+    @Binding var date: Date
+
+    var body: some View {
+        VStack(spacing: 0) {
+            DatePicker("Watched on", selection: $date, displayedComponents: .date)
+                .datePickerStyle(.graphical)
+                .padding()
+        }
+        .frame(width: 320)
+    }
+}
+
 private struct TrailersSection: View {
     let trailers: [TrailerVideo]
     @State private var currentIndex = 0
@@ -506,45 +546,23 @@ private struct TrailersSection: View {
             Text("Trailer")
                 .sectionTitle()
 
-            HStack(spacing: 4) {
-                Button { navigate(by: -1) } label: {
-                    Image(systemName: "chevron.left")
-                        .font(.system(size: 11, weight: .bold))
-                        .padding(6)
-                        .background(.white.opacity(0.12), in: Circle())
+            if trailers.count > 1 {
+                HStack(spacing: 4) {
+                    trailerNavButton(direction: -1, visible: currentIndex > 0)
+                    styledPlayer
+                    trailerNavButton(direction: 1, visible: currentIndex < trailers.count - 1)
                 }
-                .buttonStyle(.plain)
-                .opacity(trailers.count > 1 && currentIndex > 0 ? 1 : 0)
-                .disabled(trailers.count <= 1 || currentIndex == 0)
-
-                YouTubeTrailerPlayer(videoKey: currentTrailer.key, title: currentTrailer.displayTitle, onError: handleTrailerError)
-                    .id(currentTrailer.id)
-                    .aspectRatio(16 / 9, contentMode: .fit)
-                    .frame(maxHeight: 200)
-                    .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 18, style: .continuous)
-                            .stroke(.white.opacity(0.12), lineWidth: 1)
-                    }
-
-                Button { navigate(by: 1) } label: {
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 11, weight: .bold))
-                        .padding(6)
-                        .background(.white.opacity(0.12), in: Circle())
-                }
-                .buttonStyle(.plain)
-                .opacity(trailers.count > 1 && currentIndex < trailers.count - 1 ? 1 : 0)
-                .disabled(trailers.count <= 1 || currentIndex >= trailers.count - 1)
+                .padding(.horizontal, -14)
+                .gesture(
+                    DragGesture(minimumDistance: 30)
+                        .onEnded { value in
+                            if value.translation.width < -50 { navigate(by: 1) }
+                            else if value.translation.width > 50 { navigate(by: -1) }
+                        }
+                )
+            } else {
+                styledPlayer
             }
-            .padding(.horizontal, -14)
-            .gesture(
-                DragGesture(minimumDistance: 30)
-                    .onEnded { value in
-                        if value.translation.width < -50 { navigate(by: 1) }
-                        else if value.translation.width > 50 { navigate(by: -1) }
-                    }
-            )
 
             VStack(alignment: .leading, spacing: 4) {
                 Text(currentTrailer.displayTitle)
@@ -560,6 +578,30 @@ private struct TrailersSection: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    @ViewBuilder private func trailerNavButton(direction: Int, visible: Bool) -> some View {
+        Button { navigate(by: direction) } label: {
+            Image(systemName: direction < 0 ? "chevron.left" : "chevron.right")
+                .font(.system(size: 11, weight: .bold))
+                .padding(6)
+                .background(.white.opacity(0.12), in: Circle())
+        }
+        .buttonStyle(.plain)
+        .opacity(visible ? 1 : 0)
+        .allowsHitTesting(visible)
+    }
+
+    private var styledPlayer: some View {
+        YouTubeTrailerPlayer(videoKey: currentTrailer.key, title: currentTrailer.displayTitle, onError: handleTrailerError)
+            .id(currentTrailer.id)
+            .aspectRatio(16 / 9, contentMode: .fit)
+            .frame(maxWidth: .infinity)
+            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .stroke(.white.opacity(0.12), lineWidth: 1)
+            }
     }
 }
 

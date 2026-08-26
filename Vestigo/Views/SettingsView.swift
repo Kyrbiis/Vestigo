@@ -62,8 +62,8 @@ struct SettingsView: View {
 
     private var importPlaceholderText: String {
         let examples = [
-            "Star Wars m 5 f\nRed Notice m 4.5\nThe Flash s 4",
-            "Star Wars m 5 f, Red Notice m 4.5, The Flash s 4"
+            "Star Wars m 1977 5 f 1997-05-19\nThe Bear s 2022 5 2023/06/28\nThe Flash s\nThe Italian Job m 2003 4",
+            "Star Wars m 1977 5 f 1997-05-19, The Bear s 2022 5 2023/06/28, The Flash s, The Italian Job m 2003 4"
         ]
         return examples[importPlaceholderIndex % examples.count]
     }
@@ -549,10 +549,29 @@ struct SettingsView: View {
                     .padding(.top, 6)
                 
                 VStack(alignment: .leading, spacing: 10) {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Import watched titles as title, m for movie or s for series, star rating, and optional f for favourite. Type in the text field with the format or import files. .txt can use one item per line or commas; .csv uses commas only.")
+                    VStack(alignment: .leading, spacing: 10) {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("Format")
+                                .font(.caption.bold())
+                                .foregroundStyle(.secondary)
+                            Text("title  m/s  year  rating  f  date")
+                                .font(.caption)
+                                .fontDesign(.monospaced)
+                                .foregroundStyle(.secondary)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 4)
+                                .background(.secondary.opacity(0.1), in: RoundedRectangle(cornerRadius: 6))
+                        }
+                        VStack(alignment: .leading, spacing: 3) {
+                            ImportFormatHelpRow(bullet: "m / s", detail: "movie or series — required")
+                            ImportFormatHelpRow(bullet: "year", detail: "4-digit - optional. Resolves ambiguous titles.")
+                            ImportFormatHelpRow(bullet: "rating", detail: "0–5 - optional")
+                            ImportFormatHelpRow(bullet: "f", detail: "optional, marks as favourite")
+                            ImportFormatHelpRow(bullet: "date", detail: "watched date - optional. Separators: - / . in any mix.")
+                        }
+                        Text("Accepts .txt (one per line or comma-separated) or .csv. Letterboxd's watched.csv is auto-detected — movies and series both supported.")
                             .font(.caption)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(.tertiary)
 
                         
                         ZStack(alignment: .topLeading) {
@@ -844,42 +863,44 @@ struct SettingsView: View {
                         VStack(alignment: .leading, spacing: 4) {
                             Text("Ambiguous match")
                                 .font(.title3.bold())
-                            if current.occurrenceCount > 1 {
-                                let allSameRating = current.entries.allSatisfy { $0.rating == current.primaryEntry.rating }
-                                let subtitle: String = allSameRating
-                                    ? "You added this \(current.occurrenceCount) times — tap to pick which versions you meant."
-                                    : "Tap in order: 1st pick gets \(current.entries.enumerated().map { "★\($0.element.rating.formatted(.number.precision(.fractionLength(0...1))))" }.joined(separator: ", then "))"
-                                Text(subtitle)
-                                    .font(.subheadline)
-                                    .foregroundStyle(.secondary)
-                            } else {
-                                Text("Which \u{201C}\(current.primaryEntry.title)\u{201D} did you mean?")
-                                    .font(.subheadline)
-                                    .foregroundStyle(.secondary)
-                            }
+                            Text(ambiguitySubtitle(for: current))
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
                         }
 
                         let maxSelectable = min(current.occurrenceCount, current.candidates.count)
-                        VStack(spacing: 8) {
-                            ForEach(current.candidates) { candidate in
-                                let selectionIdx = currentAmbiguitySelections.firstIndex(of: candidate.key)
-                                let badge: (number: Int, rating: Double)? = (maxSelectable > 1 && selectionIdx != nil)
-                                    ? (number: selectionIdx! + 1, rating: current.entries[min(selectionIdx!, current.entries.count - 1)].rating)
-                                    : nil
-                                ImportCandidateRow(
-                                    item: candidate,
-                                    isSelected: currentAmbiguitySelections.contains(candidate.key),
-                                    accentColor: model.settings.accentColor,
-                                    badge: badge
-                                ) {
-                                    if let idx = currentAmbiguitySelections.firstIndex(of: candidate.key) {
-                                        currentAmbiguitySelections.remove(at: idx)
-                                    } else if currentAmbiguitySelections.count < maxSelectable {
-                                        currentAmbiguitySelections.append(candidate.key)
+                        let rowHeight: CGFloat = 74
+                        let visibleRows = min(CGFloat(current.candidates.count), 4.5)
+                        ScrollView {
+                            VStack(spacing: 8) {
+                                ForEach(current.candidates) { candidate in
+                                    let selectionIdx = currentAmbiguitySelections.firstIndex(of: candidate.key)
+                                    let entryRating: Double? = selectionIdx.map { current.entries[min($0, current.entries.count - 1)].rating } ?? nil
+                                    let badge: (number: Int, rating: Double)? = (maxSelectable > 1 && selectionIdx != nil && entryRating != nil)
+                                        ? (number: selectionIdx! + 1, rating: entryRating!)
+                                        : nil
+                                    ImportCandidateRow(
+                                        item: candidate,
+                                        isSelected: currentAmbiguitySelections.contains(candidate.key),
+                                        accentColor: model.settings.accentColor,
+                                        badge: badge
+                                    ) {
+                                        if let idx = currentAmbiguitySelections.firstIndex(of: candidate.key) {
+                                            // Deselect
+                                            currentAmbiguitySelections.remove(at: idx)
+                                        } else if currentAmbiguitySelections.count < maxSelectable {
+                                            currentAmbiguitySelections.append(candidate.key)
+                                        } else {
+                                            // At max — replace oldest selection
+                                            currentAmbiguitySelections.removeFirst()
+                                            currentAmbiguitySelections.append(candidate.key)
+                                        }
                                     }
                                 }
                             }
                         }
+                        .frame(maxHeight: rowHeight * visibleRows)
+                        .scrollIndicators(.hidden)
 
                         HStack(spacing: 10) {
                             Button {
@@ -947,6 +968,23 @@ struct SettingsView: View {
         let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedText.isEmpty else { return }
 
+        // Letterboxd CSV bypasses all format/duplicate warnings and goes straight to import
+        if WatchedImportEntry.isLetterboxdCSV(trimmedText) {
+            isImporting = true
+            Task {
+                let result = await model.importLetterboxdText(trimmedText)
+                await MainActor.run {
+                    importNotFound = result.notFound
+                    showImportNotFoundAlert = !result.notFound.isEmpty
+                    importText = result.notFound.joined(separator: "\n")
+                    importAmbiguities = result.ambiguous
+                    currentAmbiguitySelections = []
+                    isImporting = false
+                }
+            }
+            return
+        }
+
         let report = WatchedImportEntry.report(for: trimmedText, format: format)
         if !skipsWarnings, let warningMessage = WatchedImportEntry.warningMessage(for: report) {
             pendingImportText = trimmedText
@@ -989,14 +1027,36 @@ struct SettingsView: View {
 
         guard let text = try? String(contentsOf: url, encoding: .utf8) else { return }
         importText = text
-        let fileExtension = url.pathExtension.lowercased()
-        let format: WatchedImportEntry.ImportFormat = fileExtension == "csv" ? .commaSeparated : .automatic
-        importWatchedData(text, format: format)
+        if WatchedImportEntry.isLetterboxdCSV(text) {
+            importWatchedData(text, skipsWarnings: true, skipsDuplicateWarning: true)
+        } else {
+            let fileExtension = url.pathExtension.lowercased()
+            let format: WatchedImportEntry.ImportFormat = fileExtension == "csv" ? .commaSeparated : .automatic
+            importWatchedData(text, format: format)
+        }
     }
 
     private func advanceAmbiguity() {
         importAmbiguities.removeFirst()
         currentAmbiguitySelections = []
+    }
+
+    private func ambiguitySubtitle(for ambiguity: ImportAmbiguity) -> String {
+        if ambiguity.yearNotFound, let year = ambiguity.primaryEntry.year {
+            return "No \(year) release found — pick the right one manually."
+        }
+        if ambiguity.occurrenceCount > 1 {
+            let allSameRating = ambiguity.entries.allSatisfy { $0.rating == ambiguity.primaryEntry.rating }
+            if allSameRating {
+                return "You added this \(ambiguity.occurrenceCount) times — tap to pick which versions you meant."
+            }
+            let ratingList = ambiguity.entries.map { entry -> String in
+                if let r = entry.rating { return "★\(r.formatted(.number.precision(.fractionLength(0...1))))" }
+                return "unrated"
+            }.joined(separator: ", then ")
+            return "Tap in order: 1st pick gets \(ratingList)"
+        }
+        return "Which \u{201C}\(ambiguity.primaryEntry.title)\u{201D} did you mean?"
     }
 
     private func hasDuplicates(in entries: [WatchedImportEntry]) -> Bool {
@@ -1027,6 +1087,20 @@ struct SettingsView: View {
     }
 }
 
+private struct ImportFormatHelpRow: View {
+    let bullet: String
+    let detail: String
+    var body: some View {
+        HStack(alignment: .top, spacing: 4) {
+            Text("•")
+            Text(bullet).bold()
+            Text("— \(detail)")
+        }
+        .font(.caption)
+        .foregroundStyle(.secondary)
+    }
+}
+
 private struct ImportCandidateRow: View {
     let item: MediaItem
     let isSelected: Bool
@@ -1052,9 +1126,15 @@ private struct ImportCandidateRow: View {
                         .foregroundStyle(.primary)
                         .lineLimit(2)
 
-                    Text("\(item.releaseYearText) · \(item.kind == .tv ? "Series" : "Movie")")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    HStack(spacing: 6) {
+                        Text("\(item.releaseYearText) · \(item.kind == .tv ? "Series" : "Movie")")
+                        if item.voteAverage > 0 {
+                            Text("·")
+                            Text("TMDb \(item.voteAverage.formatted(.number.precision(.fractionLength(1))))")
+                        }
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
 
@@ -2288,33 +2368,33 @@ private struct DevToolsPanel: View {
     @State private var isRestartingConnection = false
     @State private var restartResult: String = ""
 
-    @State private var cerebrasCallCount: Int = 0
-    @State private var isLoadingCerebrasUsage = false
+    @State private var describeitCallCount: Int = 0
+    @State private var isLoadingDescribeItUsage = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
 
-            // MARK: Cerebras Usage
-            devSectionLabel("Cerebras (Pick For Me)")
+            // MARK: DescribeIt Usage
+            devSectionLabel("D")
 
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
                     Text("Requests used")
                         .font(.subheadline)
                     Spacer()
-                    Text("\(cerebrasCallCount)")
+                    Text("\(describeitCallCount)")
                         .font(.caption.bold().monospacedDigit())
                         .foregroundStyle(.secondary)
                 }
-                Button(isLoadingCerebrasUsage ? "Loading…" : "Refresh") {
-                    fetchCerebrasUsage()
+                Button(isLoadingDescribeItUsage ? "Loading…" : "Refresh") {
+                    fetchDescribeItUsage()
                 }
                 .font(.caption.bold())
                 .foregroundStyle(model.settings.accentColor)
-                .disabled(isLoadingCerebrasUsage)
+                .disabled(isLoadingDescribeItUsage)
             }
             .settingBubble()
-            .onAppear { fetchCerebrasUsage() }
+            .onAppear { fetchDescribeItUsage() }
 
             // MARK: Snapshots
             devSectionLabel("Snapshots")
@@ -2614,15 +2694,15 @@ private struct DevToolsPanel: View {
         }
     }
 
-    private func fetchCerebrasUsage() {
-        isLoadingCerebrasUsage = true
+    private func fetchDescribeItUsage() {
+        isLoadingDescribeItUsage = true
         Task {
-            defer { Task { @MainActor in isLoadingCerebrasUsage = false } }
-            guard let url = URL(string: "https://mtttuyvpjyugudkevchj.supabase.co/functions/v1/vestigo-api/cerebras-usage") else { return }
+            defer { Task { @MainActor in isLoadingDescribeItUsage = false } }
+            guard let url = URL(string: "https://mtttuyvpjyugudkevchj.supabase.co/functions/v1/vestigo-api/describeit-usage") else { return }
             guard let (data, _) = try? await URLSession.shared.data(from: url) else { return }
             struct Resp: Decodable { let count: Int }
             if let resp = try? JSONDecoder().decode(Resp.self, from: data) {
-                await MainActor.run { cerebrasCallCount = resp.count }
+                await MainActor.run { describeitCallCount = resp.count }
             }
         }
     }

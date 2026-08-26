@@ -11,6 +11,7 @@ struct UserLibrary: Codable {
     var watchedOrder: [MediaKey] = []
     var collections: [MediaCollection] = []
     var watchedEpisodes: Set<EpisodeKey> = []
+    var watchedDates: [MediaKey: Date] = [:]
 
     private enum CodingKeys: String, CodingKey {
         case items
@@ -23,6 +24,7 @@ struct UserLibrary: Codable {
         case watchedOrder
         case collections
         case watchedEpisodes
+        case watchedDates
     }
 
     init() { }
@@ -39,6 +41,7 @@ struct UserLibrary: Codable {
         watchedOrder = try container.decodeIfPresent([MediaKey].self, forKey: .watchedOrder) ?? []
         collections = try container.decodeIfPresent([MediaCollection].self, forKey: .collections) ?? []
         watchedEpisodes = try container.decodeIfPresent(Set<EpisodeKey>.self, forKey: .watchedEpisodes) ?? []
+        watchedDates = try container.decodeIfPresent([MediaKey: Date].self, forKey: .watchedDates) ?? [:]
     }
 
     func encode(to encoder: Encoder) throws {
@@ -53,6 +56,11 @@ struct UserLibrary: Codable {
         try container.encode(watchedOrder, forKey: .watchedOrder)
         try container.encode(collections, forKey: .collections)
         try container.encode(watchedEpisodes, forKey: .watchedEpisodes)
+        try container.encode(watchedDates, forKey: .watchedDates)
+    }
+
+    mutating func setWatchedDateIfUnset(for key: MediaKey, date: Date = .now) {
+        if watchedDates[key] == nil { watchedDates[key] = date }
     }
 
     var watchlistItems: [MediaItem] { watchlist.compactMap { items[$0] } }
@@ -95,7 +103,7 @@ struct UserLibrary: Codable {
     }
 
     var favouriteItems: [MediaItem] {
-        favouriteKeys.compactMap { items[$0] }
+        favouriteKeys.filter { watched.contains($0) }.compactMap { items[$0] }
     }
 
     var lastWatchedItem: MediaItem? {
@@ -124,7 +132,7 @@ struct UserLibrary: Codable {
     }
 
     func isFavourite(_ item: MediaItem) -> Bool {
-        favouriteKeys.contains(item.key)
+        favouriteKeys.contains(item.key) && watched.contains(item.key)
     }
 
     mutating func toggleFavourite(_ item: MediaItem) {

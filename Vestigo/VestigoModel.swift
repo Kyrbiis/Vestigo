@@ -2932,6 +2932,7 @@ final class VestigoModel: ObservableObject {
         library.recordWatchOrderChange(for: item)
         
         if library.isWatched(item.key) {
+            library.setWatchedDateIfUnset(for: item.key)
             removeFromForYouRecommendations(item)
         }
         if library.isWatched(item.key) {
@@ -3098,6 +3099,11 @@ final class VestigoModel: ObservableObject {
         collectionRecommendations[collectionID] = visibleItems
     }
     
+    func setWatchedDate(_ date: Date, for item: MediaItem) {
+        library.watchedDates[item.key] = date
+        saveLocalSoon()
+    }
+
     func setRating(_ rating: Double, for item: MediaItem) {
         guard library.isWatched(item.key) else { return }
         library.items[item.key] = item
@@ -3193,11 +3199,21 @@ final class VestigoModel: ObservableObject {
     private enum ImportMatchOutcome {
         case found(MediaItem)
         case ambiguous([MediaItem])
+        case ambiguousYearNotFound([MediaItem])
         case notFound
     }
 
     func importWatchedText(_ text: String, format: WatchedImportEntry.ImportFormat = .automatic) async -> ImportResult {
         let entries = WatchedImportEntry.report(for: text, format: format).entries
+        return await importEntries(entries)
+    }
+
+    func importLetterboxdText(_ text: String) async -> ImportResult {
+        let entries = WatchedImportEntry.parseLetterboxd(text)
+        return await importEntries(entries)
+    }
+
+    private func importEntries(_ entries: [WatchedImportEntry]) async -> ImportResult {
         guard !entries.isEmpty else { return ImportResult(notFound: [], ambiguous: []) }
 
         // Local library index — used only as fallback when TMDb finds nothing
@@ -3235,6 +3251,7 @@ final class VestigoModel: ObservableObject {
         var ambiguous: [ImportAmbiguity] = []
         for key in keyOrder {
             let groupEntries = entryGroups[key]!
+            let primaryEntry = groupEntries[0]
             // Fall back to the local library item only when TMDb finds nothing at all
             let tmdbOutcome = searchOutcomes[key] ?? .notFound
             let outcome: ImportMatchOutcome
@@ -3247,11 +3264,14 @@ final class VestigoModel: ObservableObject {
             case .found(let match):
                 library.markWatched(match)
                 library.recordWatchOrderChange(for: match)
-                library.ratings[match.key] = groupEntries[0].rating
-                if groupEntries[0].isFavourite { library.favouriteKeys.insert(match.key) }
+                library.setWatchedDateIfUnset(for: match.key, date: primaryEntry.watchedDate ?? .now)
+                if let rating = primaryEntry.rating { library.ratings[match.key] = rating }
+                if primaryEntry.isFavourite { library.favouriteKeys.insert(match.key) }
                 generateDynamicCollections(from: match)
             case .ambiguous(let candidates):
                 ambiguous.append(ImportAmbiguity(entries: groupEntries, candidates: candidates))
+            case .ambiguousYearNotFound(let candidates):
+                ambiguous.append(ImportAmbiguity(entries: groupEntries, candidates: candidates, yearNotFound: true))
             case .notFound:
                 notFound.append(contentsOf: groupEntries.map(\.rawText))
             }
@@ -3267,7 +3287,8 @@ final class VestigoModel: ObservableObject {
             library.markWatched(choice)
             library.recordWatchOrderChange(for: choice)
             let entry = ambiguity.entries[min(index, ambiguity.entries.count - 1)]
-            library.ratings[choice.key] = entry.rating
+            library.setWatchedDateIfUnset(for: choice.key, date: entry.watchedDate ?? .now)
+            if let rating = entry.rating { library.ratings[choice.key] = rating }
             if entry.isFavourite { library.favouriteKeys.insert(choice.key) }
             generateDynamicCollections(from: choice)
         }
@@ -3297,14 +3318,31 @@ final class VestigoModel: ObservableObject {
         let normalizedTitle = WatchedImportEntry.normalizedTitle(entry.title)
 
         let filtered = results.filter { $0.kind == .movie || $0.kind == .tv }
-        let exactMatches = filtered.filter {
+        var exactMatches = filtered.filter {
             WatchedImportEntry.matchScore($0.title, normalizedTitle: normalizedTitle) == 100
         }
 
-        if exactMatches.count > 1 {
-            return .ambiguous(exactMatches)
-        } else if let one = exactMatches.first {
-            return .found(one)
+        if let year = entry.year {
+            let yearFiltered = exactMatches.filter { $0.releaseYearInt == year }
+            if !yearFiltered.isEmpty {
+                exactMatches = yearFiltered
+            } else if !exactMatches.isEmpty {
+                // Exact title matches exist but none have this year — show popup with year hint
+                return .ambiguousYearNotFound(exactMatches)
+            }
+            // No exact title matches — fall through to partial match + year logic below
+        }
+
+        if exactMatches.count > 1 { return .ambiguous(exactMatches) }
+        if let one = exactMatches.first { return .found(one) }
+
+        // No exact title match — prefer results with a matching year (handles spelling diffs)
+        if let year = entry.year {
+            let yearMatches = filtered.filter { $0.releaseYearInt == year }
+            if yearMatches.count == 1 { return .found(yearMatches[0]) }
+            if yearMatches.count > 1 { return .ambiguous(yearMatches) }
+            // Year provided but no result matches it at all
+            if !filtered.isEmpty { return .ambiguousYearNotFound(filtered) }
         }
 
         let best = filtered.sorted { lhs, rhs in

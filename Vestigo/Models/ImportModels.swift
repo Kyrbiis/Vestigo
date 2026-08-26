@@ -8,6 +8,7 @@ struct WatchedImportEntry {
     let rating: Double?
     let isFavourite: Bool
     let mediaFilter: MediaFilter
+    let watchedDate: Date?
 
     private static let mediaIdentifierTokens = ["m", "s"]
 
@@ -62,7 +63,14 @@ struct WatchedImportEntry {
         // Minimum: [title] [m/s]
         guard tokens.count >= 2 else { return nil }
 
-        // Parse from the end: optional f → optional rating (0–5) → optional year (4-digit) → required m/s → title
+        // Parse from the end: optional date → optional f → optional rating (0–5) → optional year (4-digit) → required m/s → title
+
+        var watchedDate: Date? = nil
+        if let lastToken = tokens.last, let parsed = parseFlexibleDate(lastToken) {
+            watchedDate = parsed
+            tokens.removeLast()
+        }
+        guard tokens.count >= 2 else { return nil }
 
         var isFavourite = false
         if tokens.last?.localizedCaseInsensitiveCompare("f") == .orderedSame {
@@ -100,8 +108,22 @@ struct WatchedImportEntry {
             year: year,
             rating: rating,
             isFavourite: isFavourite,
-            mediaFilter: mediaFilter
+            mediaFilter: mediaFilter,
+            watchedDate: watchedDate
         )
+    }
+
+    // Accepts YYYY[-/.]MM[-/.]DD with any single-character separator mix
+    static func parseFlexibleDate(_ token: String) -> Date? {
+        let seps = CharacterSet(charactersIn: "-/.")
+        let parts = token.components(separatedBy: seps)
+        guard parts.count == 3,
+              parts[0].count == 4,
+              let y = Int(parts[0]), let m = Int(parts[1]), let d = Int(parts[2]),
+              m >= 1, m <= 12, d >= 1, d <= 31 else { return nil }
+        var comps = DateComponents()
+        comps.year = y; comps.month = m; comps.day = d
+        return Calendar(identifier: .gregorian).date(from: comps)
     }
 
     var mediaIdentifierText: String {
@@ -215,12 +237,87 @@ extension WatchedImportEntry {
         if query.contains(normalized) { return 60 }
         return 0
     }
+
+    // MARK: - Letterboxd CSV
+
+    static func isLetterboxdCSV(_ text: String) -> Bool {
+        let firstLine = text.components(separatedBy: "\n").first?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return firstLine.contains("Letterboxd URI") && firstLine.contains("Name")
+    }
+
+    static func parseLetterboxd(_ text: String) -> [WatchedImportEntry] {
+        let lines = text
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+            .components(separatedBy: "\n")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        guard let headerLine = lines.first, !headerLine.isEmpty else { return [] }
+
+        let headers = parseCSVRow(headerLine)
+        guard let nameIdx = headers.firstIndex(of: "Name") else { return [] }
+        let yearIdx = headers.firstIndex(of: "Year")
+        let ratingIdx = headers.firstIndex(of: "Rating")
+        let watchedDateIdx = headers.firstIndex(of: "Watched Date")
+
+        let dateFormatter = DateFormatter()
+        dateFormatter.dateFormat = "yyyy-MM-dd"
+        dateFormatter.locale = Locale(identifier: "en_US_POSIX")
+
+        var entries: [WatchedImportEntry] = []
+        for line in lines.dropFirst() {
+            guard !line.isEmpty else { continue }
+            let cols = parseCSVRow(line)
+            guard cols.count > nameIdx else { continue }
+            let title = cols[nameIdx].trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !title.isEmpty else { continue }
+
+            let year: Int? = yearIdx.flatMap { idx in
+                idx < cols.count ? Int(cols[idx]) : nil
+            }
+            let rating: Double? = ratingIdx.flatMap { idx in
+                idx < cols.count ? Double(cols[idx]) : nil
+            }
+            let watchedDate: Date? = watchedDateIdx.flatMap { idx in
+                idx < cols.count ? dateFormatter.date(from: cols[idx]) : nil
+            }
+
+            entries.append(WatchedImportEntry(
+                rawText: line,
+                title: title,
+                year: year,
+                rating: rating,
+                isFavourite: false,
+                mediaFilter: .both,
+                watchedDate: watchedDate
+            ))
+        }
+        return entries
+    }
+
+    private static func parseCSVRow(_ line: String) -> [String] {
+        var result: [String] = []
+        var current = ""
+        var inQuotes = false
+        for char in line {
+            if char == "\"" {
+                inQuotes.toggle()
+            } else if char == "," && !inQuotes {
+                result.append(current)
+                current = ""
+            } else {
+                current.append(char)
+            }
+        }
+        result.append(current)
+        return result
+    }
 }
 
 struct ImportAmbiguity: Identifiable {
     let id = UUID()
     let entries: [WatchedImportEntry]
     let candidates: [MediaItem]
+    var yearNotFound: Bool = false
 
     var primaryEntry: WatchedImportEntry { entries[0] }
     var occurrenceCount: Int { entries.count }
