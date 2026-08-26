@@ -4,7 +4,8 @@ import UniformTypeIdentifiers
 struct WatchedImportEntry {
     let rawText: String
     let title: String
-    let rating: Double
+    let year: Int?
+    let rating: Double?
     let isFavourite: Bool
     let mediaFilter: MediaFilter
 
@@ -58,21 +59,31 @@ struct WatchedImportEntry {
 
     private static func parseEntry(_ rawText: String) -> WatchedImportEntry? {
         var tokens = rawText.split(whereSeparator: { $0.isWhitespace }).map(String.init)
+        // Minimum: [title] [m/s]
         guard tokens.count >= 2 else { return nil }
 
-        // Format: [title] [m/s] [rating] [f?]
-        // Parse from the end: optional f, then rating, then optional m/s, then title
+        // Parse from the end: optional f → optional rating (0–5) → optional year (4-digit) → required m/s → title
 
         var isFavourite = false
         if tokens.last?.localizedCaseInsensitiveCompare("f") == .orderedSame {
             isFavourite = true
             tokens.removeLast()
         }
+        guard tokens.count >= 2 else { return nil }
 
-        guard let lastToken = tokens.last, let parsedRating = Double(lastToken), (0...5).contains(parsedRating) else {
-            return nil
+        var rating: Double? = nil
+        if let lastToken = tokens.last, let parsed = Double(lastToken), parsed >= 0 && parsed <= 5 {
+            rating = parsed
+            tokens.removeLast()
         }
-        tokens.removeLast()
+        guard tokens.count >= 2 else { return nil }
+
+        var year: Int? = nil
+        if let lastToken = tokens.last, let parsed = Int(lastToken), lastToken.count == 4 {
+            year = parsed
+            tokens.removeLast()
+        }
+        guard tokens.count >= 2 else { return nil }
 
         guard let lastToken = tokens.last?.lowercased(), mediaIdentifierTokens.contains(lastToken) else {
             return nil
@@ -86,7 +97,8 @@ struct WatchedImportEntry {
         return WatchedImportEntry(
             rawText: rawText,
             title: title,
-            rating: parsedRating,
+            year: year,
+            rating: rating,
             isFavourite: isFavourite,
             mediaFilter: mediaFilter
         )
@@ -101,19 +113,12 @@ struct WatchedImportEntry {
     }
 
     static func exportLine(for item: MediaItem, rating: Double?, isFavourite: Bool) -> String {
-        // Format: [title] [m/s] [rating] [f?]
+        // Format: [title] [m/s] [year] [rating?] [f?]
         var parts = [item.title]
-
         parts.append(item.kind == .tv ? "s" : "m")
-
-        if let rating {
-            parts.append(rating.formatted(.number.precision(.fractionLength(0...1))))
-        }
-
-        if isFavourite {
-            parts.append("f")
-        }
-
+        if let year = item.releaseYearInt { parts.append(String(year)) }
+        if let rating { parts.append(rating.formatted(.number.precision(.fractionLength(0...1)))) }
+        if isFavourite { parts.append("f") }
         return parts.joined(separator: " ")
     }
 
