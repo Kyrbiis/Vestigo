@@ -471,18 +471,30 @@ function watchmodeTitleIDFromSearch(data: any, kind: "movie" | "tv") {
   return Number.isFinite(id) && id > 0 ? id : null
 }
 
-async function watchmodeTitleIDForTMDbID(tmdbID: number, kind: "movie" | "tv") {
+async function watchmodeTitleIDForTMDbID(
+  tmdbID: number,
+  kind: "movie" | "tv",
+  clientImdbID?: string,
+  title?: string,
+  year?: string
+) {
   const searchAttempts: Array<{ search_field: string, search_value: string }> = []
 
-  try {
-    const externalIDs = await fetchTMDb(`/${kind}/${tmdbID}/external_ids`)
-    const imdbID = String(externalIDs?.imdb_id ?? "").trim()
+  // Use the client-supplied imdbID directly; only fall back to a TMDB round-trip if absent.
+  let resolvedImdbID = clientImdbID?.trim() || null
 
-    if (imdbID.length > 0) {
-      searchAttempts.push({ search_field: "imdb_id", search_value: imdbID })
+  if (!resolvedImdbID) {
+    try {
+      const externalIDs = await fetchTMDb(`/${kind}/${tmdbID}/external_ids`)
+      const fetched = String(externalIDs?.imdb_id ?? "").trim()
+      if (fetched.length > 0) resolvedImdbID = fetched
+    } catch {
+      // Fall through to ID-based attempts.
     }
-  } catch {
-    // Fall through to TMDb-id based lookup attempts.
+  }
+
+  if (resolvedImdbID) {
+    searchAttempts.push({ search_field: "imdb_id", search_value: resolvedImdbID })
   }
 
   searchAttempts.push(
@@ -490,14 +502,47 @@ async function watchmodeTitleIDForTMDbID(tmdbID: number, kind: "movie" | "tv") {
     { search_field: "tmdb_id", search_value: String(tmdbID) }
   )
 
+  // Title+year as final fallback so new/obscure content can still be found.
+  const cleanTitle = title?.trim()
+  if (cleanTitle) {
+    searchAttempts.push({ search_field: "name", search_value: cleanTitle })
+  }
+
+  const expectedTypes = kind === "movie"
+    ? new Set(["movie"])
+    : new Set(["tv_series", "tv_miniseries", "tv_special", "tv_movie", "tv"])
+
   for (const attempt of searchAttempts) {
     try {
       const search = await fetchWatchmode("/search/", attempt)
-      const watchmodeID = watchmodeTitleIDFromSearch(search, kind)
 
-      if (watchmodeID) {
-        return watchmodeID
+      if (attempt.search_field === "name") {
+        // For title searches, validate with kind and year to avoid wrong matches.
+        const titleResults = Array.isArray(search?.title_results)
+          ? search.title_results
+          : Array.isArray(search?.results) ? search.results : []
+
+        const yearNum = year ? Number(year) : null
+
+        const confirmed = titleResults.find((item: any) => {
+          const type = String(item?.type ?? item?.result_type ?? "").toLowerCase()
+          if (!expectedTypes.has(type)) return false
+          if (yearNum) {
+            const rawYear = item?.year ?? item?.release_date ?? item?.first_air_date
+            const itemYear = rawYear ? Number(String(rawYear).slice(0, 4)) : 0
+            // Only reject on year mismatch if we actually parsed a year from the result
+            if (itemYear > 0 && Math.abs(itemYear - yearNum) > 1) return false
+          }
+          return true
+        })
+
+        const id = Number(confirmed?.id)
+        if (Number.isFinite(id) && id > 0) return id
+        continue
       }
+
+      const watchmodeID = watchmodeTitleIDFromSearch(search, kind)
+      if (watchmodeID) return watchmodeID
     } catch {
       continue
     }
@@ -506,8 +551,15 @@ async function watchmodeTitleIDForTMDbID(tmdbID: number, kind: "movie" | "tv") {
   return null
 }
 
-async function watchmodeSourcesForTMDbID(tmdbID: number, kind: "movie" | "tv", country: string) {
-  const watchmodeID = await watchmodeTitleIDForTMDbID(tmdbID, kind)
+async function watchmodeSourcesForTMDbID(
+  tmdbID: number,
+  kind: "movie" | "tv",
+  country: string,
+  imdbID?: string,
+  title?: string,
+  year?: string
+) {
+  const watchmodeID = await watchmodeTitleIDForTMDbID(tmdbID, kind, imdbID, title, year)
 
   if (!watchmodeID) {
     return []
@@ -1215,6 +1267,9 @@ Deno.serve(async (req) => {
       const tmdbID = Number(url.searchParams.get("tmdbID") ?? url.searchParams.get("id"))
       const rawKind = String(url.searchParams.get("kind") ?? "movie").toLowerCase()
       const country = String(url.searchParams.get("country") ?? "US").toUpperCase()
+      const clientImdbID = url.searchParams.get("imdbID") ?? undefined
+      const title = url.searchParams.get("title") ?? undefined
+      const year = url.searchParams.get("year") ?? undefined
 
       if (!Number.isFinite(tmdbID) || tmdbID <= 0) {
         return Response.json(
@@ -1230,7 +1285,7 @@ Deno.serve(async (req) => {
         )
       }
 
-      const sources = await watchmodeSourcesForTMDbID(tmdbID, rawKind, country)
+      const sources = await watchmodeSourcesForTMDbID(tmdbID, rawKind, country, clientImdbID, title, year)
 
       return Response.json({
         ok: true,
@@ -1852,6 +1907,68 @@ Rules:
 
       await incrementAIUsage()
       return Response.json({ ok: true, ...parsed })
+    }
+
+    if (url.pathname.endsWith("/youtube-shorts-filter")) {
+      const keysParam = (url.searchParams.get("keys") ?? "").trim()
+      const keys = keysParam.split(",").map(k => k.trim()).filter(k => k.length > 0)
+
+      if (keys.length === 0) {
+        return Response.json({ ok: true, shortKeys: [] })
+      }
+
+      async function isYouTubeShort(key: string): Promise<boolean> {
+        try {
+          const resp = await fetchWithTimeout(
+            "https://www.youtube.com/youtubei/v1/player?key=AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8",
+            {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "User-Agent": "com.google.android.youtube/17.31.35 (Linux; U; Android 11) gzip"
+              },
+              body: JSON.stringify({
+                videoId: key,
+                context: {
+                  client: {
+                    clientName: "ANDROID",
+                    clientVersion: "17.31.35",
+                    androidSdkVersion: 30
+                  }
+                }
+              })
+            },
+            8000
+          )
+          if (!resp.ok) return false
+          const data = await resp.json()
+
+          // Most reliable: YouTube's own canonical URL says /shorts/ for Shorts
+          const canonical = String(data?.microformat?.playerMicroformatRenderer?.urlCanonical ?? "")
+          if (canonical.length > 0) return canonical.includes("/shorts/")
+
+          // Fallback: actual video format dimensions (portrait = Short)
+          const formats: any[] = data?.streamingData?.adaptiveFormats ?? []
+          const videoFmt = formats.find((f: any) => typeof f.width === "number" && typeof f.height === "number" && String(f.mimeType ?? "").startsWith("video/"))
+          if (videoFmt) return Number(videoFmt.height) > Number(videoFmt.width)
+
+          // Last resort: thumbnail dimensions
+          const thumbnails: any[] = data?.videoDetails?.thumbnail?.thumbnails ?? []
+          const thumb = thumbnails[thumbnails.length - 1]
+          const tw = Number(thumb?.width ?? 0)
+          const th = Number(thumb?.height ?? 0)
+          if (tw > 0 && th > 0) return th > tw
+
+          return false
+        } catch {
+          return false
+        }
+      }
+
+      const checks = await Promise.all(keys.map(async key => ({ key, isShort: await isYouTubeShort(key) })))
+      const shortKeys = checks.filter(({ isShort }) => isShort).map(({ key }) => key)
+
+      return Response.json({ ok: true, shortKeys })
     }
 
     if (url.pathname.endsWith("/brand-logo")) {

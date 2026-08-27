@@ -44,8 +44,10 @@ final class VestigoModel: ObservableObject {
     @Published var detailsCache: [MediaKey: MediaDetail] = [:]
     @Published var externalRatingsCache: [MediaKey: ExternalRatings] = [:]
     @Published var providerCache: [MediaKey: [StreamingOption]] = [:]
-    var describeItResultsCache: [String: [ThematicSearchResult]] = [:]
     @Published var tmdbFallbackKeys: Set<MediaKey> = []
+    private var watchmodeBackgroundRetried: Set<MediaKey> = []
+    var describeItResultsCache: [String: [ThematicSearchResult]] = [:]
+
     @Published var relatedMediaCache: [MediaKey: [RelatedMediaSection]] = [:]
     @Published var personCreditsCache: [Int: [MediaItem]] = [:]
     @Published var personDetails: [Int: PersonDetail] = [:]
@@ -2551,9 +2553,61 @@ final class VestigoModel: ObservableObject {
         } catch { }
     }
 
+    private func filterShorts(from trailers: [TrailerVideo]) async -> [TrailerVideo] {
+        guard !trailers.isEmpty else { return trailers }
+        let shortKeys = await withTaskGroup(of: String?.self, returning: Set<String>.self) { group in
+            for trailer in trailers {
+                group.addTask { await Self.isYouTubeShort(trailer.key) ? trailer.key : nil }
+            }
+            var keys = Set<String>()
+            for await key in group { if let key { keys.insert(key) } }
+            return keys
+        }
+        return shortKeys.isEmpty ? trailers : trailers.filter { !shortKeys.contains($0.key) }
+    }
+
+    private static func isYouTubeShort(_ key: String) async -> Bool {
+        guard let url = URL(string: "https://www.youtube.com/youtubei/v1/player?key=AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8") else { return false }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("com.google.android.youtube/17.31.35 (Linux; U; Android 11) gzip", forHTTPHeaderField: "User-Agent")
+        request.timeoutInterval = 5
+        request.httpBody = try? JSONSerialization.data(withJSONObject: [
+            "videoId": key,
+            "context": ["client": ["clientName": "ANDROID", "clientVersion": "17.31.35", "androidSdkVersion": 30]]
+        ])
+        guard let (data, _) = try? await URLSession.shared.data(for: request),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
+        // Canonical URL is definitive — YouTube sets /shorts/ for Shorts, /watch?v= for everything else
+        if let microformat = json["microformat"] as? [String: Any],
+           let renderer = microformat["playerMicroformatRenderer"] as? [String: Any],
+           let canonical = renderer["urlCanonical"] as? String {
+            return canonical.contains("/shorts/")
+        }
+        // Fallback: actual video format dimensions
+        if let streamingData = json["streamingData"] as? [String: Any],
+           let formats = streamingData["adaptiveFormats"] as? [[String: Any]] {
+            for fmt in formats {
+                guard let mime = fmt["mimeType"] as? String, mime.hasPrefix("video/"),
+                      let w = fmt["width"] as? Int, let h = fmt["height"] as? Int, w > 0 else { continue }
+                return h > w
+            }
+        }
+        return false
+    }
+
     func loadDetail(_ item: MediaItem) async {
         if detailsCache[item.key] == nil {
-            do { detailsCache[item.key] = try await tmdb.detail(for: item, regionCode: settings.streamingRegion.rawValue) } catch { }
+            do {
+                detailsCache[item.key] = try await tmdb.detail(for: item, regionCode: settings.streamingRegion.rawValue)
+                if let detail = detailsCache[item.key], !detail.trailers.isEmpty {
+                    let filtered = await filterShorts(from: detail.trailers)
+                    if filtered.count != detail.trailers.count {
+                        detailsCache[item.key] = detail.withTrailers(filtered)
+                    }
+                }
+            } catch { }
         }
         if item.kind == .movie, let detail = detailsCache[item.key], let collectionID = detail.tmdbCollectionID {
             do {
@@ -2597,17 +2651,21 @@ final class VestigoModel: ObservableObject {
         await loadExternalRatings(item, priority: true)
         if providerCache[item.key] == nil {
             do {
-                let pricedProviders = try await streaming.providers(for: item, regionCode: settings.streamingRegion.rawValue)
+                let pricedProviders = try await streaming.providers(for: item, imdbID: detailsCache[item.key]?.imdbID, regionCode: settings.streamingRegion.rawValue)
                 if pricedProviders.isEmpty, let tmdbProviders = detailsCache[item.key]?.tmdbProviders, !tmdbProviders.isEmpty {
                     providerCache[item.key] = tmdbProviders
                     tmdbFallbackKeys.insert(item.key)
+                    scheduleWatchmodeRetryIfNeeded(item)
                 } else {
                     providerCache[item.key] = pricedProviders
                 }
             } catch {
                 let fallback = detailsCache[item.key]?.tmdbProviders ?? []
                 providerCache[item.key] = fallback
-                if !fallback.isEmpty { tmdbFallbackKeys.insert(item.key) }
+                if !fallback.isEmpty {
+                    tmdbFallbackKeys.insert(item.key)
+                    scheduleWatchmodeRetryIfNeeded(item)
+                }
             }
         }
         if relatedMediaCache[item.key] == nil {
@@ -2620,6 +2678,20 @@ final class VestigoModel: ObservableObject {
             } else {
                 relatedMediaCache[item.key] = []
             }
+        }
+    }
+
+    private func scheduleWatchmodeRetryIfNeeded(_ item: MediaItem) {
+        guard !watchmodeBackgroundRetried.contains(item.key) else { return }
+        watchmodeBackgroundRetried.insert(item.key)
+        Task {
+            do {
+                let pricedProviders = try await streaming.providers(for: item, imdbID: detailsCache[item.key]?.imdbID, regionCode: settings.streamingRegion.rawValue)
+                if !pricedProviders.isEmpty {
+                    providerCache[item.key] = pricedProviders
+                    tmdbFallbackKeys.remove(item.key)
+                }
+            } catch { }
         }
     }
 
@@ -2847,6 +2919,8 @@ final class VestigoModel: ObservableObject {
     func clearAllCaches() {
         detailsCache = [:]
         providerCache = [:]
+        tmdbFallbackKeys = []
+        Storage.save([MediaKey: [StreamingOption]](), key: "Vestigo.providerCache")
         relatedMediaCache = [:]
         personCreditsCache = [:]
         personDetails = [:]
@@ -3196,6 +3270,12 @@ final class VestigoModel: ObservableObject {
         saveLocalSoon()
     }
 
+    func deleteCollection(id: UUID) {
+        library.collections.removeAll { $0.id == id }
+        collectionRecommendations.removeValue(forKey: id)
+        saveLocalSoon()
+    }
+
     private enum ImportMatchOutcome {
         case found(MediaItem)
         case ambiguous([MediaItem])
@@ -3504,6 +3584,7 @@ final class VestigoModel: ObservableObject {
         externalRatingsCache = Storage.load([MediaKey: ExternalRatings].self, key: "Vestigo.externalRatings") ?? [:]
         calendarEventIDs = Storage.load([MediaKey: String].self, key: "Vestigo.calendarEventIDs") ?? [:]
         describeItResultsCache = Storage.load([String: [ThematicSearchResult]].self, key: "Vestigo.describeItCache") ?? [:]
+        providerCache = Storage.load([MediaKey: [StreamingOption]].self, key: "Vestigo.providerCache") ?? [:]
         searchFilter = settings.defaultSearchFilter
         mediaFilter = settings.defaultHomeFilter
     }
@@ -3612,6 +3693,8 @@ final class VestigoModel: ObservableObject {
         Storage.save(externalRatingsCache, key: "Vestigo.externalRatings")
         Storage.save(calendarEventIDs, key: "Vestigo.calendarEventIDs")
         Storage.save(describeItResultsCache, key: "Vestigo.describeItCache")
+        let watchmodeOnly = providerCache.filter { !tmdbFallbackKeys.contains($0.key) }
+        Storage.save(watchmodeOnly, key: "Vestigo.providerCache")
 
         guard !isApplyingCloudSnapshot else { return }
 

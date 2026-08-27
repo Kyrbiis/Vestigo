@@ -444,7 +444,7 @@ struct DetailView: View {
             .allowsHitTesting(!isTMDbFallback)
             .opacity(isTMDbFallback ? 0.45 : 1)
             if isTMDbFallback {
-                Text("Availability data from TMDb — no prices or direct links. Watchmode data unavailable for this title.")
+                Text("Availability data from TMDb — no prices or direct links. Watchmode data currently unavailable for this title.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -1486,7 +1486,10 @@ struct EpisodeThumbnailView: View {
 struct AddToCollectionSheet: View {
     let item: MediaItem
     @ObservedObject var model: VestigoModel
-    @State private var newName = ""
+
+    private var manualCollections: [MediaCollection] {
+        model.library.collections.filter { !$0.isDynamic }
+    }
 
     var body: some View {
         ScrollView {
@@ -1494,41 +1497,33 @@ struct AddToCollectionSheet: View {
                 Text("Add to collection")
                     .font(.title2.bold())
 
-                HStack {
-                    TextField("New collection", text: $newName)
-                        .padding(12)
-                        .liquidGlass(cornerRadius: 18)
-                    Button("Create") {
-                        model.createCollection(named: newName, with: item)
-                        newName = ""
-                    }
-                    .buttonStyle(.plain)
-                    .font(.subheadline.bold())
-                    .foregroundStyle(.primary)
-                    .frame(width: 86, height: 44)
-                    .liquidGlass(cornerRadius: 18)
-                }
-
-                ForEach(model.library.collections) { collection in
-                    let alreadyIn = collection.itemKeys.contains(item.key)
-                    Button {
-                        if alreadyIn { model.removeFromCollection(item, collectionID: collection.id) }
-                        else { model.addToCollection(item, collectionID: collection.id) }
-                    } label: {
-                        HStack {
-                            VStack(alignment: .leading) {
-                                Text(collection.name).font(.headline)
-                                Text(alreadyIn ? "Already in collection" : "Tap to add")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
+                if manualCollections.isEmpty {
+                    StatusBubble(
+                        title: "No collections yet",
+                        text: "Create a collection from the Collections tab first."
+                    )
+                } else {
+                    ForEach(manualCollections) { collection in
+                        let alreadyIn = collection.itemKeys.contains(item.key)
+                        Button {
+                            if alreadyIn { model.removeFromCollection(item, collectionID: collection.id) }
+                            else { model.addToCollection(item, collectionID: collection.id) }
+                        } label: {
+                            HStack {
+                                VStack(alignment: .leading) {
+                                    Text(collection.name).font(.headline)
+                                    Text(alreadyIn ? "Already in collection" : "Tap to add")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                Image(systemName: alreadyIn ? "checkmark.circle.fill" : "plus.circle")
                             }
-                            Spacer()
-                            Image(systemName: alreadyIn ? "checkmark.circle.fill" : "plus.circle")
+                            .padding(14)
+                            .liquidGlass(cornerRadius: 18)
                         }
-                        .padding(14)
-                        .liquidGlass(cornerRadius: 18)
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
                 }
             }
             .padding(18)

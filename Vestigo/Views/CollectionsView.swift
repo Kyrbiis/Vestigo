@@ -16,18 +16,33 @@ import UserNotifications
 
 struct CollectionsView: View {
     @ObservedObject var model: VestigoModel
-    @State private var newCollectionName = ""
+    @State private var tab: CollectionsTab = .collections
     @State private var collectionPath: [UUID] = []
-    
-    private var visibleCollections: [(collection: MediaCollection, items: [MediaItem])] {
-        model.library.collections.compactMap { collection in
-            let items = visibleItems(in: collection)
-            return items.isEmpty ? nil : (collection, items)
+    @State private var showCreatePopup = false
+    @State private var newCollectionName = ""
+
+    private enum CollectionsTab: String, CaseIterable {
+        case collections = "Collections"
+        case genres = "Genres"
+    }
+
+    private var allCollectionEntries: [(collection: MediaCollection, items: [MediaItem])] {
+        model.library.collections.map { collection in
+            (collection, visibleItems(in: collection))
         }
     }
 
+    private var manualCollectionEntries: [(collection: MediaCollection, items: [MediaItem])] {
+        allCollectionEntries.filter { !$0.collection.isDynamic }
+    }
+
+    private var dynamicCollectionEntries: [(collection: MediaCollection, items: [MediaItem])] {
+        allCollectionEntries.filter { $0.collection.isDynamic && !$0.items.isEmpty }
+    }
+
     private var collectionIconItemsByID: [UUID: MediaItem] {
-        Self.collectionIconItemsByID(for: visibleCollections, library: model.library)
+        let nonEmpty = allCollectionEntries.filter { !$0.items.isEmpty }
+        return Self.collectionIconItemsByID(for: nonEmpty, library: model.library)
     }
 
     private func visibleItems(in collection: MediaCollection) -> [MediaItem] {
@@ -83,119 +98,187 @@ struct CollectionsView: View {
         let iconSignature = iconItem?.key.stableID ?? "folder"
         return "\(collection.id.uuidString)-\(iconSignature)-\(itemSignature)"
     }
-    
+
     var body: some View {
         NavigationStack(path: $collectionPath) {
-            BaseScreen(title: "Collections", filter: .constant(.both), settings: model.settings, onRefresh: {
-                for collection in model.library.collections {
-                    await model.loadCollectionRecommendations(for: collection.id)
+            BaseScreen(
+                title: "Collections",
+                filter: .constant(.both),
+                settings: model.settings,
+                headerAccessory: AnyView(
+                    Button { showCreatePopup = true } label: {
+                        Image(systemName: "plus")
+                            .font(.system(size: 17, weight: .bold))
+                            .foregroundStyle(.primary)
+                            .frame(width: 42, height: 42)
+                            .liquidGlass(cornerRadius: 21)
+                            .contentShape(Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("New collection")
+                ),
+                onRefresh: {
+                    for collection in model.library.collections {
+                        await model.loadCollectionRecommendations(for: collection.id)
+                    }
                 }
-            }) {
+            ) {
                 VStack(spacing: 16) {
-                    HStack(spacing: 10) {
-                        TextField("New collection", text: $newCollectionName)
-                            .textFieldStyle(.plain)
-                            .padding(.horizontal, 14)
-                            .frame(height: 44)
-                            .liquidGlass(cornerRadius: 18)
-                        
-                        Button("Create") {
-                            model.createCollection(named: newCollectionName)
-                            newCollectionName = ""
+                    Picker("", selection: $tab) {
+                        ForEach(CollectionsTab.allCases, id: \.self) { t in
+                            Text(t.rawValue).tag(t)
                         }
-                        .buttonStyle(.plain)
-                        .font(.subheadline.bold())
-                        .foregroundStyle(.primary)
-                        .frame(width: 86, height: 44)
-                        .liquidGlass(cornerRadius: 18)
                     }
-                    
-                    NavigationLink {
-                        FavouritesCollectionView(model: model)
-                    } label: {
-                        HStack(spacing: 12) {
-                            Image(systemName: "star")
-                                .font(.system(size: 18, weight: .bold))
-                                .frame(width: 26)
+                    .pickerStyle(.segmented)
+                    .liquidGlass(cornerRadius: 18)
 
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text("Favourites")
-                                    .font(.headline.bold())
-                                    .foregroundStyle(.primary)
-
-                                Text(model.library.favouriteItems.count == 1 ? "1 favourite title" : "\(model.library.favouriteItems.count) favourite titles")
-                                    .font(.subheadline)
-                                    .foregroundStyle(.secondary)
-                            }
-
-                            Spacer()
-
-                            Image(systemName: "chevron.right")
-                                .font(.title3.bold())
-                                .foregroundStyle(.secondary)
+                    if tab == .collections {
+                        let favourites = model.library.orderedFavouriteItems
+                        if !favourites.isEmpty {
+                            FavouritesCarousel(items: favourites, model: model)
                         }
-                        .padding(14)
-                        .liquidGlass(cornerRadius: 22)
-                        .contentShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
-                    }
-                    .buttonStyle(.plain)
-                    
-                    NavigationLink {
-                        FranchiseCollectionsView(screenMode: .series, model: model)
-                    } label: {
-                        HStack(spacing: 12) {
-                            Image(systemName: "film.stack")
-                                .font(.system(size: 18, weight: .bold))
-                                .frame(width: 26)
 
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text("Franchises")
-                                    .font(.headline.bold())
-                                    .foregroundStyle(.primary)
-
-                                Text("Browse exact TMDb movie collections discovered from your library.")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(2)
-                            }
-
-                            Spacer(minLength: 0)
-
-                            Image(systemName: "chevron.right")
-                                .font(.caption.bold())
-                                .foregroundStyle(.secondary)
-                        }
-                        .padding(14)
-                        .liquidGlass(cornerRadius: 22)
-                        .contentShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
-                    }
-                    .buttonStyle(.plain)
-
-                    ForEach(visibleCollections, id: \.collection.id) { entry in
-                        let collection = entry.collection
-                        let iconItem = collectionIconItemsByID[collection.id]
-                        Button {
-                            collectionPath.append(collection.id)
-                        } label: {
-                            CollectionRow(
-                                collection: collection,
-                                count: entry.items.count,
-                                iconItem: iconItem
+                        if manualCollectionEntries.isEmpty {
+                            StatusBubble(
+                                title: "No collections yet",
+                                text: "Tap + to create your first collection."
                             )
-                            .id(Self.collectionRowIdentity(for: collection, iconItem: iconItem))
+                        } else {
+                            ForEach(manualCollectionEntries, id: \.collection.id) { entry in
+                                let collection = entry.collection
+                                let iconItem = collectionIconItemsByID[collection.id]
+                                Button {
+                                    collectionPath.append(collection.id)
+                                } label: {
+                                    CollectionRow(
+                                        collection: collection,
+                                        count: entry.items.count,
+                                        iconItem: iconItem
+                                    )
+                                    .id(Self.collectionRowIdentity(for: collection, iconItem: iconItem))
+                                }
+                                .buttonStyle(.plain)
+                                .swipeToDelete(cornerRadius: 22) {
+                                    model.deleteCollection(id: collection.id)
+                                }
+                            }
+                        }
+                    } else {
+                        NavigationLink {
+                            FranchiseCollectionsView(screenMode: .series, model: model)
+                        } label: {
+                            HStack(spacing: 12) {
+                                Image(systemName: "film.stack")
+                                    .font(.system(size: 18, weight: .bold))
+                                    .frame(width: 26)
+
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("Franchises")
+                                        .font(.headline.bold())
+                                        .foregroundStyle(.primary)
+                                    Text("Browse exact TMDb movie collections discovered from your library.")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(2)
+                                }
+
+                                Spacer(minLength: 0)
+
+                                Image(systemName: "chevron.right")
+                                    .font(.caption.bold())
+                                    .foregroundStyle(.secondary)
+                            }
+                            .padding(14)
+                            .liquidGlass(cornerRadius: 22)
+                            .contentShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
                         }
                         .buttonStyle(.plain)
+
+                        if dynamicCollectionEntries.isEmpty {
+                            StatusBubble(
+                                title: "No genre collections yet",
+                                text: "Genre collections are generated automatically as you build your library."
+                            )
+                        } else {
+                            ForEach(dynamicCollectionEntries, id: \.collection.id) { entry in
+                                let collection = entry.collection
+                                let iconItem = collectionIconItemsByID[collection.id]
+                                Button {
+                                    collectionPath.append(collection.id)
+                                } label: {
+                                    CollectionRow(
+                                        collection: collection,
+                                        count: entry.items.count,
+                                        iconItem: iconItem
+                                    )
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
                     }
                 }
             }
             .navigationDestination(for: UUID.self) { collectionID in
                 CollectionDetailView(collectionID: collectionID, model: model)
             }
-            
-            
         }
         .onChange(of: model.collectionsResetToken) { _, _ in
             collectionPath.removeAll()
+        }
+        .alert("New Collection", isPresented: $showCreatePopup) {
+            TextField("Name", text: $newCollectionName)
+            Button("Create") {
+                model.createCollection(named: newCollectionName)
+                newCollectionName = ""
+            }
+            Button("Cancel", role: .cancel) {
+                newCollectionName = ""
+            }
+        }
+    }
+}
+
+private struct FavouritesCarousel: View {
+    let items: [MediaItem]
+    @ObservedObject var model: VestigoModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("Favourites")
+                    .font(.title3.bold())
+                    .foregroundStyle(.primary)
+                Spacer()
+                NavigationLink {
+                    FavouritesCollectionView(model: model)
+                } label: {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 15, weight: .bold))
+                        .foregroundStyle(.white)
+                }
+            }
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 10) {
+                    ForEach(items) { item in
+                        Button {
+                            model.selectedItem = item
+                        } label: {
+                            VStack(alignment: .leading, spacing: 5) {
+                                PosterView(item: item, width: 110, height: 163, isFavourite: true)
+                                Text(item.title)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                                    .frame(width: 110, alignment: .leading)
+                            }
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.vertical, 2)
+            }
+            .scrollClipDisabled()
         }
     }
 }
@@ -1207,11 +1290,13 @@ struct CollectionDetailView: View {
     @State private var sort: SortOption = .tmdbRating
     @State private var sortDirection: SortDirection = .descending
     @State private var mode: CollectionDetailMode = .myList
-    
+    @State private var isEditing = false
+    @State private var selectedKeys = Set<MediaKey>()
+
     private var collection: MediaCollection? {
         model.library.collections.first { $0.id == collectionID }
     }
-    
+
     private var items: [MediaItem] {
         guard let collection else { return [] }
         return collection.itemKeys.compactMap { model.library.items[$0] }.sorted(
@@ -1241,12 +1326,45 @@ struct CollectionDetailView: View {
                 direction: sortDirection
             )
     }
-    
+
+    private func removeSelected() {
+        for key in selectedKeys {
+            if let item = model.library.items[key] {
+                model.removeFromCollection(item, collectionID: collectionID)
+            }
+        }
+        selectedKeys.removeAll()
+        isEditing = false
+    }
+
     var body: some View {
-        BaseScreen(title: collection?.name ?? "Collection", filter: .constant(.both), settings: model.settings, onRefresh: {
-            await model.loadCollectionRecommendations(for: collectionID)
-            await model.loadExternalRatings(for: items + recommendedItems, limit: 120)
-        }) {
+        BaseScreen(
+            title: collection?.name ?? "Collection",
+            filter: .constant(.both),
+            settings: model.settings,
+            headerAccessory: AnyView(
+                Button {
+                    if isEditing {
+                        isEditing = false
+                        selectedKeys.removeAll()
+                    } else {
+                        isEditing = true
+                    }
+                } label: {
+                    Text(isEditing ? "Cancel" : "Edit")
+                        .font(.body)
+                        .foregroundStyle(.primary)
+                        .padding(.horizontal, 14)
+                        .frame(height: 42)
+                        .liquidGlass(cornerRadius: 21)
+                }
+                .buttonStyle(.plain)
+            ),
+            onRefresh: {
+                await model.loadCollectionRecommendations(for: collectionID)
+                await model.loadExternalRatings(for: items + recommendedItems, limit: 120)
+            }
+        ) {
             VStack(spacing: 14) {
                 SortRow(direction: $sortDirection) {
                     SortPicker(sort: $sort, includeMyRating: mode != .recommended, ratingSource: model.settings.preferredRatingSource)
@@ -1258,9 +1376,13 @@ struct CollectionDetailView: View {
                 }
 
                 CollectionDetailModePicker(mode: $mode)
-                
+
                 if mode == .myList {
-                    MediaGridOrList(items: items, hideWatchedForUpcoming: false, model: model, swipeContext: .collection(collectionID))
+                    if isEditing {
+                        CollectionEditGrid(items: items, selectedKeys: $selectedKeys)
+                    } else {
+                        MediaGridOrList(items: items, hideWatchedForUpcoming: false, model: model, swipeContext: .collection(collectionID))
+                    }
                 } else if recommendedItems.isEmpty {
                     StatusBubble(
                         title: "No collection recommendations",
@@ -1269,6 +1391,22 @@ struct CollectionDetailView: View {
                 } else {
                     MediaGridOrList(items: recommendedItems, hideWatchedForUpcoming: false, model: model)
                 }
+            }
+        }
+        .safeAreaInset(edge: .bottom) {
+            if isEditing {
+                Button(action: removeSelected) {
+                    Text(selectedKeys.isEmpty ? "Remove selected" : "Remove \(selectedKeys.count) selected")
+                        .font(.body.bold())
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 28)
+                        .padding(.vertical, 14)
+                        .background(selectedKeys.isEmpty ? Color.gray.opacity(0.7) : Color.red, in: Capsule())
+                }
+                .buttonStyle(.plain)
+                .disabled(selectedKeys.isEmpty)
+                .padding(.bottom, 12)
+                .animation(.easeInOut(duration: 0.2), value: selectedKeys.isEmpty)
             }
         }
         .task(id: collectionID) {
@@ -1282,6 +1420,55 @@ struct CollectionDetailView: View {
         .onChange(of: model.library.watched) { _, _ in
             if mode == .recommended {
                 Task { await model.loadCollectionRecommendations(for: collectionID) }
+            }
+        }
+    }
+}
+
+private struct CollectionEditGrid: View {
+    let items: [MediaItem]
+    @Binding var selectedKeys: Set<MediaKey>
+
+    private let columns = Array(repeating: GridItem(.flexible(), spacing: 8), count: 3)
+
+    var body: some View {
+        LazyVGrid(columns: columns, spacing: 8) {
+            ForEach(items) { item in
+                let isSelected = selectedKeys.contains(item.key)
+                Button {
+                    if isSelected { selectedKeys.remove(item.key) }
+                    else { selectedKeys.insert(item.key) }
+                } label: {
+                    ZStack(alignment: .topTrailing) {
+                        Color.clear
+                            .aspectRatio(2/3, contentMode: .fit)
+                            .overlay {
+                                GeometryReader { geo in
+                                    PosterView(
+                                        item: item,
+                                        width: geo.size.width,
+                                        height: geo.size.height,
+                                        isFavourite: false
+                                    )
+                                }
+                            }
+                            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                            .overlay {
+                                if isSelected {
+                                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                        .strokeBorder(.blue, lineWidth: 3)
+                                }
+                            }
+
+                        Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                            .font(.system(size: 20, weight: .bold))
+                            .foregroundStyle(isSelected ? .blue : .white)
+                            .shadow(color: .black.opacity(0.5), radius: 3, x: 0, y: 1)
+                            .padding(5)
+                    }
+                    .animation(.easeInOut(duration: 0.15), value: isSelected)
+                }
+                .buttonStyle(.plain)
             }
         }
     }

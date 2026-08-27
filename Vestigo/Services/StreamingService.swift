@@ -3,14 +3,21 @@ import Foundation
 struct StreamingAvailabilityService {
     private let base = "https://mtttuyvpjyugudkevchj.supabase.co/functions/v1/vestigo-api"
     
-    func providers(for item: MediaItem, regionCode: String = "US") async throws -> [StreamingOption] {
+    func providers(for item: MediaItem, imdbID: String? = nil, regionCode: String = "US") async throws -> [StreamingOption] {
         var comps = URLComponents(string: base + "/watchmode-sources")!
-        comps.queryItems = [
-            URLQueryItem(name: "tmdbID", value: String(item.id)),
+        var queryItems: [URLQueryItem] = [
             URLQueryItem(name: "kind", value: item.kind == .tv ? "tv" : "movie"),
-            URLQueryItem(name: "country", value: regionCode)
+            URLQueryItem(name: "country", value: regionCode),
+            URLQueryItem(name: "tmdbID", value: String(item.id)),
+            URLQueryItem(name: "title", value: item.title),
         ]
-        
+        if let imdbID {
+            queryItems.append(URLQueryItem(name: "imdbID", value: imdbID))
+        }
+        if let year = item.releaseYearInt {
+            queryItems.append(URLQueryItem(name: "year", value: String(year)))
+        }
+        comps.queryItems = queryItems
         guard let url = comps.url else { throw URLError(.badURL) }
         let response: WatchmodeSourcesResponse = try await fetch(url: url)
         return response.sources

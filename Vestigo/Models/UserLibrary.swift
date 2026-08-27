@@ -6,6 +6,7 @@ struct UserLibrary: Codable {
     var watched: Set<MediaKey> = []
     var ratings: [MediaKey: Double] = [:]
     var favouriteKeys: Set<MediaKey> = []
+    var favouriteOrder: [MediaKey] = []
     var neverShowAgain: Set<MediaKey> = []
     var notInterested: Set<MediaKey> = []
     var watchedOrder: [MediaKey] = []
@@ -19,6 +20,7 @@ struct UserLibrary: Codable {
         case watched
         case ratings
         case favouriteKeys
+        case favouriteOrder
         case neverShowAgain
         case notInterested
         case watchedOrder
@@ -36,6 +38,7 @@ struct UserLibrary: Codable {
         watched = try container.decodeIfPresent(Set<MediaKey>.self, forKey: .watched) ?? []
         ratings = try container.decodeIfPresent([MediaKey: Double].self, forKey: .ratings) ?? [:]
         favouriteKeys = try container.decodeIfPresent(Set<MediaKey>.self, forKey: .favouriteKeys) ?? []
+        favouriteOrder = try container.decodeIfPresent([MediaKey].self, forKey: .favouriteOrder) ?? []
         neverShowAgain = try container.decodeIfPresent(Set<MediaKey>.self, forKey: .neverShowAgain) ?? []
         notInterested = try container.decodeIfPresent(Set<MediaKey>.self, forKey: .notInterested) ?? []
         watchedOrder = try container.decodeIfPresent([MediaKey].self, forKey: .watchedOrder) ?? []
@@ -51,6 +54,7 @@ struct UserLibrary: Codable {
         try container.encode(watched, forKey: .watched)
         try container.encode(ratings, forKey: .ratings)
         try container.encode(favouriteKeys, forKey: .favouriteKeys)
+        try container.encode(favouriteOrder, forKey: .favouriteOrder)
         try container.encode(neverShowAgain, forKey: .neverShowAgain)
         try container.encode(notInterested, forKey: .notInterested)
         try container.encode(watchedOrder, forKey: .watchedOrder)
@@ -106,6 +110,22 @@ struct UserLibrary: Codable {
         favouriteKeys.filter { watched.contains($0) }.compactMap { items[$0] }
     }
 
+    var orderedFavouriteItems: [MediaItem] {
+        var result: [MediaItem] = []
+        var seen = Set<MediaKey>()
+        for key in favouriteOrder {
+            if watched.contains(key), let item = items[key] {
+                result.append(item)
+                seen.insert(key)
+            }
+        }
+        let untracked = favouriteKeys
+            .filter { !seen.contains($0) && watched.contains($0) }
+            .compactMap { items[$0] }
+            .sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
+        return result + untracked
+    }
+
     var lastWatchedItem: MediaItem? {
         for key in watchedOrder.reversed() {
             if watched.contains(key), let item = items[key] {
@@ -139,8 +159,10 @@ struct UserLibrary: Codable {
         items[item.key] = item
         if favouriteKeys.contains(item.key) {
             favouriteKeys.remove(item.key)
+            favouriteOrder.removeAll { $0 == item.key }
         } else {
             favouriteKeys.insert(item.key)
+            favouriteOrder.append(item.key)
         }
     }
 

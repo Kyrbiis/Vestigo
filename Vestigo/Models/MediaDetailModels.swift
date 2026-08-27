@@ -30,6 +30,10 @@ struct TrailerVideo: Identifiable, Hashable {
         guard ["Trailer", "Teaser"].contains(where: { dto.type.localizedCaseInsensitiveCompare($0) == .orderedSame }) else {
             return nil
         }
+        // Reject YouTube Shorts mislabeled as Trailer/Teaser in TMDb
+        let lowerName = dto.name.lowercased()
+        guard !lowerName.contains("#short") else { return nil }
+        guard lowerName.range(of: "\\bshorts?\\b", options: .regularExpression) == nil else { return nil }
 
         id = dto.id
         key = trimmedKey
@@ -340,6 +344,18 @@ struct MediaDetail: Hashable {
 
     var primaryTrailer: TrailerVideo? {
         trailers.first
+    }
+
+    func withTrailers(_ newTrailers: [TrailerVideo]) -> MediaDetail {
+        MediaDetail(
+            director: director, creator: creator, cast: cast, castAndKeyCrew: castAndKeyCrew,
+            seasons: seasons, similar: similar, firstAirDate: firstAirDate, lastAirDate: lastAirDate,
+            status: status, runtime: runtime, ageRating: ageRating, tmdbCollectionID: tmdbCollectionID,
+            keywordIDs: keywordIDs, keywordNames: keywordNames, networkNames: networkNames,
+            trailers: newTrailers, imdbID: imdbID, tmdbProviders: tmdbProviders,
+            sameFranchiseKeys: sameFranchiseKeys, strongAPISimilarityKeys: strongAPISimilarityKeys,
+            mediumAPISimilarityKeys: mediumAPISimilarityKeys, sharedContributorKeys: sharedContributorKeys
+        )
     }
 
     private init(director: PersonSummary?, creator: PersonSummary?, cast: [PersonSummary], castAndKeyCrew: [PersonSummary], seasons: [SeasonInfo], similar: [MediaItem], firstAirDate: String?, lastAirDate: String?, status: String?, runtime: Int?, ageRating: String?, tmdbCollectionID: Int?, keywordIDs: [Int], keywordNames: [String], networkNames: [String], trailers: [TrailerVideo], imdbID: String?, tmdbProviders: [StreamingOption], sameFranchiseKeys: Set<MediaKey>, strongAPISimilarityKeys: Set<MediaKey>, mediumAPISimilarityKeys: Set<MediaKey>, sharedContributorKeys: Set<MediaKey>) {
