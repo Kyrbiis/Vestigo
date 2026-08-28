@@ -54,6 +54,7 @@ struct ThematicSearchView: View {
                 .padding(.bottom, 110)
             }
             .scrollIndicators(.hidden)
+            .scrollDismissesKeyboard(.interactively)
         }
         .safeAreaInset(edge: .top, spacing: 0) {
             Capsule()
@@ -165,6 +166,12 @@ struct ThematicSearchView: View {
                     .padding(.horizontal, 8)
                     .padding(.vertical, 4)
                     .scrollContentBackground(.hidden)
+                    .toolbar {
+                        ToolbarItemGroup(placement: .keyboard) {
+                            Spacer()
+                            Button("Done") { inputFocused = false }
+                        }
+                    }
 
                 if query.isEmpty {
                     Text("Describe a film or show…")
@@ -179,7 +186,6 @@ struct ThematicSearchView: View {
                 if !query.isEmpty {
                     Button {
                         query = ""
-                        inputFocused = true
                     } label: {
                         Text("Clear")
                             .font(.caption.bold())

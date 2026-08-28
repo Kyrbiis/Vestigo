@@ -767,25 +767,23 @@ struct TMDbService {
         return indexed.sorted { $0.0 < $1.0 }.map(\.1)
     }
     
-    func personCredits(personID: Int) async throws -> [MediaItem] {
+    func personCredits(personID: Int) async throws -> PersonCreditBundle {
         let response: TMDbPersonCreditsResponse = try await fetch(path: "/person/\(personID)/combined_credits", query: [])
-        let combinedCredits: [TMDbMediaDTO] = response.cast + response.crew
-        let mappedItems: [MediaItem] = combinedCredits.map { dto in
-            MediaItem(dto)
+        let byRatingThenDate: (MediaItem, MediaItem) -> Bool = { lhs, rhs in
+            if lhs.voteAverage != rhs.voteAverage { return lhs.voteAverage > rhs.voteAverage }
+            return (lhs.releaseDateValue ?? .distantPast) > (rhs.releaseDateValue ?? .distantPast)
         }
-        let filteredItems: [MediaItem] = mappedItems.filter { item in
-            item.shouldShowInPersonCredits
-        }
-        let uniqueItems: [MediaItem] = filteredItems.uniqued()
-        let sortedItems: [MediaItem] = uniqueItems.sorted { lhs, rhs in
-            if lhs.voteAverage != rhs.voteAverage {
-                return lhs.voteAverage > rhs.voteAverage
-            }
-            let lhsDate = lhs.releaseDateValue ?? .distantPast
-            let rhsDate = rhs.releaseDateValue ?? .distantPast
-            return lhsDate > rhsDate
-        }
-        return sortedItems
+        let onScreen = response.cast
+            .map { MediaItem($0) }
+            .filter { $0.shouldShowInPersonCredits }
+            .uniqued()
+            .sorted(by: byRatingThenDate)
+        let behindCamera = response.crew
+            .map { MediaItem($0) }
+            .filter { $0.shouldShowInPersonCredits }
+            .uniqued()
+            .sorted(by: byRatingThenDate)
+        return PersonCreditBundle(onScreen: onScreen, behindCamera: behindCamera)
     }
     
     func personDetail(personID: Int) async throws -> PersonDetail {

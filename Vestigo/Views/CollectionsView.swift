@@ -20,6 +20,8 @@ struct CollectionsView: View {
     @State private var collectionPath: [UUID] = []
     @State private var showCreatePopup = false
     @State private var newCollectionName = ""
+    @State private var collectionToDelete: MediaCollection?
+    @State private var showDeleteAlert = false
 
     private enum CollectionsTab: String, CaseIterable {
         case collections = "Collections"
@@ -159,7 +161,8 @@ struct CollectionsView: View {
                                 }
                                 .buttonStyle(.plain)
                                 .swipeToDelete(cornerRadius: 22) {
-                                    model.deleteCollection(id: collection.id)
+                                    collectionToDelete = collection
+                                    showDeleteAlert = true
                                 }
                             }
                         }
@@ -234,6 +237,15 @@ struct CollectionsView: View {
             Button("Cancel", role: .cancel) {
                 newCollectionName = ""
             }
+        }
+        .alert("Delete \"\(collectionToDelete?.name ?? "")\"?", isPresented: $showDeleteAlert) {
+            Button("Delete", role: .destructive) {
+                if let c = collectionToDelete { model.deleteCollection(id: c.id) }
+                collectionToDelete = nil
+            }
+            Button("Cancel", role: .cancel) { collectionToDelete = nil }
+        } message: {
+            Text("This cannot be undone. The collection's contents won't be affected.")
         }
     }
 }

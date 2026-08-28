@@ -1,5 +1,18 @@
 import Foundation
 
+struct PersonCreditBundle {
+    let onScreen: [MediaItem]
+    let behindCamera: [MediaItem]
+
+    var hasBothKinds: Bool { !onScreen.isEmpty && !behindCamera.isEmpty }
+    var all: [MediaItem] { (onScreen + behindCamera).uniqued() }
+}
+
+enum PersonCreditFilter: String, CaseIterable {
+    case onScreen = "On Screen"
+    case behindCamera = "Behind the Camera"
+}
+
 struct PersonSummary: Identifiable, Codable, Hashable {
     let id: Int
     let name: String

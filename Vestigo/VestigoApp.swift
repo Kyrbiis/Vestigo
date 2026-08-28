@@ -73,6 +73,74 @@ struct VestigoAppShortcuts: AppShortcutsProvider {
             shortTitle: "My Favourites",
             systemImageName: "heart"
         )
+        AppShortcut(
+            intent: GetUnwatchedVestigoWatchlistIntent(),
+            phrases: [
+                "What should I watch next in \(.applicationName)",
+                "Show my unwatched \(.applicationName) watchlist",
+                "What's unwatched on my \(.applicationName) watchlist"
+            ],
+            shortTitle: "Unwatched Watchlist",
+            systemImageName: "bookmark.slash"
+        )
+        AppShortcut(
+            intent: GetRecentlyWatchedInVestigoIntent(),
+            phrases: [
+                "What did I recently watch in \(.applicationName)",
+                "Show my recent \(.applicationName) watches",
+                "What have I been watching in \(.applicationName)"
+            ],
+            shortTitle: "Recently Watched",
+            systemImageName: "clock"
+        )
+        AppShortcut(
+            intent: CheckVestigoItemStatusIntent(),
+            phrases: [
+                "Have I watched something in \(.applicationName)",
+                "Check if something is on my \(.applicationName) watchlist",
+                "What did I rate something in \(.applicationName)"
+            ],
+            shortTitle: "Check Item Status",
+            systemImageName: "questionmark.circle"
+        )
+        AppShortcut(
+            intent: GetVestigoLibraryStatsIntent(),
+            phrases: [
+                "Show my \(.applicationName) stats",
+                "How many movies have I watched in \(.applicationName)",
+                "Give me my \(.applicationName) library summary"
+            ],
+            shortTitle: "Library Stats",
+            systemImageName: "chart.bar"
+        )
+        AppShortcut(
+            intent: GetVestigoCollectionIntent(),
+            phrases: [
+                "Show a \(.applicationName) collection",
+                "Open a collection in \(.applicationName)"
+            ],
+            shortTitle: "Open Collection",
+            systemImageName: "folder"
+        )
+        AppShortcut(
+            intent: MarkWatchedInVestigoIntent(),
+            phrases: [
+                "Mark \(\.$item) as watched in \(.applicationName)",
+                "I just watched \(\.$item) in \(.applicationName)",
+                "Log \(\.$item) as watched in \(.applicationName)"
+            ],
+            shortTitle: "Mark as Watched",
+            systemImageName: "eye"
+        )
+        AppShortcut(
+            intent: AddToVestigoWatchlistIntent(),
+            phrases: [
+                "Add \(\.$item) to my \(.applicationName) watchlist",
+                "Save \(\.$item) to \(.applicationName)"
+            ],
+            shortTitle: "Add to Watchlist",
+            systemImageName: "bookmark.badge.plus"
+        )
     }
 }
 #endif

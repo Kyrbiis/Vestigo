@@ -13,19 +13,27 @@ final class ImageCache: @unchecked Sendable {
         return c
     }()
 
+    private(set) var count: Int = 0
+
     subscript(url: URL) -> UIImage? {
         get { cache.object(forKey: url.absoluteString as NSString) }
         set {
+            let key = url.absoluteString as NSString
             if let img = newValue {
                 let cost = Int(img.size.width * img.size.height * img.scale * img.scale * 4)
-                cache.setObject(img, forKey: url.absoluteString as NSString, cost: cost)
+                if cache.object(forKey: key) == nil { count += 1 }
+                cache.setObject(img, forKey: key, cost: cost)
             } else {
-                cache.removeObject(forKey: url.absoluteString as NSString)
+                if cache.object(forKey: key) != nil { count -= 1 }
+                cache.removeObject(forKey: key)
             }
         }
     }
 
-    func clear() { cache.removeAllObjects() }
+    func clear() {
+        cache.removeAllObjects()
+        count = 0
+    }
 }
 #endif
 

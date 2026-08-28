@@ -49,7 +49,7 @@ final class VestigoModel: ObservableObject {
     var describeItResultsCache: [String: [ThematicSearchResult]] = [:]
 
     @Published var relatedMediaCache: [MediaKey: [RelatedMediaSection]] = [:]
-    @Published var personCreditsCache: [Int: [MediaItem]] = [:]
+    @Published var personCreditsCache: [Int: PersonCreditBundle] = [:]
     @Published var personDetails: [Int: PersonDetail] = [:]
     private var archetypeInferenceCache: [MediaKey: ArchetypeInference] = [:]
     @Published var collectionRecommendations: [UUID: [MediaItem]] = [:]
@@ -2989,7 +2989,7 @@ final class VestigoModel: ObservableObject {
         do {
             personCreditsCache[person.id] = try await tmdb.personCredits(personID: person.id)
         } catch {
-            personCreditsCache[person.id] = []
+            personCreditsCache[person.id] = PersonCreditBundle(onScreen: [], behindCamera: [])
         }
     }
     

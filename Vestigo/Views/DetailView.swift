@@ -738,11 +738,12 @@ struct RelatedMediaCarousel: View {
 
 struct RelatedMediaCard: View {
     let item: RelatedMediaItem
+    @State private var wikiThumb: URL?
 
     var body: some View {
         Link(destination: item.linkURL) {
             VStack(alignment: .leading, spacing: 6) {
-                RelatedMediaImageView(url: item.imageURLValue)
+                RelatedMediaImageView(url: item.imageURLValue ?? wikiThumb)
 
                 Text(item.title)
                     .font(.subheadline.bold())
@@ -762,6 +763,32 @@ struct RelatedMediaCard: View {
         }
         .buttonStyle(.plain)
         .frame(width: 132, alignment: .topLeading)
+        .task(id: item.id) {
+            guard item.imageURLValue == nil else { return }
+            wikiThumb = await Self.fetchWikipediaThumbnail(from: item.linkURL)
+        }
+    }
+
+    private static func fetchWikipediaThumbnail(from articleURL: URL) async -> URL? {
+        guard let host = articleURL.host, host.contains("wikipedia.org") else { return nil }
+        let pathComponents = articleURL.pathComponents
+        guard let wikiIndex = pathComponents.firstIndex(of: "wiki"),
+              wikiIndex + 1 < pathComponents.count else { return nil }
+
+        let title = pathComponents[wikiIndex + 1]
+        guard !title.isEmpty,
+              let summaryURL = URL(string: "https://en.wikipedia.org/api/rest_v1/page/summary/\(title)") else { return nil }
+
+        guard let (data, _) = try? await URLSession.shared.data(from: summaryURL) else { return nil }
+
+        struct WikiSummary: Decodable {
+            struct Thumbnail: Decodable { let source: String }
+            let thumbnail: Thumbnail?
+        }
+
+        guard let summary = try? JSONDecoder().decode(WikiSummary.self, from: data),
+              let sourceStr = summary.thumbnail?.source else { return nil }
+        return URL(string: sourceStr)
     }
 }
 
@@ -942,9 +969,15 @@ struct PersonDetailView: View {
     @State private var knownForSort: PersonKnownForSort = .rating
     @State private var knownForSortDirection: SortDirection = .descending
     @State private var isBiographyExpanded = false
+    @State private var creditFilter: PersonCreditFilter = .onScreen
+
+    private var bundle: PersonCreditBundle? { model.personCreditsCache[person.id] }
 
     private var credits: [MediaItem] {
-        model.personCreditsCache[person.id] ?? []
+        switch creditFilter {
+        case .onScreen: return bundle?.onScreen ?? []
+        case .behindCamera: return bundle?.behindCamera ?? []
+        }
     }
 
     private var sortedKnownForCredits: [MediaItem] {
@@ -963,19 +996,23 @@ struct PersonDetailView: View {
                     return lhsDate > rhsDate
                 }
             }
-
             return (lhs.releaseDateValue ?? .distantPast) > (rhs.releaseDateValue ?? .distantPast)
         }
         return knownForSortDirection == .ascending ? result.reversed() : result
     }
-    
+
     var body: some View {
         personSheetSurface
             .presentationBackground(.clear)
             .presentationCornerRadius(54)
             .task {
                 await model.loadPersonCredits(person)
-                await model.loadExternalRatings(for: credits, limit: 80)
+                if let b = bundle {
+                    if b.onScreen.isEmpty && !b.behindCamera.isEmpty {
+                        creditFilter = .behindCamera
+                    }
+                    await model.loadExternalRatings(for: b.all, limit: 80)
+                }
             }
             .sheet(item: $selectedCreditItem) { item in
                 DetailView(item: item, model: model, allowsPersonSheet: false)
@@ -1002,11 +1039,10 @@ struct PersonDetailView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 header
-                knownForTitle
+                creditFilterHeader
                 SortRow(direction: $knownForSortDirection) {
                     PersonKnownForSortPicker(sort: $knownForSort)
                 }
-                
                 PersonCreditList(items: sortedKnownForCredits, model: model) { item in
                     selectedCreditItem = item
                 }
@@ -1018,6 +1054,20 @@ struct PersonDetailView: View {
         .scrollDismissesKeyboard(.immediately)
         .scrollIndicators(.hidden)
         .scrollViewTouchTuning()
+    }
+
+    @ViewBuilder
+    private var creditFilterHeader: some View {
+        if bundle?.hasBothKinds == true {
+            Picker("Credits", selection: $creditFilter) {
+                Text("On Screen").tag(PersonCreditFilter.onScreen)
+                Text("Behind the Camera").tag(PersonCreditFilter.behindCamera)
+            }
+            .pickerStyle(.segmented)
+        } else {
+            Text(creditFilter == .behindCamera ? "Behind the Camera" : "Known for")
+                .sectionTitle()
+        }
     }
     
     private var header: some View {
@@ -1079,11 +1129,6 @@ struct PersonDetailView: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .topLeading)
-    }
-
-    private var knownForTitle: some View {
-        Text("Known for")
-            .sectionTitle()
     }
 
     private func personIMDbURL(detail: PersonDetail) -> URL? {

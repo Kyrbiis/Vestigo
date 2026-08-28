@@ -2368,33 +2368,8 @@ private struct DevToolsPanel: View {
     @State private var isRestartingConnection = false
     @State private var restartResult: String = ""
 
-    @State private var describeitCallCount: Int = 0
-    @State private var isLoadingDescribeItUsage = false
-
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-
-            // MARK: DescribeIt Usage
-            devSectionLabel("D")
-
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Text("Requests used")
-                        .font(.subheadline)
-                    Spacer()
-                    Text("\(describeitCallCount)")
-                        .font(.caption.bold().monospacedDigit())
-                        .foregroundStyle(.secondary)
-                }
-                Button(isLoadingDescribeItUsage ? "Loading…" : "Refresh") {
-                    fetchDescribeItUsage()
-                }
-                .font(.caption.bold())
-                .foregroundStyle(model.settings.accentColor)
-                .disabled(isLoadingDescribeItUsage)
-            }
-            .settingBubble()
-            .onAppear { fetchDescribeItUsage() }
 
             // MARK: Snapshots
             devSectionLabel("Snapshots")
@@ -2446,8 +2421,8 @@ private struct DevToolsPanel: View {
                 cacheRow("Person credits",    count: model.personCreditsCache.count)     { model.personCreditsCache = [:] }
                 cacheRow("Person details",    count: model.personDetails.count)          { model.personDetails = [:] }
                 cacheRow("Collection recs",   count: model.collectionRecommendations.count) { model.collectionRecommendations = [:] }
-                cacheRow("Home feed",         count: nil)                                { model.clearHomeFeedCache() }
-                cacheRow("Describe It",       count: model.describeItResultsCache.count) { model.clearDescribeItCache() }
+                cacheRow("Home feed",         count: MediaFilter.allCases.filter { UserDefaults.standard.data(forKey: "Vestigo.homeFeedCaches.\($0.rawValue)") != nil }.count) { model.clearHomeFeedCache() }
+                cacheRow("Poster images",     count: ImageCache.shared.count)            { ImageCache.shared.clear() }
                 Divider().opacity(0.3)
                 Button("Clear all caches") {
                     model.clearAllCaches()
@@ -2572,7 +2547,6 @@ private struct DevToolsPanel: View {
         streaming:   \(model.providerCache.count)
         related:     \(model.relatedMediaCache.count)
         people:      \(model.personCreditsCache.count)
-        describe it: \(model.describeItResultsCache.count)
         """
     }
 
@@ -2694,18 +2668,6 @@ private struct DevToolsPanel: View {
         }
     }
 
-    private func fetchDescribeItUsage() {
-        isLoadingDescribeItUsage = true
-        Task {
-            defer { Task { @MainActor in isLoadingDescribeItUsage = false } }
-            guard let url = URL(string: "https://mtttuyvpjyugudkevchj.supabase.co/functions/v1/vestigo-api/describeit-usage") else { return }
-            guard let (data, _) = try? await URLSession.shared.data(from: url) else { return }
-            struct Resp: Decodable { let count: Int }
-            if let resp = try? JSONDecoder().decode(Resp.self, from: data) {
-                await MainActor.run { describeitCallCount = resp.count }
-            }
-        }
-    }
 
     private func checkBackend() {
         let urlString = "https://mtttuyvpjyugudkevchj.supabase.co/functions/v1/vestigo-api/secrets-check"

@@ -1276,6 +1276,7 @@ private struct SwipeToDeleteModifier: ViewModifier {
     let cornerRadius: CGFloat
     let action: () -> Void
     @State private var offset: CGFloat = 0
+    @State private var hasDragged = false
     private let threshold: CGFloat = 72
 
     func body(content: Content) -> some View {
@@ -1295,6 +1296,7 @@ private struct SwipeToDeleteModifier: ViewModifier {
 
             content
                 .offset(x: offset)
+                .allowsHitTesting(!hasDragged)
         }
         .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
         .contentShape(Rectangle())
@@ -1304,6 +1306,7 @@ private struct SwipeToDeleteModifier: ViewModifier {
                     let dx = value.translation.width
                     let dy = value.translation.height
                     guard dx < 0, abs(dx) > abs(dy) else { return }
+                    hasDragged = true
                     withAnimation(.interactiveSpring(response: 0.25, dampingFraction: 0.85)) {
                         offset = max(-threshold * 1.5, dx)
                     }
@@ -1314,6 +1317,7 @@ private struct SwipeToDeleteModifier: ViewModifier {
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.16) { action() }
                     } else {
                         withAnimation(.spring(response: 0.3, dampingFraction: 0.75)) { offset = 0 }
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { hasDragged = false }
                     }
                 }
         )
@@ -1495,22 +1499,12 @@ struct PersonKnownForSortPicker: View {
     @Binding var sort: PersonKnownForSort
 
     var body: some View {
-        HStack(spacing: 0) {
+        Picker("Sort", selection: $sort) {
             ForEach(PersonKnownForSort.allCases) { item in
-                Button {
-                    withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) { sort = item }
-                } label: {
-                    Text(item.title)
-                        .font(.caption.bold())
-                        .foregroundStyle(.primary)
-                        .frame(maxWidth: .infinity)
-                        .frame(height: 30)
-                        .selectedGlassCapsule(isSelected: sort == item)
-                }
-                .buttonStyle(.plain)
+                Text(item.title).tag(item)
             }
         }
-        .padding(3)
+        .pickerStyle(.segmented)
         .liquidGlass(cornerRadius: 18)
     }
 }
