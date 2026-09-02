@@ -69,13 +69,15 @@ struct BaseScreen<Content: View>: View {
                         .frame(height: 1)
                 }
 
-                HStack(alignment: .center, spacing: 12) {
-                    Text(title)
-                        .font(.largeTitle.bold())
-                        .foregroundStyle(.primary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                if !title.isEmpty {
+                    HStack(alignment: .center, spacing: 12) {
+                        Text(title)
+                            .font(.largeTitle.bold())
+                            .foregroundStyle(.primary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
 
-                    headerAccessory
+                        headerAccessory
+                    }
                 }
 
                 content
@@ -426,7 +428,7 @@ struct PosterView: View {
             if isFavourite {
                 Image(systemName: "star.fill")
                     .font(.system(size: max(11, width * 0.095), weight: .black))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(.yellow)
                     .padding(max(5, width * 0.045))
                     .background(.black.opacity(0.64), in: Circle())
                     .padding(max(5, width * 0.045))
@@ -1064,6 +1066,8 @@ struct GenreIconTile: View {
         case "Animation": return "paintpalette.fill"
         case "Crime": return "magnifyingglass"
         case "Comedy": return "face.smiling.fill"
+        case "Reality": return "star.fill"
+        case "Talk": return "mic.fill"
         case "80s": return "clock.fill"
         case "90s": return "clock.fill"
         case "00s": return "clock.fill"

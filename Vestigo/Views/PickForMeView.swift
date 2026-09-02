@@ -696,8 +696,6 @@ struct PickForMeView: View {
                 return !answers.wantsDocumentary
             case .war:
                 return !answers.wantsWar
-            case .longRuntime:
-                return !answers.isSeriesOnly
             default:
                 return true
             }
@@ -716,11 +714,6 @@ struct PickForMeView: View {
                     .liquidGlass(cornerRadius: 22)
             }
             .buttonStyle(.plain)
-
-            Text("Results will only include items available on your configured streaming services. Make sure your services are correct before enabling this.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 4)
 
             PickForMeOptionButton(title: "My services only", subtitle: nil, isSelected: answers.myServicesOnly == true) {
                 answers.myServicesOnly = true

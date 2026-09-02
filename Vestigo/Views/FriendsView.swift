@@ -118,7 +118,7 @@ struct FriendsView: View {
         }
         .sheet(isPresented: $showSendLink) {
             #if canImport(UIKit)
-            let message = "Add me on Vestigo!\n\n\(myInviteURL)\n\nDon't have Vestigo yet? https://testflight.apple.com/join/zbvP2WEx"
+            let message = "Add me on Vestigo!\n\(myInviteURL)\nDon't have Vestigo yet? https://testflight.apple.com/join/zbvP2WEx"
             ActivityView(activityItems: [message])
             #else
             EmptyView()
@@ -223,6 +223,7 @@ private struct MeSectionView: View {
     @State private var showCameraPicker = false
     @State private var showLibraryPicker = false
     @State private var showFilePicker = false
+    @State private var nameEdit: String = ""
 
     private var featuredItems: [MediaItem] {
         if model.settings.socialFeaturedItemKeys.isEmpty {
@@ -268,32 +269,51 @@ private struct MeSectionView: View {
 
     var body: some View {
         VStack(spacing: 20) {
-            Menu {
-                Button { showCameraPicker = true } label: {
-                    Label("Take Photo", systemImage: "camera")
+            VStack(spacing: 8) {
+                Menu {
+                    Button { showCameraPicker = true } label: {
+                        Label("Take Photo", systemImage: "camera")
+                    }
+                    Button { showLibraryPicker = true } label: {
+                        Label("Choose Photo", systemImage: "photo.on.rectangle")
+                    }
+                    Button { showFilePicker = true } label: {
+                        Label("Choose File", systemImage: "folder")
+                    }
+                    if model.userAvatarData != nil {
+                        Button(role: .destructive) { model.clearUserAvatar() } label: {
+                            Label("Remove Photo", systemImage: "trash")
+                        }
+                    }
+                } label: {
+                    AvatarView(name: model.settings.name.isEmpty ? "Me" : model.settings.name,
+                               imageData: model.userAvatarData, size: 96)
                 }
-                Button { showLibraryPicker = true } label: {
-                    Label("Choose Photo", systemImage: "photo.on.rectangle")
-                }
-                Button { showFilePicker = true } label: {
-                    Label("Choose File", systemImage: "folder")
-                }
-                if model.userAvatarData != nil {
-                    Button(role: .destructive) { model.clearUserAvatar() } label: {
-                        Label("Remove Photo", systemImage: "trash")
+                .frame(maxWidth: .infinity)
+
+                VStack(spacing: 4) {
+                    TextField("Set your name…", text: $nameEdit)
+                        .font(.title3.bold())
+                        .multilineTextAlignment(.center)
+                        .padding(.vertical, 4)
+                        .onSubmit {
+                            model.settings.name = nameEdit
+                            model.saveSettings()
+                            Task { await model.publishPublicProfile() }
+                        }
+                        .onChange(of: nameEdit) { _, newValue in
+                            model.settings.name = newValue
+                            model.saveSettings()
+                        }
+
+                    if nameEdit.isEmpty {
+                        Text("You won't appear to others until you set a name.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
                     }
                 }
-            } label: {
-                AvatarView(name: model.settings.name.isEmpty ? "Me" : model.settings.name,
-                           imageData: model.userAvatarData, size: 80)
-            }
-            .frame(maxWidth: .infinity)
-
-            if !model.settings.name.isEmpty {
-                Text(model.settings.name)
-                    .font(.title3.bold())
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 4)
+                .onAppear { nameEdit = model.settings.name }
             }
 
             SocialPosterRow(
@@ -498,7 +518,7 @@ private struct SocialPosterRow: View {
                                         .lineLimit(1)
                                         .frame(width: 110, alignment: .leading)
                                     if showRating {
-                                        if let rating = model.library.ratings[item.key] {
+                                        if let rating = model.library.ratings[item.key], rating > 0 {
                                             HStack(spacing: 3) {
                                                 Image(systemName: "star.fill")
                                                     .font(.system(size: 9))
@@ -508,7 +528,7 @@ private struct SocialPosterRow: View {
                                                     .foregroundStyle(.secondary)
                                             }
                                         } else {
-                                            Text("Not rated")
+                                            Text("Unrated")
                                                 .font(.caption2)
                                                 .foregroundStyle(.tertiary)
                                         }
@@ -879,6 +899,7 @@ private struct FriendsListView: View {
                 }
             } else {
                 FriendFavouritesSection(friends: friends, model: model)
+                FriendExcitedForSection(friends: friends, model: model)
 
                 ForEach(friends) { friend in
                     Button { onSelect(friend) } label: {
@@ -933,19 +954,27 @@ private struct FriendFavouritesSection: View {
         let item: MediaItem
         let overlap: Int
         let friendNames: [String]
+        let firstFriend: FriendProfile?
     }
 
     private var scoredItems: [ScoredItem] {
         var counts: [String: Int] = [:]
         var itemMap: [String: MediaItem] = [:]
         var nameMap: [String: [String]] = [:]
+        var firstFriendMap: [String: FriendProfile] = [:]
         for friend in friends {
             let first = friend.name.components(separatedBy: " ").first ?? friend.name
             for item in friend.featuredItems {
                 let sid = item.key.stableID
                 counts[sid, default: 0] += 1
                 itemMap[sid] = item
-                nameMap[sid, default: []].append(first)
+                if firstFriendMap[sid] == nil { firstFriendMap[sid] = friend }
+                if let rating = friend.ratings[item.key], rating > 0 {
+                    let r = rating.formatted(.number.precision(.fractionLength(0...1)))
+                    nameMap[sid, default: []].append("\(first) · \(r)")
+                } else {
+                    nameMap[sid, default: []].append(first)
+                }
             }
         }
         return Array(itemMap.values)
@@ -958,20 +987,23 @@ private struct FriendFavouritesSection: View {
             }
             .map { item in
                 let sid = item.key.stableID
-                return ScoredItem(item: item, overlap: counts[sid] ?? 1, friendNames: nameMap[sid] ?? [])
+                return ScoredItem(item: item, overlap: counts[sid] ?? 1, friendNames: nameMap[sid] ?? [], firstFriend: firstFriendMap[sid])
             }
     }
 
     var body: some View {
         if !scoredItems.isEmpty {
             VStack(alignment: .leading, spacing: 12) {
-                Text("Friends' Favourites")
+                Text("Friend Favourites")
                     .font(.headline.bold())
                     .padding(.horizontal, 2)
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(alignment: .top, spacing: 10) {
                         ForEach(Array(scoredItems.prefix(15))) { scored in
-                            Button { model.selectedItem = scored.item } label: {
+                            Button {
+                                model.friendDetailContext = scored.firstFriend
+                                model.selectedItem = scored.item
+                            } label: {
                                 VStack(alignment: .leading, spacing: 5) {
                                     PosterView(
                                         item: scored.item,
@@ -1002,6 +1034,91 @@ private struct FriendFavouritesSection: View {
     }
 }
 
+// MARK: - Friend Excited For Carousel
+
+private struct FriendExcitedForSection: View {
+    let friends: [FriendProfile]
+    @ObservedObject var model: VestigoModel
+
+    private struct ScoredItem: Identifiable {
+        var id: String { item.key.stableID }
+        let item: MediaItem
+        let overlap: Int
+        let friendLabels: [String]
+    }
+
+    private var scoredItems: [ScoredItem] {
+        var counts: [String: Int] = [:]
+        var itemMap: [String: MediaItem] = [:]
+        var labelMap: [String: [String]] = [:]
+        for friend in friends {
+            let first = friend.name.components(separatedBy: " ").first ?? friend.name
+            for item in friend.excitedForItems {
+                let sid = item.key.stableID
+                counts[sid, default: 0] += 1
+                itemMap[sid] = item
+                if let date = item.releaseDateValue {
+                    let dateStr = date.formatted(.dateTime.day().month(.defaultDigits).year(.twoDigits))
+                    labelMap[sid, default: []].append("\(first) · \(dateStr)")
+                } else {
+                    labelMap[sid, default: []].append(first)
+                }
+            }
+        }
+        return Array(itemMap.values)
+            .sorted { a, b in
+                let ao = counts[a.key.stableID] ?? 1, bo = counts[b.key.stableID] ?? 1
+                if ao != bo { return ao > bo }
+                let ad = a.releaseDateValue ?? .distantFuture
+                let bd = b.releaseDateValue ?? .distantFuture
+                return ad < bd
+            }
+            .map { item in
+                let sid = item.key.stableID
+                return ScoredItem(item: item, overlap: counts[sid] ?? 1, friendLabels: labelMap[sid] ?? [])
+            }
+    }
+
+    var body: some View {
+        if !scoredItems.isEmpty {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Friends Excited For")
+                    .font(.headline.bold())
+                    .padding(.horizontal, 2)
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(alignment: .top, spacing: 10) {
+                        ForEach(Array(scoredItems.prefix(15))) { scored in
+                            Button { model.selectedItem = scored.item } label: {
+                                VStack(alignment: .leading, spacing: 5) {
+                                    PosterView(
+                                        item: scored.item,
+                                        width: 100,
+                                        height: 150,
+                                        isFavourite: model.library.isFavourite(scored.item)
+                                    )
+                                    Text(scored.item.title)
+                                        .font(.caption.bold())
+                                        .foregroundStyle(.primary)
+                                        .lineLimit(1)
+                                        .frame(width: 100, alignment: .leading)
+                                    Text(scored.friendLabels.prefix(2).joined(separator: ", "))
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(1)
+                                        .frame(width: 100, alignment: .leading)
+                                }
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.horizontal, 2)
+                }
+                .scrollClipDisabled()
+            }
+        }
+    }
+}
+
 // MARK: - Friend Activity Row
 
 private struct FriendActivityRow: View {
@@ -1012,24 +1129,24 @@ private struct FriendActivityRow: View {
     var body: some View {
         Button { model.selectedItem = item } label: {
             HStack(spacing: 12) {
-                AvatarView(name: friend.name, imageData: friend.imageData, size: 40)
+                AvatarView(name: friend.name, imageData: friend.imageData, size: 54)
                 VStack(alignment: .leading, spacing: 2) {
                     let first = friend.name.components(separatedBy: " ").first ?? friend.name
-                    (Text(first).fontWeight(.semibold) + Text(" watched"))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    Text("\(first) watched")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.primary)
                     Text(item.title)
-                        .font(.caption.bold())
+                        .font(.subheadline.bold())
                         .foregroundStyle(.primary)
                         .lineLimit(1)
                     if let activity = friend.recentActivity {
                         Text(activity.formatted(.relative(presentation: .named)))
-                            .font(.caption2)
-                            .foregroundStyle(.tertiary)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
                 }
                 Spacer()
-                PosterView(item: item, width: 38, height: 56, isFavourite: false)
+                PosterView(item: item, width: 42, height: 62, isFavourite: false)
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
@@ -1049,24 +1166,41 @@ struct FriendDetailPage: View {
     let onWatched: () -> Void
     @State private var dummyFilter: MediaFilter = .both
     @State private var showRemoveConfirm = false
+    @State private var liveData: FriendProfile? = nil
+
+    private var current: FriendProfile { liveData ?? friend }
+
+    private func refresh() {
+        Task {
+            if let updated = await model.refreshFriend(recordID: friend.id) { liveData = updated }
+        }
+    }
 
     var body: some View {
-        BaseScreen(title: friend.name, filter: $dummyFilter, settings: model.settings, onRefresh: nil) {
+        BaseScreen(title: "", filter: $dummyFilter, settings: model.settings, onRefresh: { refresh() }) {
             VStack(spacing: 22) {
-                AvatarView(name: friend.name, imageData: friend.imageData, size: 80)
-                    .frame(maxWidth: .infinity)
-                    .padding(.top, 4)
+                VStack(spacing: 12) {
+                    AvatarView(name: current.name, imageData: current.imageData, size: 110)
+                    Text(current.name)
+                        .font(.title.bold())
+                        .minimumScaleFactor(0.6)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: .infinity)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.top, 4)
 
-                if !friend.featuredItems.isEmpty {
-                    SocialPosterRow(title: "Featured", items: friend.featuredItems, showRating: false, model: model)
+                if !current.featuredItems.isEmpty {
+                    SocialPosterRow(title: "Featured", items: current.featuredItems, showRating: false, model: model)
                 }
 
-                if !friend.excitedForItems.isEmpty {
-                    SocialPosterRow(title: "Excited For", items: friend.excitedForItems, showRating: false, model: model)
+                if !current.excitedForItems.isEmpty {
+                    SocialPosterRow(title: "Excited For", items: current.excitedForItems, showRating: false, model: model)
                 }
 
                 VStack(spacing: 0) {
-                    if friend.sharesWatchlist {
+                    if current.sharesWatchlist {
                         Button { onWatchlist() } label: {
                             HStack {
                                 Label("View Watchlist", systemImage: "bookmark")
@@ -1083,11 +1217,11 @@ struct FriendDetailPage: View {
                         .buttonStyle(.plain)
                     }
 
-                    if friend.sharesWatchlist && friend.sharesWatched {
+                    if current.sharesWatchlist && current.sharesWatched {
                         Divider().padding(.leading, 16)
                     }
 
-                    if friend.sharesWatched {
+                    if current.sharesWatched {
                         Button { onWatched() } label: {
                             HStack {
                                 Label("View Watched", systemImage: "checkmark.circle")
@@ -1104,11 +1238,11 @@ struct FriendDetailPage: View {
                         .buttonStyle(.plain)
                     }
 
-                    if !friend.sharesWatchlist && !friend.sharesWatched {
+                    if !current.sharesWatchlist && !current.sharesWatched {
                         HStack(spacing: 8) {
                             Image(systemName: "eye.slash")
                                 .foregroundStyle(.secondary)
-                            Text("\(friend.name) isn't sharing their library.")
+                            Text("\(current.name) isn't sharing their library.")
                                 .font(.subheadline)
                                 .foregroundStyle(.secondary)
                         }
@@ -1129,7 +1263,7 @@ struct FriendDetailPage: View {
                         .liquidGlass(cornerRadius: 20)
                 }
                 .buttonStyle(.plain)
-                .alert("Remove \(friend.name)?", isPresented: $showRemoveConfirm) {
+                .alert("Remove \(current.name)?", isPresented: $showRemoveConfirm) {
                     Button("Remove", role: .destructive) { model.removeFriend(recordID: friend.id) }
                     Button("Cancel", role: .cancel) {}
                 } message: {
@@ -1146,24 +1280,33 @@ struct FriendWatchlistPage: View {
     let friend: FriendProfile
     @ObservedObject var model: VestigoModel
     @State private var filter: MediaFilter = .both
+    @State private var liveData: FriendProfile? = nil
+
+    private var current: FriendProfile { liveData ?? friend }
+
+    private func refresh() {
+        Task {
+            if let updated = await model.refreshFriend(recordID: friend.id) { liveData = updated }
+        }
+    }
 
     private var filteredItems: [MediaItem] {
         switch filter {
-        case .movie: return friend.watchlistItems.filter { $0.kind == .movie }
-        case .tv: return friend.watchlistItems.filter { $0.kind == .tv }
-        case .both: return friend.watchlistItems
+        case .movie: return current.watchlistItems.filter { $0.kind == .movie }
+        case .tv: return current.watchlistItems.filter { $0.kind == .tv }
+        case .both: return current.watchlistItems
         }
     }
 
     var body: some View {
-        BaseScreen(title: "\(friend.name)'s Watchlist", filter: $filter, settings: model.settings, onRefresh: nil) {
+        BaseScreen(title: "\(current.name)'s Watchlist", filter: $filter, settings: model.settings, onRefresh: { refresh() }) {
             VStack(spacing: 16) {
                 FilterPills(filter: $filter, options: [.movie, .tv, .both]) {}
                 if filteredItems.isEmpty {
-                    StatusBubble(title: "Nothing here", text: "\(friend.name)'s watchlist is empty.")
+                    StatusBubble(title: "Nothing here", text: "\(current.name)'s watchlist is empty.")
                 } else {
                     MediaGridOrList(items: filteredItems, hideWatchedForUpcoming: false, model: model, openItem: { item in
-                        model.friendDetailContext = friend
+                        model.friendDetailContext = current
                         model.selectedItem = item
                     })
                 }
@@ -1177,9 +1320,18 @@ struct FriendWatchedPage: View {
     @ObservedObject var model: VestigoModel
     @State private var filter: MediaFilter = .both
     @State private var hideAlreadySeen = false
+    @State private var liveData: FriendProfile? = nil
+
+    private var current: FriendProfile { liveData ?? friend }
+
+    private func refresh() {
+        Task {
+            if let updated = await model.refreshFriend(recordID: friend.id) { liveData = updated }
+        }
+    }
 
     private var filteredItems: [MediaItem] {
-        var items = friend.watchedItems
+        var items = current.watchedItems
         switch filter {
         case .movie: items = items.filter { $0.kind == .movie }
         case .tv: items = items.filter { $0.kind == .tv }
@@ -1190,17 +1342,17 @@ struct FriendWatchedPage: View {
     }
 
     var body: some View {
-        BaseScreen(title: "\(friend.name)'s Watched", filter: $filter, settings: model.settings, onRefresh: nil) {
+        BaseScreen(title: "\(current.name)'s Watched", filter: $filter, settings: model.settings, onRefresh: { refresh() }) {
             VStack(spacing: 16) {
                 FilterPills(filter: $filter, options: [.movie, .tv, .both]) {}
                 Toggle("Hide items I've seen", isOn: $hideAlreadySeen)
                     .font(.subheadline)
                     .padding(.horizontal, 4)
                 if filteredItems.isEmpty {
-                    StatusBubble(title: "Nothing here", text: "\(friend.name) hasn't watched anything yet.")
+                    StatusBubble(title: "Nothing here", text: "\(current.name) hasn't watched anything yet.")
                 } else {
                     MediaGridOrList(items: filteredItems, hideWatchedForUpcoming: false, model: model, openItem: { item in
-                        model.friendDetailContext = friend
+                        model.friendDetailContext = current
                         model.selectedItem = item
                     })
                 }

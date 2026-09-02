@@ -92,7 +92,13 @@ final class VestigoModel: ObservableObject {
     @Published var pendingFriendAdd: PendingFriendAdd? = nil
     @Published var userAvatarData: Data? = nil
 
-    var myInviteURL: String { "vestigo://friend?id=\(settings.socialInviteID)" }
+    var myInviteURL: String {
+        var url = "https://jbhswift.github.io/friend?id=\(settings.socialInviteID)"
+        if !settings.socialMyRecordName.isEmpty {
+            url += "&rid=\(settings.socialMyRecordName)"
+        }
+        return url
+    }
 
 
     struct HomeSectionLoadResult {
@@ -361,6 +367,10 @@ final class VestigoModel: ObservableObject {
         Task {
             await syncFromCloudOnLaunch()
             await loadHome()
+        }
+
+        Task {
+            await publishPublicProfile()
         }
     }
 
@@ -1859,10 +1869,6 @@ final class VestigoModel: ObservableObject {
             return text.containsAny(["grief", "tragedy", "terminal", "mourning", "devastating", "death of"])
         case .foreignLanguage:
             return item.originalLanguage != nil && item.originalLanguage != "en"
-        case .longRuntime:
-            guard item.kind == .movie else { return false }
-            let minutes = detailsCache[item.key]?.runtime ?? item.runtime
-            return (minutes ?? 0) >= 180
         case .sciFi:
             return genres.intersection([878, 10765]).count > 0 || text.containsAny(["sci-fi", "science fiction", "dystopian future", "space station", "artificial intelligence", "robot uprising", "cyberpunk"])
         case .heavyFantasy:
@@ -3810,7 +3816,14 @@ final class VestigoModel: ObservableObject {
     }
 
     func publishPublicProfile() async {
-        publishDiagnostic = await publicSync.publishProfile(settings: settings, library: library, avatarData: userAvatarData)
+        // Get record name first (fast, cached CloudKit user ID) so myInviteURL
+        // has &rid= before the slow CKRecord upload begins.
+        if let myRecord = await publicSync.getMyRecordName(), settings.socialMyRecordName != myRecord {
+            settings.socialMyRecordName = myRecord
+            saveSettings()
+        }
+        let diagnostic = await publicSync.publishProfile(settings: settings, library: library, avatarData: userAvatarData)
+        publishDiagnostic = diagnostic
     }
 
     func loadFriends() async {
@@ -3819,14 +3832,20 @@ final class VestigoModel: ObservableObject {
         friends = profiles
         friendsDiagnostic = diagnostic
         friendsLoading = false
+        // Prune stored IDs that returned no record (stale adds from old broken links)
+        let resolvedIDs = Set(profiles.map(\.id))
+        let pruned = settings.socialConfirmedFriendIDs.filter { resolvedIDs.contains($0) || $0.hasPrefix("vp-") }
+        if pruned.count != settings.socialConfirmedFriendIDs.count {
+            settings.socialConfirmedFriendIDs = pruned
+            saveSettings()
+        }
     }
 
-    func handleFriendLink(inviteID: String) async {
-        guard let result = await publicSync.fetchProfile(byInviteID: inviteID) else {
-            pendingFriendAdd = PendingFriendAdd(id: inviteID, name: "this person")
-            return
-        }
-        pendingFriendAdd = PendingFriendAdd(id: result.recordID, name: result.name)
+    func handleFriendLink(inviteID: String, recordID: String? = nil) async {
+        guard let rid = recordID, !rid.isEmpty else { return }
+        let (profiles, _) = await publicSync.fetchFriends(recordIDs: [rid])
+        let name = profiles.first?.name ?? "this person"
+        await MainActor.run { pendingFriendAdd = PendingFriendAdd(id: rid, name: name) }
     }
 
     func addFriend(recordID: String) {
@@ -3844,6 +3863,14 @@ final class VestigoModel: ObservableObject {
         settings.socialConfirmedFriendIDs.removeAll { $0 == recordID }
         friends.removeAll { $0.id == recordID }
         saveSettings()
+    }
+
+    func refreshFriend(recordID: String) async -> FriendProfile? {
+        let (profiles, _) = await publicSync.fetchFriends(recordIDs: [recordID])
+        if let updated = profiles.first, let idx = friends.firstIndex(where: { $0.id == recordID }) {
+            friends[idx] = updated
+        }
+        return profiles.first
     }
 
     private func scheduleRecommendationsRefresh() {

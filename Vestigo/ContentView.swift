@@ -114,12 +114,24 @@ struct ContentView: View {
             Text("Your OMDb API key has made \(model.settings.omdbDailyRequestCount.formatted()) requests today, reaching its daily limit. IMDb and Rotten Tomato ratings will not load until midnight. You can view or change your key tier from the OMDb website.")
         }
         .onOpenURL { url in
+            // Legacy vestigo:// deep links
             guard url.scheme == "vestigo",
                   url.host == "friend",
                   let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
                   let id = components.queryItems?.first(where: { $0.name == "id" })?.value
             else { return }
-            Task { await model.handleFriendLink(inviteID: id) }
+            let rid = components.queryItems?.first(where: { $0.name == "rid" })?.value
+            Task { await model.handleFriendLink(inviteID: id, recordID: rid) }
+        }
+        .onContinueUserActivity(NSUserActivityTypeBrowsingWeb) { activity in
+            // Universal Links from jbhswift.github.io/friend
+            guard let url = activity.webpageURL,
+                  let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+                  components.path == "/friend",
+                  let id = components.queryItems?.first(where: { $0.name == "id" })?.value
+            else { return }
+            let rid = components.queryItems?.first(where: { $0.name == "rid" })?.value
+            Task { await model.handleFriendLink(inviteID: id, recordID: rid) }
         }
         .alert(
             "Add Friend",

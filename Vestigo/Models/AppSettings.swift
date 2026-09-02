@@ -43,6 +43,7 @@ struct AppSettings: Codable, Hashable {
     var socialExcitedForKeys: [String] = []
     var socialInviteID: String = UUID().uuidString
     var socialConfirmedFriendIDs: [String] = []
+    var socialMyRecordName: String = ""
     var forYouCarouselOrder: [ForYouCarousel] = ForYouCarousel.allCases
     var forYouCarouselHidden: Set<ForYouCarousel> = [.moreLikeLast, .moreLikeFavourite, .watchlistPicks, .seriesNext]
     var omdbPrimaryKey: String = ""
@@ -114,6 +115,7 @@ struct AppSettings: Codable, Hashable {
         case socialExcitedForKeys
         case socialInviteID
         case socialConfirmedFriendIDs
+        case socialMyRecordName
         case recentlyViewedItems
         case socialExcitedForItemCache
     }
@@ -193,6 +195,7 @@ struct AppSettings: Codable, Hashable {
         let storedInviteID = try container.decodeIfPresent(String.self, forKey: .socialInviteID) ?? ""
         socialInviteID = storedInviteID.isEmpty ? UUID().uuidString : storedInviteID
         socialConfirmedFriendIDs = try container.decodeIfPresent([String].self, forKey: .socialConfirmedFriendIDs) ?? socialConfirmedFriendIDs
+        socialMyRecordName = try container.decodeIfPresent(String.self, forKey: .socialMyRecordName) ?? socialMyRecordName
         recentlyViewedItems = try container.decodeIfPresent([MediaItem].self, forKey: .recentlyViewedItems) ?? recentlyViewedItems
         socialExcitedForItemCache = try container.decodeIfPresent([MediaItem].self, forKey: .socialExcitedForItemCache) ?? socialExcitedForItemCache
     }

@@ -197,7 +197,7 @@ struct PickForMeAnswers: Hashable, Codable {
             case .verySad: avoidList.append("very sad or emotionally devastating")
             case .sciFi: avoidList.append("science fiction or sci-fi")
             case .heavyFantasy: avoidList.append("heavy fantasy, magic, or supernatural worlds")
-            case .none, .longRuntime: break
+            case .none: break
             }
         }
         if !avoidList.isEmpty {
@@ -722,7 +722,7 @@ enum PickForMeMinimumRating: String, CaseIterable, Codable, PickForMeOption {
 }
 
 enum PickForMeDealBreaker: String, CaseIterable, Codable, PickForMeOption {
-    case horror, romanceHeavy, animation, documentary, war, graphicViolence, sexualContent, superhero, verySad, foreignLanguage, longRuntime, sciFi, heavyFantasy, none
+    case horror, romanceHeavy, animation, documentary, war, graphicViolence, sexualContent, superhero, verySad, foreignLanguage, sciFi, heavyFantasy, none
     var id: String { rawValue }
     var title: String {
         switch self {
@@ -736,7 +736,6 @@ enum PickForMeDealBreaker: String, CaseIterable, Codable, PickForMeOption {
         case .superhero: return "Superhero"
         case .verySad: return "Very sad"
         case .foreignLanguage: return "Foreign language (not English)"
-        case .longRuntime: return "Long runtime (180+ minutes)"
         case .sciFi: return "Sci-Fi"
         case .heavyFantasy: return "Heavy fantasy / supernatural"
         case .none: return "None"

@@ -74,8 +74,18 @@ struct CloudPublicSyncService {
                 record["avatarPayload"] = nil as CKAsset?
             }
 
-            _ = try await publicDB.save(record)
-            return "publish OK · name: \(settings.name)"
+            do {
+                _ = try await publicDB.save(record)
+                return "publish OK · name: \(settings.name)"
+            } catch let err as CKError where err.localizedDescription.contains("production schema") {
+                // One or more fields not yet in production schema — strip optional fields and retry
+                record["avatarPayload"] = nil as CKAsset?
+                record["favouriteKeys"] = nil as [String]?
+                record["inviteID"] = nil as String?
+                record["ratingsPayload"] = nil as CKAsset?
+                _ = try await publicDB.save(record)
+                return "publish OK (schema limited) · name: \(settings.name)"
+            }
         } catch {
             return "publish error: \(error.localizedDescription)"
         }
@@ -112,27 +122,12 @@ struct CloudPublicSyncService {
         #endif
     }
 
-    // MARK: - Find a profile by invite ID (for add-friend confirmation)
+    // MARK: - Get this user's own CloudKit record name
 
-    func fetchProfile(byInviteID inviteID: String) async -> (recordID: String, name: String)? {
+    func getMyRecordName() async -> String? {
         #if canImport(CloudKit)
-        do {
-            let query = CKQuery(recordType: recordType, predicate: NSPredicate(value: true))
-            var cursor: CKQueryOperation.Cursor? = nil
-            var (results, next) = try await publicDB.records(matching: query, resultsLimit: 200)
-            cursor = next
-            var allRecords: [CKRecord] = results.compactMap { (_, result) in try? result.get() }
-            while let c = cursor {
-                let (more, nextCursor) = try await publicDB.records(continuingMatchFrom: c)
-                allRecords += more.compactMap { (_, result) in try? result.get() }
-                cursor = nextCursor
-            }
-            guard let match = allRecords.first(where: { ($0["inviteID"] as? String) == inviteID }) else { return nil }
-            let name = (match["displayName"] as? String) ?? ""
-            return (match.recordID.recordName, name)
-        } catch {
-            return nil
-        }
+        guard let userID = try? await CKContainer.default().userRecordID() else { return nil }
+        return "vp-\(userID.recordName)"
         #else
         return nil
         #endif

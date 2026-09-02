@@ -332,7 +332,8 @@ struct DetailView: View {
                     DetailRowButton(
                         title: "Favourite",
                         systemName: model.library.isFavourite(item) ? "star.fill" : "star",
-                        isEnabled: model.library.isWatched(item.key)
+                        isEnabled: model.library.isWatched(item.key),
+                        tint: model.library.isFavourite(item) ? .yellow : nil
                     ) {
                         model.requestToggleFavourite(item)
                     }

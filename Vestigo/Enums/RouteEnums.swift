@@ -57,7 +57,7 @@ struct GenreDefinition: Identifiable, Hashable {
         GenreDefinition(name: "Based on a Game", tmdbID: 30003, iconicFilm: "The Last of Us", imageURL: "https://image.tmdb.org/t/p/w780/uKvVjHNqB5VmOrdxqAt2F7J78ED.jpg"),
         GenreDefinition(name: "War", tmdbID: 10752, iconicFilm: "1917", imageURL: "https://image.tmdb.org/t/p/w780/iZf0KyrE25z1sage4SYFLCCrMi9.jpg", mediaScope: .movie),
         GenreDefinition(name: "Western", tmdbID: 37, iconicFilm: "Unforgiven", imageURL: "https://image.tmdb.org/t/p/w780/yKyLJmRAtyXEEYKOvPhKHXIcPq9.jpg"),
-        GenreDefinition(name: "Reality", tmdbID: 10764, iconicFilm: "The Traitors", imageURL: "https://image.tmdb.org/t/p/w780/7lD7Q3dP6tQheQw3JIgYfR3MN6Y.jpg", mediaScope: .tv),
+        GenreDefinition(name: "Reality", tmdbID: 10764, iconicFilm: "Survivor", imageURL: "https://image.tmdb.org/t/p/w780/4WdtTK5SbeXsYeloXHI2WTpgvdE.jpg", mediaScope: .tv),
         GenreDefinition(name: "Talk", tmdbID: 10767, iconicFilm: "Hot Ones", imageURL: "https://image.tmdb.org/t/p/w780/2n95p9isIi1LYTscTcGytlI4zYd.jpg", mediaScope: .tv),
         GenreDefinition(name: "80s", tmdbID: 1980, iconicFilm: "Back to the Future", imageURL: "https://image.tmdb.org/t/p/w780/fNOH9f1aA7XRTzl1sAOx9iF553Q.jpg"),
         GenreDefinition(name: "90s", tmdbID: 1990, iconicFilm: "Jurassic Park", imageURL: "https://image.tmdb.org/t/p/w780/9i3plLl89DHMz7mahksDaAo7HIS.jpg"),
@@ -76,6 +76,8 @@ struct GenreDefinition: Identifiable, Hashable {
         case 878: return LinearGradient(colors: [.cyan, .indigo], startPoint: .topLeading, endPoint: .bottomTrailing)
         case 14: return LinearGradient(colors: [.purple, .blue], startPoint: .topLeading, endPoint: .bottomTrailing)
         case 27: return LinearGradient(colors: [.black, .red], startPoint: .topLeading, endPoint: .bottomTrailing)
+        case 10764: return LinearGradient(colors: [.pink, .orange], startPoint: .topLeading, endPoint: .bottomTrailing)
+        case 10767: return LinearGradient(colors: [.teal, .cyan], startPoint: .topLeading, endPoint: .bottomTrailing)
         default: return LinearGradient(colors: [.gray, .black], startPoint: .topLeading, endPoint: .bottomTrailing)
         }
     }

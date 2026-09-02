@@ -698,23 +698,6 @@ struct SettingsView: View {
                     .buttonStyle(.plain)
                     .settingBubble()
 
-                    VStack(alignment: .leading, spacing: 6) {
-                        Button("Clear caches") {
-                            model.clearAllCaches()
-                            model.clearExternalRatingsCache()
-                            #if canImport(UIKit)
-                            ImageCache.shared.clear()
-                            #endif
-                        }
-                        .foregroundStyle(.red)
-
-                        Text("Frees up storage used by temporarily saved data such as ratings, streaming availability, and search results. Your watchlist, watched history, ratings, and collections are not affected. For a cache-by-cache breakdown, see the developer tab in About.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .settingBubble()
-
                     Button("Reset settings") {
                         model.settings = AppSettings()
                         model.searchFilter = model.settings.defaultSearchFilter
@@ -2210,6 +2193,7 @@ struct RatingPromptOverlay: ViewModifier {
                         HStack(spacing: 10) {
                             Image(systemName: model.pendingRatingPromptMakeFavourite ? "star.fill" : "star")
                                 .font(.headline.bold())
+                                .foregroundStyle(model.pendingRatingPromptMakeFavourite ? .yellow : .primary)
                             
                             Text(model.pendingRatingPromptMakeFavourite ? "Make favourite" : "Also make favourite")
                                 .font(.headline.bold())
