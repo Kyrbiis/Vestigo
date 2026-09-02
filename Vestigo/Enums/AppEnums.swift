@@ -3,7 +3,7 @@ import SwiftUI
 // MARK: - App Tabs
 
 enum AppTab: String, CaseIterable, Identifiable {
-    case home, search, forYou, watchlist, collections
+    case home, search, watchlist, collections, friends
     var id: String { rawValue }
 }
 
@@ -12,27 +12,27 @@ extension AppTab {
         switch self {
         case .home: return "Home"
         case .search: return "Search"
-        case .forYou: return "For You"
         case .watchlist: return "Watchlist"
         case .collections: return "Collections"
+        case .friends: return "Friends"
         }
     }
     var icon: String {
         switch self {
         case .home: return "house"
         case .search: return "magnifyingglass"
-        case .forYou: return "sparkles"
         case .watchlist: return "bookmark"
         case .collections: return "rectangle.stack"
+        case .friends: return "person.2"
         }
     }
     var sortIndex: Int {
         switch self {
         case .home: return 0
         case .search: return 1
-        case .forYou: return 2
-        case .watchlist: return 3
-        case .collections: return 4
+        case .watchlist: return 2
+        case .collections: return 3
+        case .friends: return 4
         }
     }
 }

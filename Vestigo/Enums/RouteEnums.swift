@@ -21,6 +21,7 @@ struct GenreRoute: Hashable { let genre: GenreDefinition }
 enum SearchRoute: Hashable {
     case genre(GenreRoute)
     case chart(MediaKind)
+    case pickForMe
 }
 
 struct GenreDefinition: Identifiable, Hashable {
@@ -80,21 +81,22 @@ struct GenreDefinition: Identifiable, Hashable {
     }
 }
 
-// MARK: - ForYou Navigation
+// MARK: - Home Navigation
 
-enum ForYouRoute: Hashable {
-    case section(ForYouSection)
-    case pickForMe
+enum HomeRoute: Hashable {
+    case section(SectionRoute)
+    case forYouSection(ForYouSection)
 }
 
 // MARK: - Carousel Enums
 
 enum HomeCarousel: String, Codable, CaseIterable, Identifiable, Hashable {
-    case trending, newReleases, upcoming
+    case trending, recommendations, newReleases, upcoming
     var id: String { rawValue }
     var title: String {
         switch self {
         case .trending: return "Trending now"
+        case .recommendations: return "For you"
         case .newReleases: return "New releases"
         case .upcoming: return "Upcoming releases"
         }

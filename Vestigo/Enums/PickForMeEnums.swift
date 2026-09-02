@@ -29,6 +29,7 @@ struct PickForMeAnswers: Hashable, Codable {
     var contentRatings: Set<PickForMeContentRating> = []
     var minimumRating: PickForMeMinimumRating?
     var dealBreakers: Set<PickForMeDealBreaker> = []
+    var myServicesOnly: Bool? = nil
 
     var answeredQuestionCount: Int {
         var count = 0
@@ -245,7 +246,7 @@ struct PickForMeRecentSearch: Codable, Hashable, Identifiable {
 // MARK: - PickForMe Steps
 
 enum PickForMeStep: CaseIterable {
-    case format, archetype, secondaryArchetypes, genrePreferences, fictionPreference, sourceMaterial, runtime, releaseAge, ageRating, minimumRating, dealBreakers
+    case format, archetype, secondaryArchetypes, genrePreferences, fictionPreference, sourceMaterial, runtime, releaseAge, ageRating, minimumRating, dealBreakers, myServicesOnly
 
     static func steps(for answers: PickForMeAnswers) -> [PickForMeStep] {
         var steps: [PickForMeStep] = [
@@ -278,6 +279,8 @@ enum PickForMeStep: CaseIterable {
             .dealBreakers
         ])
 
+        steps.append(.myServicesOnly)
+
         return steps
     }
 
@@ -294,6 +297,7 @@ enum PickForMeStep: CaseIterable {
         case .ageRating: return "What content rating are you comfortable with?"
         case .minimumRating: return "How highly rated should it be?"
         case .dealBreakers: return "Any deal breakers?"
+        case .myServicesOnly: return "Limit to your streaming services?"
         }
     }
 
@@ -310,6 +314,24 @@ enum PickForMeStep: CaseIterable {
         case .ageRating: return "This is a maximum rating filter when data is available. Missing data is penalized."
         case .minimumRating: return "Strong rating preference. Uses IMDb when available."
         case .dealBreakers: return "Strict filters. Choose none if nothing applies."
+        case .myServicesOnly: return "Filters discover API calls with TMDb's with_watch_providers parameter. Library pool items (watchlist, recs) with nil providerCache pass through unchanged. Services without a mapped TMDb ID are excluded from the API filter but the post-filter still uses providerCache for them."
+        }
+    }
+
+    var userSubtitle: String? {
+        switch self {
+        case .format: return "Choose one."
+        case .archetype: return "Pick the vibe you're after. Choose one."
+        case .secondaryArchetypes: return "Optional extras — 1 or 2 gives the most focused results."
+        case .genrePreferences: return "Limits results to a specific genre or setting. 1 is ideal."
+        case .fictionPreference: return "Leave on no preference unless you specifically care."
+        case .sourceMaterial: return "Only set this if you want a book or game adaptation."
+        case .runtime: return "Filter by how long you want to watch."
+        case .releaseAge: return "Choose how old the film or show can be."
+        case .ageRating: return "Pick the maximum content rating you're comfortable with."
+        case .minimumRating: return "Choose a minimum quality bar."
+        case .dealBreakers: return "Things you don't want to see. Choose none if nothing applies."
+        case .myServicesOnly: return "Only suggest items available on your streaming services. Make sure your services are configured correctly — you can edit them below."
         }
     }
 }
@@ -517,6 +539,14 @@ enum PickForMeFictionPreference: String, CaseIterable, Codable, PickForMeOption 
         case .fiction: return "Made-up stories only — avoids documentaries and true-event content."
         case .basedOnTrueStory: return "Includes historical fiction, biopics, and documentaries."
         case .nonFiction: return "Strict filter — documentaries and non-fiction only."
+        case .noPreference: return nil
+        }
+    }
+    var userSubtitle: String? {
+        switch self {
+        case .fiction: return "Made-up stories only."
+        case .basedOnTrueStory: return "Historical fiction, biopics, and documentaries."
+        case .nonFiction: return "Documentaries and non-fiction only."
         case .noPreference: return nil
         }
     }

@@ -208,6 +208,8 @@
 			);
 			mainGroup = 620094BB2FB15C85000C2463;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 620094C52FB15C85000C2463 /* Products */;
 			projectDirPath = "";
@@ -416,7 +418,8 @@
 				INFOPLIST_FILE = Vestigo/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Vestigo;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.entertainment";
-				INFOPLIST_KEY_NSCalendarsFullAccessUsageDescription = "Vestigo uses calendar access to add release dates for upcoming movies and seasons.";
+				INFOPLIST_KEY_NSCalendarsFullAccessUsageDescription = "Vestigo uses calendar access to add release dates for upcoming movies and TV seasons.";
+				INFOPLIST_KEY_NSContactsUsageDescription = "Vestigo uses your contacts to make friends.";
 				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Vestigo uses your location to find nearby cinema showings for new movies.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
@@ -428,7 +431,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 2.0;
+				MARKETING_VERSION = 2.1;
 				PRODUCT_BUNDLE_IDENTIFIER = com.jojovestigo;
 				PRODUCT_NAME = Vestigo;
 				PROVISIONING_PROFILE_SPECIFIER = "";
@@ -457,7 +460,8 @@
 				INFOPLIST_FILE = Vestigo/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Vestigo;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.entertainment";
-				INFOPLIST_KEY_NSCalendarsFullAccessUsageDescription = "Vestigo uses calendar access to add release dates for upcoming movies and seasons.";
+				INFOPLIST_KEY_NSCalendarsFullAccessUsageDescription = "Vestigo uses calendar access to add release dates for upcoming movies and TV seasons.";
+				INFOPLIST_KEY_NSContactsUsageDescription = "Vestigo uses your contacts to make friends.";
 				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Vestigo uses your location to find nearby cinema showings for new movies.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
@@ -469,7 +473,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 2.0;
+				MARKETING_VERSION = 2.1;
 				PRODUCT_BUNDLE_IDENTIFIER = com.jojovestigo;
 				PRODUCT_NAME = Vestigo;
 				PROVISIONING_PROFILE_SPECIFIER = "";

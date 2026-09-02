@@ -14,10 +14,8 @@ import UserNotifications
 
 struct SearchView: View {
     @ObservedObject var model: VestigoModel
-    @State private var searchHistory: [String] = []
     @State private var showingThematicSearch = false
     @FocusState private var searchIsFocused: Bool
-    private let maxSearchHistoryCount = 8
     @State private var searchTask: Task<Void, Never>? = nil
     
     var body: some View {
@@ -43,6 +41,9 @@ struct SearchView: View {
                         model.searchFieldIsFocused = true
                     }
                 }
+                .onChange(of: model.searchFieldIsFocused) { _, isFocused in
+                    if !isFocused { searchIsFocused = false }
+                }
                 if !model.searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     SearchFilterPills(filter: $model.searchFilter) {
                         model.updateSearch()
@@ -54,15 +55,9 @@ struct SearchView: View {
                 }
 
                 if model.searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    if !searchHistory.isEmpty {
-                        SearchHistoryList(entries: searchHistory) { entry in
-                            model.searchText = entry
-                            model.updateSearch()
-                        } clearEntry: { entry in
-                            searchHistory.removeAll { $0 == entry }
-                        }
-                    }
-
+                    if searchIsFocused {
+                        RecentlyViewedList(items: model.settings.recentlyViewedItems, model: model)
+                    } else {
                     if ThematicSearchService.isAvailable {
                             Button {
                                 searchIsFocused = false
@@ -115,6 +110,7 @@ struct SearchView: View {
                             }
                         }
                     }
+                    } // end else (not focused)
                 } else {
                     if model.searchFilter == .people {
                         PeopleSearchResults(people: model.searchPeopleResults, model: model)
@@ -124,73 +120,79 @@ struct SearchView: View {
                 }
             }
         }
+        .safeAreaInset(edge: .bottom) {
+            if model.searchPath.isEmpty && model.searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                Button {
+                    searchIsFocused = false
+                    model.searchFieldIsFocused = false
+                    model.searchPath.append(.pickForMe)
+                } label: {
+                    Label("Pick for me", systemImage: "sparkles")
+                        .font(.headline.bold())
+                        .padding(.horizontal, 16)
+                        .frame(height: 46)
+                        .liquidGlass(cornerRadius: 23)
+                }
+                .buttonStyle(.plain)
+                .padding(.bottom, 10)
+            }
+        }
     }
-    
+
     private func commitSearchInput() {
         searchTask?.cancel()
         searchTask = nil
         searchIsFocused = false
         model.searchFieldIsFocused = false
         model.searchText = model.searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        saveCurrentSearchToHistory()
+        if model.searchText.isEmpty { model.searchPath.removeAll() }
         model.updateSearch()
-    }
-    
-    private func saveCurrentSearchToHistory() {
-        let trimmed = model.searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
-
-        searchHistory.removeAll { $0.caseInsensitiveCompare(trimmed) == .orderedSame }
-        searchHistory.insert(trimmed, at: 0)
-
-        if searchHistory.count > maxSearchHistoryCount {
-            searchHistory = Array(searchHistory.prefix(maxSearchHistoryCount))
-        }
     }
 
 }
 
-struct SearchHistoryList: View {
-    let entries: [String]
-    let selectEntry: (String) -> Void
-    let clearEntry: (String) -> Void
+struct RecentlyViewedList: View {
+    let items: [MediaItem]
+    @ObservedObject var model: VestigoModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Recent searches")
-                .sectionTitle()
-
-            VStack(spacing: 8) {
-                ForEach(entries, id: \.self) { entry in
-                    HStack(spacing: 10) {
-                        Button {
-                            selectEntry(entry)
-                        } label: {
-                            HStack(spacing: 10) {
-                                Image(systemName: "clock.arrow.circlepath")
-                                    .font(.caption.bold())
-                                Text(entry)
-                                    .font(.subheadline.bold())
-                                    .lineLimit(1)
+        if !items.isEmpty {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Recently Viewed")
+                    .sectionTitle()
+                VStack(spacing: 8) {
+                    ForEach(items) { item in
+                        Button { model.selectedItem = item } label: {
+                            HStack(spacing: 12) {
+                                PosterView(item: item, width: 36, height: 54, isFavourite: false)
+                                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(item.title)
+                                        .font(.subheadline.bold())
+                                        .foregroundStyle(.primary)
+                                        .lineLimit(1)
+                                    Text(item.releaseYearText)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                    let rating = model.ratingDisplayText(for: item)
+                                    if !rating.isEmpty {
+                                        Text(rating)
+                                            .font(.caption2.bold())
+                                            .foregroundStyle(.tertiary)
+                                    }
+                                }
                                 Spacer()
+                                Image(systemName: "chevron.right")
+                                    .font(.caption.bold())
+                                    .foregroundStyle(.tertiary)
                             }
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 10)
                             .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
-
-                        Button {
-                            clearEntry(entry)
-                        } label: {
-                            Image(systemName: "xmark")
-                                .font(.caption.bold())
-                                .foregroundStyle(.secondary)
-                                .frame(width: 28, height: 28)
-                        }
-                        .buttonStyle(.plain)
+                        .liquidGlass(cornerRadius: 18)
                     }
-                    .padding(.horizontal, 12)
-                    .frame(height: 42)
-                    .liquidGlass(cornerRadius: 18)
                 }
             }
         }

@@ -1,8 +1,8 @@
 import SwiftUI
 import Foundation
+import PhotosUI
 #if canImport(UIKit)
 import UIKit
-import CoreImage.CIFilterBuiltins
 #endif
 
 // MARK: - Social Models
@@ -45,86 +45,81 @@ struct FriendsView: View {
     @State private var showQRCode = false
     @State private var showSendLink = false
 
-    private var myInviteURL: String? {
-        guard let name = model.myInviteRecordName else { return nil }
-        return "vestigo://friend?id=\(name)"
-    }
+    private var myInviteURL: String { model.myInviteURL }
 
     var body: some View {
-        NavigationStack(path: $friendsPath) {
-            BaseScreen(title: "Friends", filter: $dummyFilter, settings: model.settings, headerAccessory: AnyView(
-                Button { showAddMenu = true } label: {
-                    Image(systemName: "plus")
-                        .font(.system(size: 17, weight: .bold))
-                        .foregroundStyle(.primary)
-                        .frame(width: 42, height: 42)
-                        .liquidGlass(cornerRadius: 21)
-                        .contentShape(Circle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Add friends")
-            ), onRefresh: { startFriendsLoad() }) {
-                VStack(spacing: 22) {
-                    Picker("", selection: $selectedTab) {
-                        Text("Me").tag(FriendsTab.me)
-                        Text("Friends").tag(FriendsTab.friends)
+        ZStack {
+            NavigationStack(path: $friendsPath) {
+                BaseScreen(title: "Friends", filter: $dummyFilter, settings: model.settings, headerAccessory: AnyView(
+                    Button { showAddMenu = true } label: {
+                        Image(systemName: "plus")
+                            .font(.system(size: 17, weight: .bold))
+                            .foregroundStyle(.primary)
+                            .frame(width: 42, height: 42)
+                            .liquidGlass(cornerRadius: 21)
+                            .contentShape(Circle())
                     }
-                    .pickerStyle(.segmented)
-                    .liquidGlass(cornerRadius: 18)
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Add friends")
+                ), onRefresh: { startFriendsLoad() }) {
+                    VStack(spacing: 22) {
+                        Picker("", selection: $selectedTab) {
+                            Text("Me").tag(FriendsTab.me)
+                            Text("Friends").tag(FriendsTab.friends)
+                        }
+                        .pickerStyle(.segmented)
+                        .liquidGlass(cornerRadius: 18)
 
-                    if selectedTab == .me {
-                        MeSectionView(model: model)
-                    } else {
-                        FriendsListView(
-                            friends: model.friends,
-                            model: model,
-                            isLoading: model.friendsLoading,
-                            diagnostic: model.friendsDiagnostic,
-                            onSelect: { friend in friendsPath.append(.friendDetail(friend)) }
-                        )
+                        if selectedTab == .me {
+                            MeSectionView(model: model)
+                        } else {
+                            FriendsListView(
+                                friends: model.friends,
+                                model: model,
+                                isLoading: model.friendsLoading,
+                                diagnostic: model.friendsDiagnostic,
+                                onSelect: { friend in friendsPath.append(.friendDetail(friend)) }
+                            )
+                        }
                     }
                 }
-            }
-            .navigationDestination(for: FriendsRoute.self) { route in
-                switch route {
-                case .friendDetail(let friend):
-                    FriendDetailPage(friend: friend, model: model, onWatchlist: {
-                        friendsPath.append(.friendWatchlist(friend))
-                    }, onWatched: {
-                        friendsPath.append(.friendWatched(friend))
-                    })
-                case .friendWatchlist(let friend):
-                    FriendWatchlistPage(friend: friend, model: model)
-                case .friendWatched(let friend):
-                    FriendWatchedPage(friend: friend, model: model)
+                .navigationDestination(for: FriendsRoute.self) { route in
+                    switch route {
+                    case .friendDetail(let friend):
+                        FriendDetailPage(friend: friend, model: model, onWatchlist: {
+                            friendsPath.append(.friendWatchlist(friend))
+                        }, onWatched: {
+                            friendsPath.append(.friendWatched(friend))
+                        })
+                    case .friendWatchlist(let friend):
+                        FriendWatchlistPage(friend: friend, model: model)
+                    case .friendWatched(let friend):
+                        FriendWatchedPage(friend: friend, model: model)
+                    }
+                }
+                .onChange(of: model.friendsResetToken) { _, _ in
+                    friendsPath.removeAll()
+                    selectedTab = .me
                 }
             }
-            .onChange(of: model.friendsResetToken) { _, _ in
-                friendsPath.removeAll()
-                selectedTab = .me
+
+            if showQRCode {
+                QRCodeOverlay(inviteURL: myInviteURL, onDismiss: { showQRCode = false })
+                    .transition(.opacity.animation(.easeInOut(duration: 0.2)))
             }
         }
         .task { await startFriendsLoadAsync() }
-        .confirmationDialog("Add a Friend", isPresented: $showAddMenu) {
+        .alert("Add a Friend", isPresented: $showAddMenu) {
             Button("QR Code") { showQRCode = true }
             Button("Send Link") { showSendLink = true }
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("Share your Vestigo profile so friends can add you.")
         }
-        .fullScreenCover(isPresented: $showQRCode) {
-            if let url = myInviteURL {
-                QRCodeOverlay(inviteURL: url, onDismiss: { showQRCode = false })
-            }
-        }
         .sheet(isPresented: $showSendLink) {
             #if canImport(UIKit)
-            if let url = myInviteURL {
-                let message = "Add me on Vestigo!\n\n\(url)\n\nDon't have Vestigo yet? https://testflight.apple.com/join/zbvP2WEx"
-                ActivityView(activityItems: [message])
-            } else {
-                EmptyView()
-            }
+            let message = "Add me on Vestigo!\n\n\(myInviteURL)\n\nDon't have Vestigo yet? https://testflight.apple.com/join/zbvP2WEx"
+            ActivityView(activityItems: [message])
             #else
             EmptyView()
             #endif
@@ -137,7 +132,6 @@ struct FriendsView: View {
     }
 
     private func startFriendsLoadAsync() async {
-        await model.loadMyInviteRecordName()
         await model.publishPublicProfile()
         await model.loadFriends()
     }
@@ -150,42 +144,48 @@ private struct QRCodeOverlay: View {
     let onDismiss: () -> Void
 
     @State private var savedBrightness: CGFloat = 0.5
+    @State private var qrImage: UIImage? = nil
 
     var body: some View {
         ZStack {
-            Color.black.opacity(0.92)
+            Color.black.opacity(0.5)
                 .ignoresSafeArea()
                 .onTapGesture { onDismiss() }
 
-            VStack(spacing: 24) {
+            VStack(spacing: 20) {
                 Text("Scan to add me on Vestigo")
                     .font(.title3.bold())
-                    .foregroundStyle(.white)
+                    .foregroundStyle(.primary)
 
-                #if canImport(UIKit)
-                if let image = generateQRCode(from: inviteURL) {
+                if let image = qrImage {
                     Image(uiImage: image)
                         .interpolation(.none)
                         .resizable()
                         .scaledToFit()
-                        .frame(width: 270, height: 270)
+                        .frame(width: 260, height: 260)
                         .background(Color.white)
-                        .cornerRadius(16)
-                        .padding(4)
+                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                } else {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(.secondary.opacity(0.2))
+                        .frame(width: 260, height: 260)
+                        .overlay(ProgressView())
                 }
-                #endif
 
                 Text("Tap anywhere to close")
                     .font(.caption)
-                    .foregroundStyle(.white.opacity(0.5))
+                    .foregroundStyle(.secondary)
             }
             .padding(32)
+            .liquidGlass(cornerRadius: 32)
+            .padding(24)
         }
         .onAppear {
             #if canImport(UIKit)
             savedBrightness = UIScreen.main.brightness
             UIScreen.main.brightness = 1.0
             #endif
+            generateQR()
         }
         .onDisappear {
             #if canImport(UIKit)
@@ -194,18 +194,22 @@ private struct QRCodeOverlay: View {
         }
     }
 
-    #if canImport(UIKit)
-    private func generateQRCode(from string: String) -> UIImage? {
-        let filter = CIFilter.qrCodeGenerator()
-        filter.message = Data(string.utf8)
-        filter.correctionLevel = "M"
-        guard let output = filter.outputImage else { return nil }
-        let scaled = output.transformed(by: CGAffineTransform(scaleX: 10, y: 10))
-        let context = CIContext()
-        guard let cgImage = context.createCGImage(scaled, from: scaled.extent) else { return nil }
-        return UIImage(cgImage: cgImage)
+    private func generateQR() {
+        #if canImport(UIKit)
+        DispatchQueue.global(qos: .userInitiated).async {
+            guard let data = inviteURL.data(using: .utf8) else { return }
+            let filter = CIFilter(name: "CIQRCodeGenerator")
+            filter?.setValue(data, forKey: "inputMessage")
+            filter?.setValue("M", forKey: "inputCorrectionLevel")
+            guard let output = filter?.outputImage else { return }
+            let scaled = output.transformed(by: CGAffineTransform(scaleX: 10, y: 10))
+            let context = CIContext()
+            guard let cgImage = context.createCGImage(scaled, from: scaled.extent) else { return }
+            let image = UIImage(cgImage: cgImage)
+            DispatchQueue.main.async { qrImage = image }
+        }
+        #endif
     }
-    #endif
 }
 
 // MARK: - Me Section
@@ -215,6 +219,10 @@ private struct MeSectionView: View {
     @State private var showFeaturedPicker = false
     @State private var showExcitedForPicker = false
     @AppStorage("Vestigo.devMode") private var devMode: Bool = false
+    @State private var selectedPhotoItem: PhotosPickerItem? = nil
+    @State private var showCameraPicker = false
+    @State private var showLibraryPicker = false
+    @State private var showFilePicker = false
 
     private var featuredItems: [MediaItem] {
         if model.settings.socialFeaturedItemKeys.isEmpty {
@@ -235,6 +243,7 @@ private struct MeSectionView: View {
         return model.settings.socialExcitedForKeys.compactMap { stableID -> MediaItem? in
             model.library.items.values.first { $0.key.stableID == stableID }
                 ?? model.upcoming.first { $0.key.stableID == stableID }
+                ?? model.settings.socialExcitedForItemCache.first { $0.key.stableID == stableID }
         }.filter { item in
             guard let releaseDate = item.releaseDateValue else { return true }
             return releaseDate > today
@@ -259,6 +268,27 @@ private struct MeSectionView: View {
 
     var body: some View {
         VStack(spacing: 20) {
+            Menu {
+                Button { showCameraPicker = true } label: {
+                    Label("Take Photo", systemImage: "camera")
+                }
+                Button { showLibraryPicker = true } label: {
+                    Label("Choose Photo", systemImage: "photo.on.rectangle")
+                }
+                Button { showFilePicker = true } label: {
+                    Label("Choose File", systemImage: "folder")
+                }
+                if model.userAvatarData != nil {
+                    Button(role: .destructive) { model.clearUserAvatar() } label: {
+                        Label("Remove Photo", systemImage: "trash")
+                    }
+                }
+            } label: {
+                AvatarView(name: model.settings.name.isEmpty ? "Me" : model.settings.name,
+                           imageData: model.userAvatarData, size: 80)
+            }
+            .frame(maxWidth: .infinity)
+
             if !model.settings.name.isEmpty {
                 Text(model.settings.name)
                     .font(.title3.bold())
@@ -279,7 +309,7 @@ private struct MeSectionView: View {
             SocialPosterRow(
                 title: "Excited For",
                 items: excitedForItems,
-                editIcon: "plus",
+                editIcon: "pencil",
                 onEdit: { showExcitedForPicker = true },
                 emptyMessage: "Add upcoming releases you can't wait for.",
                 showRating: false,
@@ -345,8 +375,76 @@ private struct MeSectionView: View {
         .sheet(isPresented: $showExcitedForPicker) {
             ExcitedForPickerSheet(model: model)
         }
+        .fullScreenCover(isPresented: $showCameraPicker) {
+            #if canImport(UIKit)
+            CameraImagePicker { image in
+                model.saveUserAvatar(image: image)
+            }
+            .ignoresSafeArea()
+            #endif
+        }
+        .photosPicker(isPresented: $showLibraryPicker, selection: $selectedPhotoItem, matching: .images)
+        .fileImporter(isPresented: $showFilePicker, allowedContentTypes: [.image]) { result in
+            if case .success(let url) = result {
+                if url.startAccessingSecurityScopedResource() {
+                    defer { url.stopAccessingSecurityScopedResource() }
+                    #if canImport(UIKit)
+                    if let data = try? Data(contentsOf: url), let image = UIImage(data: data) {
+                        model.saveUserAvatar(image: image)
+                    }
+                    #endif
+                }
+            }
+        }
+        .onChange(of: selectedPhotoItem) { _, newItem in
+            Task {
+                if let data = try? await newItem?.loadTransferable(type: Data.self) {
+                    #if canImport(UIKit)
+                    if let image = UIImage(data: data) {
+                        model.saveUserAvatar(image: image)
+                    }
+                    #endif
+                }
+                selectedPhotoItem = nil
+            }
+        }
     }
 }
+
+// MARK: - Camera picker
+
+#if canImport(UIKit)
+private struct CameraImagePicker: UIViewControllerRepresentable {
+    var onImage: (UIImage) -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(onImage: onImage) }
+
+    func makeUIViewController(context: Context) -> UIImagePickerController {
+        let picker = UIImagePickerController()
+        picker.sourceType = .camera
+        picker.allowsEditing = true
+        picker.delegate = context.coordinator
+        return picker
+    }
+
+    func updateUIViewController(_ uiViewController: UIImagePickerController, context: Context) {}
+
+    class Coordinator: NSObject, UIImagePickerControllerDelegate, UINavigationControllerDelegate {
+        let onImage: (UIImage) -> Void
+        init(onImage: @escaping (UIImage) -> Void) { self.onImage = onImage }
+
+        func imagePickerController(_ picker: UIImagePickerController, didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey: Any]) {
+            picker.dismiss(animated: true)
+            let image = info[.editedImage] as? UIImage ?? info[.originalImage] as? UIImage
+            if let image { onImage(image) }
+        }
+
+        func imagePickerControllerDidCancel(_ picker: UIImagePickerController) {
+            picker.dismiss(animated: true)
+        }
+    }
+}
+#endif
 
 // MARK: - Shared poster row used for Featured + Excited For
 
@@ -404,7 +502,7 @@ private struct SocialPosterRow: View {
                                             HStack(spacing: 3) {
                                                 Image(systemName: "star.fill")
                                                     .font(.system(size: 9))
-                                                    .foregroundStyle(.yellow)
+                                                    .foregroundStyle(.white)
                                                 Text(rating.formatted(.number.precision(.fractionLength(0...1))))
                                                     .font(.caption2)
                                                     .foregroundStyle(.secondary)
@@ -486,16 +584,12 @@ private struct FeaturedPickerSheet: View {
                     Text("Choose Featured")
                         .font(.title2.bold())
                     Spacer()
-                    HStack(spacing: 16) {
-                        Button("Cancel") { dismiss() }
-                            .foregroundStyle(.secondary)
-                        Button("Done") {
-                            model.settings.socialFeaturedItemKeys = Array(selected)
-                            model.saveSettings()
-                            dismiss()
-                        }
-                        .fontWeight(.semibold)
+                    Button("Done") {
+                        model.settings.socialFeaturedItemKeys = Array(selected)
+                        model.saveSettings()
+                        dismiss()
                     }
+                    .fontWeight(.semibold)
                 }
 
                 HStack(spacing: 8) {
@@ -634,16 +728,19 @@ private struct ExcitedForPickerSheet: View {
                     Text("Excited For")
                         .font(.title2.bold())
                     Spacer()
-                    HStack(spacing: 16) {
-                        Button("Cancel") { dismiss() }
-                            .foregroundStyle(.secondary)
-                        Button("Done") {
-                            model.settings.socialExcitedForKeys = Array(selected)
-                            model.saveSettings()
-                            dismiss()
+                    Button("Done") {
+                        model.settings.socialExcitedForKeys = Array(selected)
+                        let selectedItems = displayItems.filter { selected.contains($0.key.stableID) }
+                        var cache = model.settings.socialExcitedForItemCache
+                        for item in selectedItems {
+                            cache.removeAll { $0.key == item.key }
+                            cache.append(item)
                         }
-                        .fontWeight(.semibold)
+                        model.settings.socialExcitedForItemCache = cache
+                        model.saveSettings()
+                        dismiss()
                     }
+                    .fontWeight(.semibold)
                 }
 
                 HStack(spacing: 8) {
@@ -663,11 +760,15 @@ private struct ExcitedForPickerSheet: View {
                         .foregroundStyle(.secondary)
                 }
 
-                if displayItems.isEmpty && !isSearchingRemote {
-                    StatusBubble(
-                        title: searchText.isEmpty ? "No upcoming items" : "No results",
-                        text: searchText.isEmpty ? "Upcoming releases will appear here when they're available." : "Try a different search term."
-                    )
+                if displayItems.isEmpty {
+                    if isSearchingRemote {
+                        LoadingBubble(title: "Searching", text: "Looking up upcoming releases…")
+                    } else {
+                        StatusBubble(
+                            title: searchText.isEmpty ? "No upcoming items" : "No results",
+                            text: searchText.isEmpty ? "Upcoming releases will appear here when they're available." : "Try a different search term."
+                        )
+                    }
                 } else {
                     LazyVGrid(columns: columns, spacing: 14) {
                         ForEach(displayItems) { item in
@@ -735,7 +836,7 @@ private struct ExcitedForPickerSheet: View {
             remoteTask?.cancel()
             guard !text.isEmpty else { remoteResults = []; return }
             remoteTask = Task {
-                try? await Task.sleep(nanoseconds: 350_000_000)
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
                 guard !Task.isCancelled else { return }
                 if localItems.count < 5 {
                     isSearchingRemote = true

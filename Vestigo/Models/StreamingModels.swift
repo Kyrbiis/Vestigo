@@ -366,6 +366,7 @@ struct KnownStreamingService: Identifiable, Hashable {
     let lightText: Bool     // false = use dark text (for bright brand colors)
     let domain: String      // used to build the Brandfetch logo CDN URL
     let aliases: [String]   // alternative API names (e.g. "Amazon" for "Prime Video")
+    let tmdbProviderID: Int?
 
     var logoURL: URL? {
         URL(string: "https://mtttuyvpjyugudkevchj.supabase.co/functions/v1/vestigo-api/brand-logo?domain=\(domain)&w=128&h=128")
@@ -383,38 +384,39 @@ struct KnownStreamingService: Identifiable, Hashable {
 
     private static func s(
         _ id: String, _ display: String, _ icon: String, _ hex: String, _ domain: String,
-        free: Bool = false, dark: Bool = false, aliases: [String] = []
+        free: Bool = false, dark: Bool = false, aliases: [String] = [], tmdbID: Int? = nil
     ) -> KnownStreamingService {
         KnownStreamingService(id: id, displayName: display, isFree: free, iconLabel: icon,
-                              brandColorHex: hex, lightText: !dark, domain: domain, aliases: aliases)
+                              brandColorHex: hex, lightText: !dark, domain: domain, aliases: aliases,
+                              tmdbProviderID: tmdbID)
     }
 
     static let catalog: [KnownStreamingService] = [
         // Subscription
-        s("Netflix",              "Netflix",          "N",      "#E50914",  "netflix.com"),
-        s("Prime Video",          "Prime Video",      "prime",  "#00A8E1",  "primevideo.com",     aliases: ["Amazon", "Amazon Prime", "Amazon Prime Video"]),
-        s("Apple TV+",            "Apple TV+",        "TV+",    "#1C1C1E",  "tv.apple.com",       aliases: ["Apple TV", "AppleTV"]),
-        s("Disney+",              "Disney+",          "D+",     "#113ECF",  "disneyplus.com"),
-        s("Hulu",                 "Hulu",             "hulu",   "#1CE783",  "hulu.com",           dark: true),
-        s("Max",                  "Max",              "max",    "#002BE7",  "max.com",            aliases: ["HBO Max"]),
-        s("Peacock",              "Peacock",          "P",      "#1D1D1B",  "peacocktv.com"),
-        s("Paramount+",           "Paramount+",       "P+",     "#0064FF",  "paramountplus.com",  aliases: ["Paramount Plus"]),
-        s("YouTube TV",           "YouTube TV",       "YT",     "#FF0000",  "tv.youtube.com"),
-        s("Fubo",                 "Fubo",             "fubo",   "#E8173B",  "fubo.tv",            aliases: ["FuboTV"]),
-        s("Sling TV",             "Sling TV",         "SLING",  "#1B6BFF",  "sling.com"),
+        s("Netflix",              "Netflix",          "N",      "#E50914",  "netflix.com",                                                                    tmdbID: 8),
+        s("Prime Video",          "Prime Video",      "prime",  "#00A8E1",  "primevideo.com",     aliases: ["Amazon", "Amazon Prime", "Amazon Prime Video"],   tmdbID: 9),
+        s("Apple TV+",            "Apple TV+",        "TV+",    "#1C1C1E",  "tv.apple.com",       aliases: ["Apple TV", "AppleTV"],                            tmdbID: 350),
+        s("Disney+",              "Disney+",          "D+",     "#113ECF",  "disneyplus.com",                                                                  tmdbID: 337),
+        s("Hulu",                 "Hulu",             "hulu",   "#1CE783",  "hulu.com",           dark: true,                                                  tmdbID: 15),
+        s("Max",                  "Max",              "max",    "#002BE7",  "max.com",            aliases: ["HBO Max"],                                         tmdbID: 1899),
+        s("Peacock",              "Peacock",          "P",      "#1D1D1B",  "peacocktv.com",                                                                   tmdbID: 387),
+        s("Paramount+",           "Paramount+",       "P+",     "#0064FF",  "paramountplus.com",  aliases: ["Paramount Plus"],                                 tmdbID: 531),
+        s("YouTube TV",           "YouTube TV",       "YT",     "#FF0000",  "tv.youtube.com",                                                                  tmdbID: 227),
+        s("Fubo",                 "Fubo",             "fubo",   "#E8173B",  "fubo.tv",            aliases: ["FuboTV"],                                          tmdbID: 257),
+        s("Sling TV",             "Sling TV",         "SLING",  "#1B6BFF",  "sling.com",                                                                       tmdbID: 190),
         s("DirecTV Stream",       "DirecTV",          "DTV",    "#00A8E0",  "directv.com",        aliases: ["DirecTV"]),
-        s("Starz",                "Starz",            "STARZ",  "#141414",  "starz.com"),
-        s("Epix",                 "MGM+",             "MGM+",   "#1A1A1A",  "mgmplus.com",        aliases: ["MGM Plus", "MGM+"]),
-        s("Crunchyroll",          "Crunchyroll",      "CR",     "#F47521",  "crunchyroll.com"),
-        s("Funimation",           "Funimation",       "FUN",    "#410099",  "funimation.com"),
-        s("Discovery+",           "Discovery+",       "D+",     "#0D4296",  "discoveryplus.com",  aliases: ["Discovery Plus"]),
-        s("ESPN+",                "ESPN+",            "E+",     "#CC0001",  "espn.com",           aliases: ["ESPN Plus"]),
-        s("MUBI",                 "MUBI",             "MUBI",   "#2B2B2B",  "mubi.com"),
-        s("BritBox",              "BritBox",          "BB",     "#13294B",  "britbox.com"),
-        s("AMC+",                 "AMC+",             "AMC+",   "#002366",  "amcplus.com",        aliases: ["AMC Plus"]),
-        s("Shudder",              "Shudder",          "SHD",    "#1E1E1E",  "shudder.com"),
-        s("Criterion Channel",    "Criterion",        "CC",     "#CC1411",  "criterionchannel.com"),
-        s("Acorn TV",             "Acorn TV",         "acorn",  "#1D6B2E",  "acorn.tv"),
+        s("Starz",                "Starz",            "STARZ",  "#141414",  "starz.com",                                                                       tmdbID: 43),
+        s("Epix",                 "MGM+",             "MGM+",   "#1A1A1A",  "mgmplus.com",        aliases: ["MGM Plus", "MGM+"],                               tmdbID: 268),
+        s("Crunchyroll",          "Crunchyroll",      "CR",     "#F47521",  "crunchyroll.com",                                                                 tmdbID: 283),
+        s("Funimation",           "Funimation",       "FUN",    "#410099",  "funimation.com",                                                                  tmdbID: 269),
+        s("Discovery+",           "Discovery+",       "D+",     "#0D4296",  "discoveryplus.com",  aliases: ["Discovery Plus"],                                 tmdbID: 510),
+        s("ESPN+",                "ESPN+",            "E+",     "#CC0001",  "espn.com",           aliases: ["ESPN Plus"],                                       tmdbID: 149),
+        s("MUBI",                 "MUBI",             "MUBI",   "#2B2B2B",  "mubi.com",                                                                        tmdbID: 100),
+        s("BritBox",              "BritBox",          "BB",     "#13294B",  "britbox.com",                                                                     tmdbID: 151),
+        s("AMC+",                 "AMC+",             "AMC+",   "#002366",  "amcplus.com",        aliases: ["AMC Plus"],                                        tmdbID: 526),
+        s("Shudder",              "Shudder",          "SHD",    "#1E1E1E",  "shudder.com",                                                                     tmdbID: 99),
+        s("Criterion Channel",    "Criterion",        "CC",     "#CC1411",  "criterionchannel.com",                                                            tmdbID: 258),
+        s("Acorn TV",             "Acorn TV",         "acorn",  "#1D6B2E",  "acorn.tv",                                                                        tmdbID: 87),
         s("Hallmark Movies Now",  "Hallmark",         "HMN",    "#8B1A1A",  "hallmarkchannel.com"),
         s("Lifetime Movie Club",  "Lifetime",         "LMC",    "#8B008B",  "mylifetime.com"),
         s("CuriosityStream",      "Curiosity",        "CS",     "#FF6B00",  "curiositystream.com"),
@@ -424,15 +426,21 @@ struct KnownStreamingService: Identifiable, Hashable {
         s("Spectrum",             "Spectrum",         "SPEC",   "#003DA5",  "spectrum.net",       aliases: ["Spectrum TV", "Spectrum On Demand"]),
         s("Fandango at Home",     "Fandango",         "FAN",    "#3D0C96",  "fandango.com",       aliases: ["Vudu", "FandangoNOW"]),
         // Free
-        s("Tubi",                 "Tubi",             "tubi",   "#FA4706",  "tubitv.com",         free: true),
-        s("Pluto TV",             "Pluto TV",         "pluto",  "#006EFF",  "pluto.tv",           free: true),
-        s("Kanopy",               "Kanopy",           "K",      "#6B0CB0",  "kanopy.com",         free: true),
-        s("Plex",                 "Plex",             "PLEX",   "#E5A00D",  "plex.tv",            free: true),
-        s("Peacock Free",         "Peacock Free",     "P",      "#1D1D1B",  "peacocktv.com",      free: true),
-        s("The Roku Channel",     "Roku Channel",     "ROKU",   "#6C1D45",  "therokuchannel.com", free: true),
-        s("Crackle",              "Crackle",          "CKL",    "#C0392B",  "crackle.com",        free: true),
-        s("YouTube",              "YouTube",          "YT",     "#FF0000",  "youtube.com",        free: true),
+        s("Tubi",                 "Tubi",             "tubi",   "#FA4706",  "tubitv.com",         free: true,                                                  tmdbID: 73),
+        s("Pluto TV",             "Pluto TV",         "pluto",  "#006EFF",  "pluto.tv",           free: true,                                                  tmdbID: 300),
+        s("Kanopy",               "Kanopy",           "K",      "#6B0CB0",  "kanopy.com",         free: true,                                                  tmdbID: 191),
+        s("Plex",                 "Plex",             "PLEX",   "#E5A00D",  "plex.tv",            free: true,                                                  tmdbID: 538),
+        s("Peacock Free",         "Peacock Free",     "P",      "#1D1D1B",  "peacocktv.com",      free: true,                                                  tmdbID: 386),
+        s("The Roku Channel",     "Roku Channel",     "ROKU",   "#6C1D45",  "therokuchannel.com", free: true,                                                  tmdbID: 207),
+        s("Crackle",              "Crackle",          "CKL",    "#C0392B",  "crackle.com",        free: true,                                                  tmdbID: 54),
+        s("YouTube",              "YouTube",          "YT",     "#FF0000",  "youtube.com",        free: true,                                                  tmdbID: 192),
     ]
+}
+
+extension KnownStreamingService {
+    static func tmdbProviderIDs(for serviceNames: Set<String>) -> Set<Int> {
+        Set(catalog.filter { serviceNames.contains($0.id) }.compactMap { $0.tmdbProviderID })
+    }
 }
 
 extension StreamingOption {

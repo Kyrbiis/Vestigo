@@ -102,39 +102,14 @@ struct HomeView: View {
                     Task { await model.loadHome() }
                 }
 
-                if !model.searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    EmptyView()
-                } else {
-                    ForEach(model.settings.homeCarouselOrder, id: \.self) { carousel in
-                        if !model.settings.homeCarouselHidden.contains(carousel) {
-                            homeCarouselView(for: carousel)
-                        }
+                ForEach(model.settings.homeCarouselOrder, id: \.self) { carousel in
+                    if !model.settings.homeCarouselHidden.contains(carousel) {
+                        homeCarouselView(for: carousel)
                     }
                 }
             }
         }
-        .safeAreaInset(edge: .bottom) {
-            if model.homePath.isEmpty {
-                Button {
-                    model.homePath.append(.pickForMe)
-                } label: {
-                    Label("Pick for me", systemImage: "sparkles")
-                        .font(.headline.bold())
-                        .padding(.horizontal, 16)
-                        .frame(height: 46)
-                        .liquidGlass(cornerRadius: 23)
-                }
-                .buttonStyle(.plain)
-                .padding(.bottom, 10)
-            }
-        }
         .onChange(of: model.mediaFilter) { _, _ in Task { await model.loadHome() } }
-        .onChange(of: model.pendingPickForMe) { _, isPending in
-            if isPending {
-                model.homePath.append(.pickForMe)
-                model.pendingPickForMe = false
-            }
-        }
         .task { await model.loadSmartRecommendations() }
     }
 

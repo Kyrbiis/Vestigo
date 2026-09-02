@@ -34,10 +34,17 @@ struct AppSettings: Codable, Hashable {
     var warnBeforeReplacingFavourite = true
     var promptToRateAfterMarkingWatched = true
     var preferredRatingSource: RatingSource = .imdb
-    var homeCarouselOrder: [HomeCarousel] = HomeCarousel.allCases
+    var homeCarouselOrder: [HomeCarousel] = [.trending, .recommendations, .newReleases, .upcoming]
     var homeCarouselHidden: Set<HomeCarousel> = []
+    var socialShareWatchlist: Bool = false
+    var socialShareWatched: Bool = false
+    var socialDontShare: Bool = true
+    var socialFeaturedItemKeys: [String] = []
+    var socialExcitedForKeys: [String] = []
+    var socialInviteID: String = UUID().uuidString
+    var socialConfirmedFriendIDs: [String] = []
     var forYouCarouselOrder: [ForYouCarousel] = ForYouCarousel.allCases
-    var forYouCarouselHidden: Set<ForYouCarousel> = []
+    var forYouCarouselHidden: Set<ForYouCarousel> = [.moreLikeLast, .moreLikeFavourite, .watchlistPicks, .seriesNext]
     var omdbPrimaryKey: String = ""
     var omdbBackupKey: String = ""
     var omdbTierLimit: Int = 1_000
@@ -49,6 +56,8 @@ struct AppSettings: Codable, Hashable {
     var streamingRegion: StreamingRegion = .us
     var pickForMeRecentSearches: [PickForMeRecentSearch] = []
     var describeItRecentSearches: [String] = []
+    var recentlyViewedItems: [MediaItem] = []
+    var socialExcitedForItemCache: [MediaItem] = []
     enum CodingKeys: String, CodingKey {
         case recommendationStrength
         case appearance
@@ -98,6 +107,15 @@ struct AppSettings: Codable, Hashable {
         case streamingRegion
         case pickForMeRecentSearches
         case describeItRecentSearches
+        case socialShareWatchlist
+        case socialShareWatched
+        case socialDontShare
+        case socialFeaturedItemKeys
+        case socialExcitedForKeys
+        case socialInviteID
+        case socialConfirmedFriendIDs
+        case recentlyViewedItems
+        case socialExcitedForItemCache
     }
 
     init() {}
@@ -140,7 +158,14 @@ struct AppSettings: Codable, Hashable {
         preferredRatingSource = try container.decodeIfPresent(RatingSource.self, forKey: .preferredRatingSource) ?? preferredRatingSource
 
         let savedHomeOrder = try container.decodeIfPresent([HomeCarousel].self, forKey: .homeCarouselOrder) ?? []
-        homeCarouselOrder = Self.mergedOrder(saved: savedHomeOrder, defaults: HomeCarousel.allCases)
+        let intendedHomeOrder: [HomeCarousel] = [.trending, .recommendations, .newReleases, .upcoming]
+        var mergedHomeOrder = Self.mergedOrder(saved: savedHomeOrder, defaults: intendedHomeOrder)
+        // Migration: if upgrading from a saved order without .recommendations, insert it at position 1
+        if !savedHomeOrder.contains(.recommendations) {
+            mergedHomeOrder.removeAll { $0 == .recommendations }
+            mergedHomeOrder.insert(.recommendations, at: min(1, mergedHomeOrder.count))
+        }
+        homeCarouselOrder = mergedHomeOrder
         homeCarouselHidden = try container.decodeIfPresent(Set<HomeCarousel>.self, forKey: .homeCarouselHidden) ?? homeCarouselHidden
 
         let savedForYouOrder = ((try? container.decodeIfPresent([String].self, forKey: .forYouCarouselOrder)) ?? [])
@@ -160,6 +185,16 @@ struct AppSettings: Codable, Hashable {
         streamingRegion = try container.decodeIfPresent(StreamingRegion.self, forKey: .streamingRegion) ?? streamingRegion
         pickForMeRecentSearches = try container.decodeIfPresent([PickForMeRecentSearch].self, forKey: .pickForMeRecentSearches) ?? pickForMeRecentSearches
         describeItRecentSearches = try container.decodeIfPresent([String].self, forKey: .describeItRecentSearches) ?? describeItRecentSearches
+        socialShareWatchlist = try container.decodeIfPresent(Bool.self, forKey: .socialShareWatchlist) ?? socialShareWatchlist
+        socialShareWatched = try container.decodeIfPresent(Bool.self, forKey: .socialShareWatched) ?? socialShareWatched
+        socialDontShare = try container.decodeIfPresent(Bool.self, forKey: .socialDontShare) ?? socialDontShare
+        socialFeaturedItemKeys = try container.decodeIfPresent([String].self, forKey: .socialFeaturedItemKeys) ?? socialFeaturedItemKeys
+        socialExcitedForKeys = try container.decodeIfPresent([String].self, forKey: .socialExcitedForKeys) ?? socialExcitedForKeys
+        let storedInviteID = try container.decodeIfPresent(String.self, forKey: .socialInviteID) ?? ""
+        socialInviteID = storedInviteID.isEmpty ? UUID().uuidString : storedInviteID
+        socialConfirmedFriendIDs = try container.decodeIfPresent([String].self, forKey: .socialConfirmedFriendIDs) ?? socialConfirmedFriendIDs
+        recentlyViewedItems = try container.decodeIfPresent([MediaItem].self, forKey: .recentlyViewedItems) ?? recentlyViewedItems
+        socialExcitedForItemCache = try container.decodeIfPresent([MediaItem].self, forKey: .socialExcitedForItemCache) ?? socialExcitedForItemCache
     }
 
     private static func mergedOrder<T: Hashable>(saved: [T], defaults: [T]) -> [T] {

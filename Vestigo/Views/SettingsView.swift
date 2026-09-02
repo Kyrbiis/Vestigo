@@ -110,17 +110,11 @@ struct SettingsView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .settingBubble()
 
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text("Home & For You carousels")
-                            .font(.headline.bold())
-                            .foregroundStyle(.primary)
-
-                        Text("Drag to reorder. Tap the eye to hide a carousel from its tab.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.top, 4)
+                    Text("Home carousels")
+                        .font(.headline.bold())
+                        .foregroundStyle(.primary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.top, 4)
 
                     CarouselOrderContent(model: model)
                 }
@@ -1176,159 +1170,93 @@ private struct ImportCandidateRow: View {
 
 struct CarouselOrderContent: View {
     @ObservedObject var model: VestigoModel
-    @State private var draggingHome: HomeCarousel?
-    @State private var draggingForYou: ForYouCarousel?
+
+    private var totalRowCount: Int {
+        model.settings.homeCarouselOrder.count + model.settings.forYouCarouselOrder.count
+    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            VStack(alignment: .leading, spacing: 10) {
-                Text("Home")
-                    .font(.subheadline.bold())
-                    .foregroundStyle(.secondary)
-                    .padding(.leading, 4)
-
-                VStack(spacing: 10) {
-                    ForEach(model.settings.homeCarouselOrder, id: \.self) { carousel in
-                        CarouselOrderRow(
-                            title: carousel.title,
-                            isHidden: model.settings.homeCarouselHidden.contains(carousel),
-                            isDragging: draggingHome == carousel,
-                            accentColor: model.settings.accentColor,
-                            toggle: {
-                                if model.settings.homeCarouselHidden.contains(carousel) {
-                                    model.settings.homeCarouselHidden.remove(carousel)
-                                } else {
-                                    model.settings.homeCarouselHidden.insert(carousel)
-                                }
-                            }
-                        )
-                        .onDrag {
-                            draggingHome = carousel
-                            return NSItemProvider(object: carousel.rawValue as NSString)
+        List {
+            ForEach(model.settings.homeCarouselOrder, id: \.self) { carousel in
+                CarouselOrderRow(
+                    title: carousel.title,
+                    isHidden: model.settings.homeCarouselHidden.contains(carousel),
+                    accentColor: model.settings.accentColor,
+                    toggle: {
+                        if model.settings.homeCarouselHidden.contains(carousel) {
+                            model.settings.homeCarouselHidden.remove(carousel)
+                        } else {
+                            model.settings.homeCarouselHidden.insert(carousel)
                         }
-                        .onDrop(
-                            of: [.text],
-                            delegate: CarouselDropDelegate(
-                                target: carousel,
-                                order: Binding(
-                                    get: { model.settings.homeCarouselOrder },
-                                    set: { model.settings.homeCarouselOrder = $0 }
-                                ),
-                                dragging: $draggingHome,
-                                valueFromRaw: HomeCarousel.init(rawValue:)
-                            )
-                        )
                     }
-                }
+                )
+                .listRowBackground(Color.clear)
+                .listRowSeparatorTint(.primary.opacity(0.1))
+                .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16))
+            }
+            .onMove { indices, newOffset in
+                model.settings.homeCarouselOrder.move(fromOffsets: indices, toOffset: newOffset)
             }
 
-            VStack(alignment: .leading, spacing: 10) {
-                Text("For You")
-                    .font(.subheadline.bold())
-                    .foregroundStyle(.secondary)
-                    .padding(.leading, 4)
-
-                VStack(spacing: 10) {
-                    ForEach(model.settings.forYouCarouselOrder, id: \.self) { carousel in
-                        CarouselOrderRow(
-                            title: carousel.title,
-                            isHidden: model.settings.forYouCarouselHidden.contains(carousel),
-                            isDragging: draggingForYou == carousel,
-                            accentColor: model.settings.accentColor,
-                            toggle: {
-                                if model.settings.forYouCarouselHidden.contains(carousel) {
-                                    model.settings.forYouCarouselHidden.remove(carousel)
-                                } else {
-                                    model.settings.forYouCarouselHidden.insert(carousel)
-                                }
-                            }
-                        )
-                        .onDrag {
-                            draggingForYou = carousel
-                            return NSItemProvider(object: carousel.rawValue as NSString)
+            ForEach(model.settings.forYouCarouselOrder, id: \.self) { carousel in
+                CarouselOrderRow(
+                    title: carousel.title,
+                    isHidden: model.settings.forYouCarouselHidden.contains(carousel),
+                    accentColor: model.settings.accentColor,
+                    toggle: {
+                        if model.settings.forYouCarouselHidden.contains(carousel) {
+                            model.settings.forYouCarouselHidden.remove(carousel)
+                        } else {
+                            model.settings.forYouCarouselHidden.insert(carousel)
                         }
-                        .onDrop(
-                            of: [.text],
-                            delegate: CarouselDropDelegate(
-                                target: carousel,
-                                order: Binding(
-                                    get: { model.settings.forYouCarouselOrder },
-                                    set: { model.settings.forYouCarouselOrder = $0 }
-                                ),
-                                dragging: $draggingForYou,
-                                valueFromRaw: ForYouCarousel.init(rawValue:)
-                            )
-                        )
                     }
-                }
+                )
+                .listRowBackground(Color.clear)
+                .listRowSeparatorTint(.primary.opacity(0.1))
+                .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16))
+            }
+            .onMove { indices, newOffset in
+                model.settings.forYouCarouselOrder.move(fromOffsets: indices, toOffset: newOffset)
             }
         }
+        .listStyle(.plain)
+        .scrollContentBackground(.hidden)
+        .scrollDisabled(true)
+        .environment(\.editMode, .constant(.active))
+        .frame(height: CGFloat(totalRowCount) * 50 + 16)
+        .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
+        .liquidGlass(cornerRadius: 28)
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
-struct CarouselDropDelegate<Item: Hashable>: DropDelegate {
-    let target: Item
-    @Binding var order: [Item]
-    @Binding var dragging: Item?
-    let valueFromRaw: (String) -> Item?
-
-    func dropEntered(info: DropInfo) {
-        guard let dragging, dragging != target,
-              let fromIndex = order.firstIndex(of: dragging),
-              let toIndex = order.firstIndex(of: target),
-              fromIndex != toIndex else { return }
-        withAnimation(.spring(response: 0.28, dampingFraction: 0.86)) {
-            order.move(fromOffsets: IndexSet(integer: fromIndex), toOffset: toIndex > fromIndex ? toIndex + 1 : toIndex)
-        }
-    }
-
-    func dropUpdated(info: DropInfo) -> DropProposal? {
-        DropProposal(operation: .move)
-    }
-
-    func performDrop(info: DropInfo) -> Bool {
-        dragging = nil
-        return true
-    }
-}
 
 struct CarouselOrderRow: View {
     let title: String
     let isHidden: Bool
-    let isDragging: Bool
     let accentColor: Color
     let toggle: () -> Void
 
     var body: some View {
         HStack(spacing: 12) {
             Text(title)
-                .font(.headline.bold())
+                .font(.subheadline.bold())
                 .foregroundStyle(isHidden ? .secondary : .primary)
 
             Spacer()
 
             Button(action: toggle) {
                 Image(systemName: isHidden ? "eye.slash" : "eye")
-                    .font(.system(size: 17, weight: .semibold))
+                    .font(.system(size: 15, weight: .semibold))
                     .foregroundStyle(isHidden ? .secondary : accentColor)
-                    .frame(width: 34, height: 34)
+                    .frame(width: 30, height: 30)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .accessibilityLabel(isHidden ? "Show \(title)" : "Hide \(title)")
-
-            Image(systemName: "line.3.horizontal")
-                .font(.system(size: 15, weight: .semibold))
-                .foregroundStyle(.secondary)
-                .padding(.leading, 2)
         }
-        .padding(.vertical, 12)
-        .padding(.horizontal, 16)
+        .padding(.vertical, 11)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .liquidGlass(cornerRadius: 20)
-        .opacity(isDragging ? 0.4 : 1.0)
-        .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
     }
 }
 
@@ -1646,7 +1574,16 @@ struct AboutLinkButton: View {
 }
 
 struct AttributionFooter: View {
-    private let providers = AttributionProvider.all
+    @AppStorage("Vestigo.showCinemas") private var showCinemas = false
+
+    private var providers: [AttributionProvider] {
+        var list = AttributionProvider.all
+        if showCinemas {
+            let wikimediaIndex = list.firstIndex(where: { $0.id == "wikimedia" }) ?? list.endIndex
+            list.insert(AttributionProvider.amc, at: wikimediaIndex)
+        }
+        return list
+    }
 
     var body: some View {
         VStack(alignment: .center, spacing: 12) {
@@ -1842,6 +1779,18 @@ struct AttributionProvider: Identifiable {
             logoText: nil
         )
     ]
+
+    static let amc = AttributionProvider(
+        id: "amc",
+        name: "AMC Theatres",
+        shortLabel: "AMC",
+        description: "Cinema showtimes and theatre locations are provided by AMC Theatres.",
+        url: URL(string: "https://www.amctheatres.com/")!,
+        logoURL: nil,
+        logoAssetName: "AMCLogo",
+        logoText: nil,
+        logoHeight: 28
+    )
 }
 
 // MARK: - Streaming Services Setup Sheet
@@ -1863,13 +1812,9 @@ struct StreamingServicesSetupSheet: View {
                         .font(.title2.bold())
                     Spacer()
                     if isOnboarding {
-                        HStack(spacing: 16) {
-                            Button("Skip") { model.completeStreamingSetup() }
-                                .foregroundStyle(.secondary)
-                            Button("Done") { model.completeStreamingSetup() }
-                                .fontWeight(.semibold)
-                                .foregroundStyle(model.settings.accentColor)
-                        }
+                        Button("Done") { model.completeStreamingSetup() }
+                            .fontWeight(.semibold)
+                            .foregroundStyle(model.settings.accentColor)
                     }
                 }
 
@@ -1904,7 +1849,7 @@ struct StreamingServicesSetupSheet: View {
     }
 }
 
-private struct StreamingServicesPicker: View {
+struct StreamingServicesPicker: View {
     @ObservedObject var model: VestigoModel
 
     private let columns = Array(repeating: GridItem(.flexible(), spacing: 16), count: 3)
@@ -1955,7 +1900,7 @@ private struct StreamingServicesPicker: View {
     }
 }
 
-private struct ServiceIconButton: View {
+struct ServiceIconButton: View {
     let service: KnownStreamingService
     let isSelected: Bool
     let accentColor: Color
@@ -2436,7 +2381,7 @@ private struct DevToolsPanel: View {
             // MARK: Features
             devSectionLabel("Features")
 
-            Toggle("Show cinema showtimes", isOn: Binding(
+            Toggle("Show cinema showtimes (beta)", isOn: Binding(
                 get: { UserDefaults.standard.bool(forKey: "Vestigo.showCinemas") },
                 set: { UserDefaults.standard.set($0, forKey: "Vestigo.showCinemas") }
             ))

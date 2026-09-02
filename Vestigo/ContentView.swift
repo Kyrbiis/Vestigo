@@ -37,10 +37,10 @@ struct ContentView: View {
         switch type {
         case "openWatchlist": model.selectTab(.watchlist)
         case "openSearch": model.selectTab(.search)
-        case "openForYou": model.selectTab(.forYou)
+        case "openForYou": model.selectTab(.home)
         case "openPickForMe":
-            model.selectTab(.forYou)
-            model.pendingPickForMe = true
+            model.selectTab(.search)
+            model.searchPath = [.pickForMe]
         default: break
         }
     }
@@ -59,12 +59,6 @@ struct ContentView: View {
                 }
                 .tag(AppTab.search)
             
-            AppTabRoot(tab: .forYou, model: model)
-                .tabItem {
-                    Label(AppTab.forYou.title, systemImage: AppTab.forYou.icon)
-                }
-                .tag(AppTab.forYou)
-
             AppTabRoot(tab: .watchlist, model: model)
                 .tabItem {
                     Label(AppTab.watchlist.title, systemImage: AppTab.watchlist.icon)
@@ -76,6 +70,12 @@ struct ContentView: View {
                     Label(AppTab.collections.title, systemImage: AppTab.collections.icon)
                 }
                 .tag(AppTab.collections)
+
+            AppTabRoot(tab: .friends, model: model)
+                .tabItem {
+                    Label(AppTab.friends.title, systemImage: AppTab.friends.icon)
+                }
+                .tag(AppTab.friends)
         }
         .tint(model.settings.accentColor)
         #if os(iOS)
@@ -112,6 +112,29 @@ struct ContentView: View {
             Button("OK", role: .cancel) { }
         } message: {
             Text("Your OMDb API key has made \(model.settings.omdbDailyRequestCount.formatted()) requests today, reaching its daily limit. IMDb and Rotten Tomato ratings will not load until midnight. You can view or change your key tier from the OMDb website.")
+        }
+        .onOpenURL { url in
+            guard url.scheme == "vestigo",
+                  url.host == "friend",
+                  let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+                  let id = components.queryItems?.first(where: { $0.name == "id" })?.value
+            else { return }
+            Task { await model.handleFriendLink(inviteID: id) }
+        }
+        .alert(
+            "Add Friend",
+            isPresented: Binding(get: { model.pendingFriendAdd != nil }, set: { if !$0 { model.pendingFriendAdd = nil } })
+        ) {
+            Button("Add") {
+                if let pending = model.pendingFriendAdd {
+                    model.addFriend(recordID: pending.id)
+                }
+            }
+            Button("Cancel", role: .cancel) { model.pendingFriendAdd = nil }
+        } message: {
+            if let pending = model.pendingFriendAdd {
+                Text("Add \(pending.name) as a friend on Vestigo? You'll see their profile and what they're watching.")
+            }
         }
     }
 }
@@ -193,9 +216,15 @@ private struct AppTabRoot: View {
                     NavigationStack(path: $model.homePath) {
                         HomeView(model: model)
                             .background(AppBackground(settings: model.settings).ignoresSafeArea())
-                            .navigationDestination(for: SectionRoute.self) { route in
-                                FullSectionView(route: route, model: model)
-                                    .background(AppBackground(settings: model.settings).ignoresSafeArea())
+                            .navigationDestination(for: HomeRoute.self) { route in
+                                switch route {
+                                case .section(let sectionRoute):
+                                    FullSectionView(route: sectionRoute, model: model)
+                                        .background(AppBackground(settings: model.settings).ignoresSafeArea())
+                                case .forYouSection(let section):
+                                    FullMediaListView(title: section.title, items: section.items, model: model)
+                                        .background(AppBackground(settings: model.settings).ignoresSafeArea())
+                                }
                             }
                     }
                     .scrollContentBackground(.hidden)
@@ -221,6 +250,9 @@ private struct AppTabRoot: View {
                                 case .chart(let kind):
                                     ChartResultsView(kind: kind, model: model)
                                         .background(AppBackground(settings: model.settings).ignoresSafeArea())
+                                case .pickForMe:
+                                    PickForMeView(model: model, startingFilter: model.mediaFilter)
+                                        .background(AppBackground(settings: model.settings).ignoresSafeArea())
                                 }
                             }
                     }
@@ -231,8 +263,8 @@ private struct AppTabRoot: View {
                     .background(Color.clear)
                 }
                 
-            case .forYou:
-                ForYouView(model: model)
+            case .friends:
+                FriendsView(model: model)
 
             case .watchlist:
                 WatchlistView(model: model)

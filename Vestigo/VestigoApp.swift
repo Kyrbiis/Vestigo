@@ -154,6 +154,7 @@ struct VestigoApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView()
+                .autocorrectionDisabled()
         }
     }
 }

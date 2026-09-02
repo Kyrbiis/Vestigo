@@ -28,6 +28,7 @@ struct DetailView: View {
     @State private var selectedNestedItem: MediaItem?
     @State private var isPosterPreviewPresented = false
     @State private var showWatchedDatePopover = false
+    @State private var showingFriendRating = true
     #if canImport(CoreLocation)
     @StateObject private var cinemaService = CinemaSearchService()
     @State private var cinemaSelectedDate: Date = Calendar.current.startOfDay(for: Date())
@@ -48,6 +49,21 @@ struct DetailView: View {
         }
     }
     private var relatedMediaSections: [RelatedMediaSection] { model.relatedMediaCache[item.key] ?? [] }
+
+    private enum ProviderAvailability { case available, paidOnly, unavailable }
+
+    private var providerAvailability: ProviderAvailability? {
+        let subscribed = model.settings.subscribedServiceNames
+        guard !subscribed.isEmpty, let options = providers else { return nil }
+        let hasFree = options.contains {
+            ["subscription", "sub", "free"].contains($0.type.lowercased()) && $0.isSubscribed(in: subscribed)
+        }
+        if hasFree { return .available }
+        let hasPaid = options.contains {
+            ["rent", "buy", "addon"].contains($0.type.lowercased()) && $0.isSubscribed(in: subscribed)
+        }
+        return hasPaid ? .paidOnly : .unavailable
+    }
     private var externalRatings: ExternalRatings? { model.externalRatingsCache[item.key] }
     
     private var selectedPersonBinding: Binding<PersonSummary?> {
@@ -67,10 +83,11 @@ struct DetailView: View {
             }
             .animation(.easeInOut(duration: 0.18), value: isPosterPreviewPresented)
             .favouriteReplacementOverlay(model: model)
-            .ratingPromptOverlay(model: model, suppressedItemKey: item.key)
+            .ratingPromptOverlay(model: model, suppressedItemKey: model.friendDetailContext == nil ? item.key : nil)
             .presentationBackground(.clear)
             .presentationCornerRadius(54)
             .task { await model.loadDetail(item) }
+            .onDisappear { model.friendDetailContext = nil }
             .sheet(isPresented: $showCollections) {
                 AddToCollectionSheet(item: item, model: model)
             }
@@ -107,6 +124,7 @@ struct DetailView: View {
             VStack(alignment: .leading, spacing: 18) {
                 headerSection
                 ratingSection
+                providerAvailabilityNote
                 detailButtons
                 overviewSection
                 actionSection
@@ -245,45 +263,131 @@ struct DetailView: View {
         }
     }
     
-    private var detailButtons: some View {
-        HStack(spacing: 10) {
-            DetailRowButton(
-                title: model.library.isInWatchlist(item.key) ? "Saved" : "Save",
-                systemName: model.library.isInWatchlist(item.key) ? "bookmark.fill" : "bookmark"
-            ) {
-                model.toggleWatchlist(item)
-            }
-            
-            if item.isUpcoming {
-                DetailRowButton(
-                    title: model.hasCalendarEvent(for: item) ? "In Calendar" : "Calendar",
-                    systemName: model.hasCalendarEvent(for: item) ? "calendar.badge.checkmark" : "calendar.badge.plus"
-                ) {
-                    model.addReleaseToCalendar(item)
-                }
-            } else {
-                DetailRowButton(
-                    title: "Watched",
-                    systemName: model.library.isWatched(item.key) ? "checkmark.circle.fill" : "checkmark.circle"
-                ) {
-                    model.toggleWatched(item, showsRatingPrompt: false)
-                }
-
-                DetailRowButton(
-                    title: "Favourite",
-                    systemName: model.library.isFavourite(item) ? "star.fill" : "star",
-                    isEnabled: model.library.isWatched(item.key)
-                ) {
-                    model.requestToggleFavourite(item)
-                }
-            }
+    @ViewBuilder private var providerAvailabilityNote: some View {
+        switch providerAvailability {
+        case .unavailable:
+            Text("Not available on any of your streaming services. You can update your services in Content Settings.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        case .paidOnly:
+            Text("Only available to rent or buy on your services. You can update your services in Content Settings.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        case .available, .none:
+            EmptyView()
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .clipped()
+    }
+
+    @ViewBuilder private var detailButtons: some View {
+        if showingFriendRating, let friend = model.friendDetailContext {
+            let friendWatched = friend.watchedItems.contains { $0.key == item.key }
+            let friendSaved = friend.watchlistItems.contains { $0.key == item.key }
+            let friendFav = friend.favouriteKeys.contains(item.key.stableID)
+            HStack(spacing: 10) {
+                DetailRowButton(
+                    title: friendSaved ? "Saved" : "Not saved",
+                    systemName: friendSaved ? "bookmark.fill" : "bookmark",
+                    isEnabled: false,
+                    tint: .blue
+                ) {}
+                if !item.isUpcoming {
+                    DetailRowButton(
+                        title: friendWatched ? "Watched" : "Not watched",
+                        systemName: friendWatched ? "checkmark.circle.fill" : "checkmark.circle",
+                        isEnabled: false,
+                        tint: .blue
+                    ) {}
+                    DetailRowButton(
+                        title: "Favourite",
+                        systemName: friendFav ? "star.fill" : "star",
+                        isEnabled: false,
+                        tint: .blue
+                    ) {}
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .clipped()
+        } else {
+            HStack(spacing: 10) {
+                DetailRowButton(
+                    title: model.library.isInWatchlist(item.key) ? "Saved" : "Save",
+                    systemName: model.library.isInWatchlist(item.key) ? "bookmark.fill" : "bookmark"
+                ) {
+                    model.toggleWatchlist(item)
+                }
+                if item.isUpcoming {
+                    DetailRowButton(
+                        title: model.hasCalendarEvent(for: item) ? "In Calendar" : "Calendar",
+                        systemName: model.hasCalendarEvent(for: item) ? "calendar.badge.checkmark" : "calendar.badge.plus"
+                    ) {
+                        model.addReleaseToCalendar(item)
+                    }
+                } else {
+                    DetailRowButton(
+                        title: "Watched",
+                        systemName: model.library.isWatched(item.key) ? "checkmark.circle.fill" : "checkmark.circle"
+                    ) {
+                        model.toggleWatched(item, showsRatingPrompt: model.friendDetailContext != nil)
+                    }
+                    DetailRowButton(
+                        title: "Favourite",
+                        systemName: model.library.isFavourite(item) ? "star.fill" : "star",
+                        isEnabled: model.library.isWatched(item.key)
+                    ) {
+                        model.requestToggleFavourite(item)
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .clipped()
+        }
     }
     
     @ViewBuilder private var ratingSection: some View {
-        if model.library.isWatched(item.key) {
+        if let friend = model.friendDetailContext {
+            HStack(alignment: .center, spacing: 10) {
+                if showingFriendRating {
+                    if let friendRating = friend.ratings[item.key], friendRating > 0 {
+                        StarRatingView(rating: .constant(friendRating), tint: .blue, isReadOnly: true)
+                    } else {
+                        Text("Not rated")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 12)
+                            .frame(height: 44)
+                            .liquidGlass(cornerRadius: 22)
+                    }
+                } else {
+                    if model.library.isWatched(item.key) {
+                        StarRatingView(rating: Binding(
+                            get: { model.library.ratings[item.key] ?? 0 },
+                            set: { model.setRating($0, for: item) }
+                        ))
+                    } else {
+                        Text("Not watched")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 12)
+                            .frame(height: 44)
+                            .liquidGlass(cornerRadius: 22)
+                    }
+                }
+                Spacer()
+                let firstName = friend.name.components(separatedBy: " ").first ?? friend.name
+                Button {
+                    withAnimation(.easeInOut(duration: 0.15)) { showingFriendRating.toggle() }
+                } label: {
+                    Label(showingFriendRating ? "\(firstName)'s" : "Yours",
+                          systemImage: showingFriendRating ? "person.fill" : "person")
+                        .font(.caption.bold())
+                        .foregroundStyle(showingFriendRating ? Color.blue : Color.yellow)
+                        .padding(.horizontal, 10)
+                        .frame(height: 32)
+                        .liquidGlass(cornerRadius: 16)
+                }
+                .buttonStyle(.plain)
+            }
+        } else if model.library.isWatched(item.key) {
             HStack(alignment: .center) {
                 StarRatingView(rating: Binding(
                     get: { model.library.ratings[item.key] ?? 0 },
@@ -309,7 +413,11 @@ struct DetailView: View {
                         date: Binding(
                             get: { model.library.watchedDates[item.key] ?? .now },
                             set: { model.setWatchedDate($0, for: item) }
-                        )
+                        ),
+                        onClear: model.library.watchedDates[item.key] != nil ? {
+                            model.clearWatchedDate(for: item)
+                            showWatchedDatePopover = false
+                        } : nil
                     )
                     .presentationCompactAdaptation(.popover)
                 }
@@ -344,9 +452,10 @@ struct DetailView: View {
             DetailRowButton(title: "Cast list", systemName: "person.2.fill") {
                 showCast.toggle()
             }
-            
-            DetailRowButton(title: "Add to collection", systemName: "folder.badge.plus") {
-                showCollections = true
+            if !showingFriendRating || model.friendDetailContext == nil {
+                DetailRowButton(title: "Add to collection", systemName: "folder.badge.plus") {
+                    showCollections = true
+                }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -362,23 +471,21 @@ struct DetailView: View {
         let title: String
         let systemName: String
         var isEnabled = true
+        var tint: Color? = nil
         let action: () -> Void
-        
+
         var body: some View {
             Button {
-                if isEnabled {
-                    action()
-                }
+                if isEnabled { action() }
             } label: {
                 Label(title, systemImage: systemName)
                     .font(.subheadline.bold())
                     .lineLimit(1)
                     .minimumScaleFactor(0.68)
-                    .foregroundStyle(isEnabled ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary.opacity(0.55)))
+                    .foregroundStyle(tint.map { AnyShapeStyle($0) } ?? (isEnabled ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary.opacity(0.55))))
                     .frame(maxWidth: .infinity)
                     .frame(height: 44)
                     .liquidGlass(cornerRadius: 22)
-                    .opacity(isEnabled ? 1.0 : 0.42)
                     .contentShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
             }
             .buttonStyle(.plain)
@@ -394,7 +501,10 @@ struct DetailView: View {
     
     @ViewBuilder private var episodeSection: some View {
         if item.kind == .tv {
-            EpisodeProgressView(show: item, model: model, seasons: detail?.seasons ?? [], isLoading: detail == nil)
+            let friendMode: Bool? = (showingFriendRating && model.friendDetailContext != nil)
+                ? model.friendDetailContext!.watchedItems.contains { $0.key == item.key }
+                : nil
+            EpisodeProgressView(show: item, model: model, seasons: detail?.seasons ?? [], isLoading: detail == nil, friendMode: friendMode)
         }
     }
     
@@ -513,12 +623,22 @@ struct DetailView: View {
 
 private struct WatchedDatePopover: View {
     @Binding var date: Date
+    var onClear: (() -> Void)? = nil
 
     var body: some View {
         VStack(spacing: 0) {
             DatePicker("Watched on", selection: $date, displayedComponents: .date)
                 .datePickerStyle(.graphical)
                 .padding()
+            if let onClear {
+                Divider()
+                Button(role: .destructive, action: onClear) {
+                    Text("Clear date")
+                        .font(.subheadline)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 12)
+                }
+            }
         }
         .frame(width: 320)
     }
@@ -1313,15 +1433,16 @@ struct EpisodeProgressView: View {
     @ObservedObject var model: VestigoModel
     let seasons: [SeasonInfo]
     let isLoading: Bool
+    var friendMode: Bool? = nil
     @State private var expandedSeasonNumbers = Set<Int>()
-    
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Episodes")
                 .sectionTitle()
-            
+
             let usableSeasons = seasons.filter { $0.number > 0 }
-            
+
             if isLoading {
                 LoadingBubble(title: "Loading episodes", text: "Fetching season and episode data from TMDb.")
             } else if usableSeasons.isEmpty {
@@ -1333,7 +1454,8 @@ struct EpisodeProgressView: View {
                             show: show,
                             season: season,
                             isExpanded: expandedSeasonNumbers.contains(season.number),
-                            model: model
+                            model: model,
+                            friendMode: friendMode
                         ) {
                             withAnimation(.smooth(duration: 0.22)) {
                                 if expandedSeasonNumbers.contains(season.number) {
@@ -1355,6 +1477,7 @@ struct SeasonDropdownView: View {
     let season: SeasonInfo
     let isExpanded: Bool
     @ObservedObject var model: VestigoModel
+    var friendMode: Bool? = nil
     let toggle: () -> Void
     
     var body: some View {
@@ -1377,19 +1500,21 @@ struct SeasonDropdownView: View {
                     
                     Spacer()
 
-                    Button(isSeasonWatched ? "Unwatch" : "Mark") {
-                        model.markSeason(
-                            show: show,
-                            season: season.number,
-                            episodeCount: max(season.episodeCount, season.episodes.count),
-                            watched: !isSeasonWatched
-                        )
+                    if friendMode == nil && (!hasUnairedEpisodes || isSeasonWatched) {
+                        Button(isSeasonWatched ? "Unwatch" : "Mark") {
+                            model.markSeason(
+                                show: show,
+                                season: season.number,
+                                episodeCount: max(season.episodeCount, season.episodes.count),
+                                watched: !isSeasonWatched
+                            )
+                        }
+                        .font(.caption.bold())
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
+                        .buttonStyle(.bordered)
+                        .clipShape(Capsule())
                     }
-                    .font(.caption.bold())
-                    .lineLimit(1)
-                    .fixedSize(horizontal: true, vertical: false)
-                    .buttonStyle(.bordered)
-                    .clipShape(Capsule())
                     
                     Image(systemName: "chevron.down")
                         .font(.caption.bold())
@@ -1408,7 +1533,7 @@ struct SeasonDropdownView: View {
                 
                 VStack(spacing: 8) {
                     ForEach(episodeRows) { episode in
-                        EpisodeRowView(show: show, seasonNumber: season.number, episode: episode, model: model)
+                        EpisodeRowView(show: show, seasonNumber: season.number, episode: episode, model: model, friendMode: friendMode)
                     }
                 }
                 .padding(12)
@@ -1422,11 +1547,16 @@ struct SeasonDropdownView: View {
     }
     
     private var isSeasonWatched: Bool {
+        if let fm = friendMode { return fm }
         let rows = episodeRows
         guard !rows.isEmpty else { return false }
         return rows.allSatisfy {
             model.library.isEpisodeWatched(showKey: show.key, season: season.number, episode: $0.number)
         }
+    }
+
+    private var hasUnairedEpisodes: Bool {
+        episodeRows.contains { $0.isUpcoming }
     }
     
     private var episodeRows: [EpisodeInfo] {
@@ -1446,6 +1576,7 @@ struct EpisodeRowView: View {
     let seasonNumber: Int
     let episode: EpisodeInfo
     @ObservedObject var model: VestigoModel
+    var friendMode: Bool? = nil
     
     var body: some View {
         Button {
@@ -1469,16 +1600,18 @@ struct EpisodeRowView: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
 
-                Image(systemName: episode.isUpcoming ? "clock" : (isWatched ? "checkmark.circle.fill" : "circle"))
+                Image(systemName: friendMode != nil
+                    ? (friendMode! ? "checkmark.circle.fill" : "circle")
+                    : (episode.isUpcoming ? "clock" : (isWatched ? "checkmark.circle.fill" : "circle")))
                     .font(.title3.bold())
-                    .foregroundStyle(episode.isUpcoming ? AnyShapeStyle(.tertiary) : (isWatched ? AnyShapeStyle(model.settings.accentColor) : AnyShapeStyle(.secondary)))
+                    .foregroundStyle(friendMode != nil ? AnyShapeStyle(Color.blue) : (episode.isUpcoming ? AnyShapeStyle(.tertiary) : (isWatched ? AnyShapeStyle(model.settings.accentColor) : AnyShapeStyle(.secondary))))
             }
             .padding(10)
             .background(.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .disabled(episode.isUpcoming)
+        .disabled(friendMode != nil || episode.isUpcoming)
     }
     
     private var isWatched: Bool {

@@ -26,7 +26,9 @@ struct PickForMeView: View {
     @State private var isReviewingAnswers = false
     @State private var isEditingAnswerFromReview = false
     @State private var showingInfoSheet = false
+    @State private var showServicesSheet = false
     @State private var scrollToBottomToken = UUID()
+    @AppStorage("Vestigo.devMode") private var devMode: Bool = false
 
     private var steps: [PickForMeStep] {
         PickForMeStep.steps(for: answers)
@@ -168,6 +170,39 @@ struct PickForMeView: View {
                 step = max(steps.count - 1, 0)
             }
         }
+        .sheet(isPresented: $showServicesSheet) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 24) {
+                    HStack {
+                        Text("Streaming Services")
+                            .font(.title2.bold())
+                        Spacer()
+                        Button("Done") { showServicesSheet = false }
+                            .fontWeight(.semibold)
+                    }
+                    StreamingServicesPicker(model: model)
+                }
+                .padding(18)
+                .padding(.bottom, 110)
+            }
+            .scrollClipDisabled()
+            .scrollDismissesKeyboard(.immediately)
+            .scrollIndicators(.hidden)
+            .safeAreaInset(edge: .top, spacing: 0) {
+                Capsule()
+                    .fill(.white.opacity(0.46))
+                    .frame(width: 48, height: 5)
+                    .frame(maxWidth: .infinity)
+                    .padding(.top, 12)
+                    .padding(.bottom, 8)
+                    .background(.clear)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            .sheetLiquidGlass(cornerRadius: 48)
+            .ignoresSafeArea(edges: .bottom)
+            .presentationBackground(.clear)
+            .presentationCornerRadius(54)
+        }
     }
 
     @ViewBuilder private var mainContent: some View {
@@ -226,7 +261,7 @@ struct PickForMeView: View {
                 .font(.title2.bold())
                 .frame(maxWidth: .infinity, alignment: .leading)
 
-            if let subtitle = currentStep.subtitle {
+            if let subtitle = devMode ? currentStep.subtitle : currentStep.userSubtitle {
                 Text(subtitle)
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
@@ -396,7 +431,7 @@ struct PickForMeView: View {
         case .genrePreferences:
             multiChoiceList(PickForMeGenrePreference.allCases, selection: $answers.genrePreferences)
         case .fictionPreference:
-            singleChoiceList(PickForMeFictionPreference.allCases, selection: $answers.fictionPreference)
+            fictionChoiceList(selection: $answers.fictionPreference)
         case .sourceMaterial:
             singleChoiceList(PickForMeSourceMaterial.allCases, selection: $answers.sourceMaterial)
         case .runtime:
@@ -409,6 +444,8 @@ struct PickForMeView: View {
             singleChoiceList(PickForMeMinimumRating.allCases, selection: $answers.minimumRating)
         case .dealBreakers:
             multiChoiceList(dealBreakerOptions, selection: $answers.dealBreakers)
+        case .myServicesOnly:
+            myServicesOnlyOptions
         }
     }
 
@@ -667,6 +704,33 @@ struct PickForMeView: View {
         }
     }
 
+    @ViewBuilder private var myServicesOnlyOptions: some View {
+        VStack(spacing: 12) {
+            Button {
+                showServicesSheet = true
+            } label: {
+                Label("Edit Streaming Services", systemImage: "play.circle")
+                    .font(.subheadline.bold())
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 44)
+                    .liquidGlass(cornerRadius: 22)
+            }
+            .buttonStyle(.plain)
+
+            Text("Results will only include items available on your configured streaming services. Make sure your services are correct before enabling this.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 4)
+
+            PickForMeOptionButton(title: "My services only", subtitle: nil, isSelected: answers.myServicesOnly == true) {
+                answers.myServicesOnly = true
+            }
+            PickForMeOptionButton(title: "No preference", subtitle: nil, isSelected: answers.myServicesOnly == false) {
+                answers.myServicesOnly = false
+            }
+        }
+    }
+
     private var hasEnoughDataForSurprise: Bool {
         model.library.watchedItems.count >= 3
     }
@@ -699,6 +763,19 @@ struct PickForMeView: View {
                 selection.wrappedValue = selection.wrappedValue == .both ? nil : .both
                 pruneAgeRatingsForCurrentFormat()
                 errorText = nil
+            }
+        }
+    }
+
+    private func fictionChoiceList(selection: Binding<PickForMeFictionPreference?>) -> some View {
+        VStack(spacing: 10) {
+            ForEach(PickForMeFictionPreference.allCases) { option in
+                let sub = devMode ? option.subtitle : option.userSubtitle
+                PickForMeOptionButton(title: option.title, subtitle: sub, isSelected: selection.wrappedValue == option) {
+                    selection.wrappedValue = selection.wrappedValue == option ? nil : option
+                    errorText = nil
+                    if selection.wrappedValue != nil { scrollToBottomToken = UUID() }
+                }
             }
         }
     }
@@ -836,6 +913,8 @@ struct PickForMeView: View {
             answers.minimumRating = nil
         case .dealBreakers:
             answers.dealBreakers = []
+        case .myServicesOnly:
+            answers.myServicesOnly = nil
         }
 
         errorText = nil
@@ -916,7 +995,7 @@ struct PickForMeView: View {
     private func answerSummary(for reviewStep: PickForMeStep) -> String {
         switch reviewStep {
         case .format:
-            return answers.mediaFormat?.title ?? "Not answered"
+            return answers.mediaFormat?.title ?? "No preference"
         case .archetype:
             return optionTitles(answers.archetypes)
         case .secondaryArchetypes:
@@ -924,24 +1003,26 @@ struct PickForMeView: View {
         case .genrePreferences:
             return optionTitles(answers.genrePreferences)
         case .fictionPreference:
-            return answers.fictionPreference?.title ?? "Not answered"
+            return answers.fictionPreference?.title ?? "No preference"
         case .sourceMaterial:
-            return answers.sourceMaterial?.title ?? "Not answered"
+            return answers.sourceMaterial?.title ?? "No preference"
         case .runtime:
-            return answers.runtimeRange.hasConstraint ? answers.runtimeRange.displayString : "Not answered"
+            return answers.runtimeRange.hasConstraint ? answers.runtimeRange.displayString : "No preference"
         case .releaseAge:
-            return answers.releaseAge?.title ?? "Not answered"
+            return answers.releaseAge?.title ?? "No preference"
         case .ageRating:
             return optionTitles(answers.contentRatings)
         case .minimumRating:
-            return answers.minimumRating?.title ?? "Not answered"
+            return answers.minimumRating?.title ?? "No preference"
         case .dealBreakers:
             return optionTitles(answers.dealBreakers)
+        case .myServicesOnly:
+            return answers.myServicesOnly == true ? "My services only" : "No preference"
         }
     }
 
     private func optionTitles<Option: PickForMeOption>(_ options: Set<Option>) -> String {
-        guard !options.isEmpty else { return "Not answered" }
+        guard !options.isEmpty else { return "No preference" }
         return options
             .map(\.title)
             .sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
@@ -1035,6 +1116,8 @@ struct PickForMeView: View {
             return answers.minimumRating != nil
         case .dealBreakers:
             return !answers.dealBreakers.isEmpty
+        case .myServicesOnly:
+            return true
         }
     }
 }
@@ -1188,8 +1271,12 @@ private struct RuntimeRangeSlider: View {
     @Binding var range: PickForMeRuntimeRange
     let accentColor: Color
 
+    @State private var draggingLeft: Bool? = nil
+    @State private var isDragging = false
+
     private let steps = PickForMeRuntimeRange.steps
-    private let handleSize: CGFloat = 28
+    private let handleWidth: CGFloat = 36
+    private let handleHeight: CGFloat = 24
 
     private var leftIndex: Int {
         steps.firstIndex(of: range.minMinutes) ?? 0
@@ -1213,54 +1300,67 @@ private struct RuntimeRangeSlider: View {
     var body: some View {
         VStack(spacing: 14) {
             GeometryReader { geo in
-                let trackWidth = geo.size.width - handleSize
+                let trackWidth = geo.size.width - handleWidth
 
                 ZStack(alignment: .leading) {
                     Capsule()
                         .fill(.white.opacity(0.15))
                         .frame(height: 5)
-                        .padding(.horizontal, handleSize / 2)
+                        .padding(.horizontal, handleWidth / 2)
 
                     let lx = xForIndex(leftIndex, trackWidth: trackWidth)
                     let rx = xForIndex(rightIndex, trackWidth: trackWidth)
                     Capsule()
                         .fill(accentColor)
                         .frame(width: max(0, rx - lx), height: 5)
-                        .offset(x: lx + handleSize / 2)
+                        .offset(x: lx + handleWidth / 2)
 
-                    Circle()
+                    Capsule()
                         .fill(.white)
-                        .frame(width: handleSize, height: handleSize)
+                        .frame(width: handleWidth, height: handleHeight)
                         .shadow(color: .black.opacity(0.2), radius: 4, x: 0, y: 2)
+                        .scaleEffect(isDragging && draggingLeft == true ? 0.88 : 1.0)
                         .offset(x: xForIndex(leftIndex, trackWidth: trackWidth))
-                        .gesture(
-                            DragGesture(coordinateSpace: .named("runtime_slider"))
-                                .onChanged { value in
-                                    let newIndex = indexForX(value.location.x - handleSize / 2, trackWidth: trackWidth)
-                                    let clamped = max(0, min(newIndex, rightIndex))
-                                    range = PickForMeRuntimeRange(minMinutes: steps[clamped], maxMinutes: range.maxMinutes)
-                                }
-                        )
+                        .allowsHitTesting(false)
 
-                    Circle()
+                    Capsule()
                         .fill(.white)
-                        .frame(width: handleSize, height: handleSize)
+                        .frame(width: handleWidth, height: handleHeight)
                         .shadow(color: .black.opacity(0.2), radius: 4, x: 0, y: 2)
+                        .scaleEffect(isDragging && draggingLeft == false ? 0.88 : 1.0)
                         .offset(x: xForIndex(rightIndex, trackWidth: trackWidth))
-                        .gesture(
-                            DragGesture(coordinateSpace: .named("runtime_slider"))
-                                .onChanged { value in
-                                    let newIndex = indexForX(value.location.x - handleSize / 2, trackWidth: trackWidth)
-                                    let clamped = max(leftIndex, min(newIndex, steps.count - 1))
-                                    let newMax = clamped == steps.count - 1 ? 0 : steps[clamped]
-                                    range = PickForMeRuntimeRange(minMinutes: range.minMinutes, maxMinutes: newMax)
-                                }
-                        )
+                        .allowsHitTesting(false)
                 }
-                .frame(height: handleSize)
+                .frame(height: handleHeight)
                 .coordinateSpace(name: "runtime_slider")
+                .contentShape(Rectangle())
+                .gesture(
+                    DragGesture(coordinateSpace: .named("runtime_slider"))
+                        .onChanged { value in
+                            let x = value.location.x - handleWidth / 2
+                            if draggingLeft == nil {
+                                let leftX = xForIndex(leftIndex, trackWidth: trackWidth)
+                                let rightX = xForIndex(rightIndex, trackWidth: trackWidth)
+                                draggingLeft = abs(x - leftX) <= abs(x - rightX)
+                                withAnimation(.spring(response: 0.2, dampingFraction: 0.6)) { isDragging = true }
+                            }
+                            let newIndex = indexForX(x, trackWidth: trackWidth)
+                            if draggingLeft == true {
+                                let clamped = max(0, min(newIndex, rightIndex - 1))
+                                range = PickForMeRuntimeRange(minMinutes: steps[clamped], maxMinutes: range.maxMinutes)
+                            } else {
+                                let clamped = max(leftIndex + 1, min(newIndex, steps.count - 1))
+                                let newMax = clamped == steps.count - 1 ? 0 : steps[clamped]
+                                range = PickForMeRuntimeRange(minMinutes: range.minMinutes, maxMinutes: newMax)
+                            }
+                        }
+                        .onEnded { _ in
+                            withAnimation(.spring(response: 0.25, dampingFraction: 0.5)) { isDragging = false }
+                            draggingLeft = nil
+                        }
+                )
             }
-            .frame(height: handleSize)
+            .frame(height: handleHeight)
 
             HStack {
                 VStack(alignment: .leading, spacing: 2) {

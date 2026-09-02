@@ -8,6 +8,7 @@ struct ThematicSearchView: View {
     @State private var results: [ThematicSearchResult] = []
     @State private var isLoading = false
     @State private var hasSearched = false
+    @State private var hasUsedRetry = false
     @State private var errorMessage: String?
     @State private var selectedNestedItem: MediaItem?
     @State private var selectedFilter: MediaFilter = .both
@@ -44,6 +45,16 @@ struct ThematicSearchView: View {
                         StatusBubble(title: "Search failed", text: error)
                     } else if hasSearched && results.isEmpty {
                         StatusBubble(title: "No matches found", text: "Try rewording your description or adding more detail.")
+                        if !hasUsedRetry {
+                            Button(action: { hasUsedRetry = true; performSearch() }) {
+                                Label("Try again", systemImage: "arrow.clockwise")
+                                    .font(.subheadline.bold())
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 12)
+                                    .liquidGlass(cornerRadius: 16)
+                            }
+                            .buttonStyle(.plain)
+                        }
                     } else if hasSearched {
                         resultContent
                     } else {
@@ -74,6 +85,7 @@ struct ThematicSearchView: View {
             DetailView(item: item, model: model)
         }
         .onChange(of: query) { _, newValue in
+            hasUsedRetry = false
             if newValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 hasSearched = false
                 results = []
@@ -256,8 +268,11 @@ struct ThematicSearchView: View {
             do {
                 let fetched = try await model.thematicSearch(query: trimmed, filter: .both)
                 results = fetched
-                model.describeItResultsCache[cacheKey] = fetched
-                model.saveDescribeItRecentSearch(trimmed) // also triggers saveLocalSoon
+                // Only cache successful results so failed queries can be retried
+                if !fetched.isEmpty {
+                    model.describeItResultsCache[cacheKey] = fetched
+                }
+                model.saveDescribeItRecentSearch(trimmed)
                 hasSearched = true
             } catch {
                 errorMessage = error.localizedDescription

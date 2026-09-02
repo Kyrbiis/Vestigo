@@ -167,6 +167,7 @@ struct MediaGridOrList: View {
     @ObservedObject var model: VestigoModel
     var swipeContext: SwipeContext = .none
     var mode: ViewMode = .tile
+    var openItem: ((MediaItem) -> Void)? = nil
     
     var body: some View {
         content
@@ -193,7 +194,7 @@ struct MediaGridOrList: View {
     private var gridContent: some View {
         LazyVGrid(columns: gridColumns, spacing: 18) {
             ForEach(items) { item in
-                MediaTile(item: item, hideWatched: hideWatchedForUpcoming, model: model, swipeContext: swipeContext)
+                MediaTile(item: item, hideWatched: hideWatchedForUpcoming, model: model, openItem: openItem, swipeContext: swipeContext)
             }
         }
     }
@@ -316,12 +317,18 @@ struct MediaTile: View {
                 .frame(width: 148, alignment: .leading)
 
             HStack(spacing: 7) {
-                TileIconButton(systemName: model.library.isInWatchlist(item.key) ? "bookmark.fill" : "bookmark") {
+                TileIconButton(
+                    systemName: model.library.isInWatchlist(item.key) ? "bookmark.fill" : "bookmark",
+                    tint: model.library.isInWatchlist(item.key) ? .white : .secondary
+                ) {
                     model.toggleWatchlist(item)
                 }
 
                 if !hideWatched && !item.isUpcoming {
-                    TileIconButton(systemName: model.library.isWatched(item.key) ? "checkmark.circle.fill" : "checkmark.circle") {
+                    TileIconButton(
+                        systemName: model.library.isWatched(item.key) ? "checkmark.circle.fill" : "checkmark.circle",
+                        tint: model.library.isWatched(item.key) ? .white : .secondary
+                    ) {
                         model.toggleWatched(item)
                     }
                 }
@@ -419,7 +426,7 @@ struct PosterView: View {
             if isFavourite {
                 Image(systemName: "star.fill")
                     .font(.system(size: max(11, width * 0.095), weight: .black))
-                    .foregroundStyle(.yellow)
+                    .foregroundStyle(.white)
                     .padding(max(5, width * 0.045))
                     .background(.black.opacity(0.64), in: Circle())
                     .padding(max(5, width * 0.045))
@@ -748,16 +755,19 @@ struct SortRow<Picker: View>: View {
 
 struct StarRatingView: View {
     @Binding var rating: Double
-    
+    var tint: Color = .yellow
+    var isReadOnly: Bool = false
+
     var body: some View {
         HStack(spacing: 5) {
             ForEach(1...5, id: \.self) { index in
                 Button { rating = nextRating(for: index) } label: {
                     Image(systemName: starName(index))
                         .font(.subheadline)
-                        .foregroundStyle(.yellow)
+                        .foregroundStyle(tint)
                 }
                 .buttonStyle(.plain)
+                .disabled(isReadOnly)
             }
             Text(rating.formatted(.number.precision(.fractionLength(1))))
                 .font(.caption.bold())
@@ -766,8 +776,9 @@ struct StarRatingView: View {
         .padding(.horizontal, 12)
         .frame(height: 44)
         .liquidGlass(cornerRadius: 22)
+        .fixedSize(horizontal: true, vertical: false)
     }
-    
+
     private func starName(_ index: Int) -> String {
         let value = Double(index)
         if rating >= value { return "star.fill" }
@@ -836,12 +847,14 @@ struct DetailActionButton: View {
 
 struct TileIconButton: View {
     let systemName: String
+    var tint: Color = .secondary
     let action: () -> Void
-    
+
     var body: some View {
         Button(action: action) {
             Image(systemName: systemName)
                 .font(.system(size: 14, weight: .bold))
+                .foregroundStyle(tint)
                 .frame(width: 32, height: 28)
                 .liquidGlass(cornerRadius: 14)
         }
@@ -1275,6 +1288,9 @@ final class RemoteImageMemoryCache {
 private struct SwipeToDeleteModifier: ViewModifier {
     let cornerRadius: CGFloat
     let action: () -> Void
+    /// When non-nil, the row holds at threshold on swipe (no auto-fly-off) and snaps
+    /// back whenever this binding is set to true from outside (e.g. on alert cancel).
+    var resetTrigger: Binding<Bool>?
     @State private var offset: CGFloat = 0
     @State private var hasDragged = false
     private let threshold: CGFloat = 72
@@ -1284,7 +1300,6 @@ private struct SwipeToDeleteModifier: ViewModifier {
             if offset < -2 {
                 RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                     .fill(.red)
-                    // Cap at threshold * 1.5 so the ZStack never expands beyond the row width during fly-out
                     .frame(width: min(max(0, -offset), threshold * 1.5))
                     .overlay(alignment: .center) {
                         Image(systemName: "trash.fill")
@@ -1313,20 +1328,37 @@ private struct SwipeToDeleteModifier: ViewModifier {
                 }
                 .onEnded { _ in
                     if offset < -threshold {
-                        withAnimation(.easeIn(duration: 0.16)) { offset = -500 }
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.16) { action() }
+                        if resetTrigger != nil {
+                            // Confirmation mode: hold at threshold, caller resets on cancel
+                            withAnimation(.spring(response: 0.3, dampingFraction: 0.75)) { offset = -threshold }
+                            action()
+                        } else {
+                            // Immediate mode: fly off then execute
+                            withAnimation(.easeIn(duration: 0.16)) { offset = -500 }
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.16) { action() }
+                        }
                     } else {
                         withAnimation(.spring(response: 0.3, dampingFraction: 0.75)) { offset = 0 }
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { hasDragged = false }
                     }
                 }
         )
+        .onChange(of: resetTrigger?.wrappedValue ?? false) { _, shouldReset in
+            guard shouldReset else { return }
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.75)) { offset = 0 }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { hasDragged = false }
+            resetTrigger?.wrappedValue = false
+        }
     }
 }
 
 extension View {
     func swipeToDelete(cornerRadius: CGFloat = 16, action: @escaping () -> Void) -> some View {
         modifier(SwipeToDeleteModifier(cornerRadius: cornerRadius, action: action))
+    }
+
+    func swipeToDelete(cornerRadius: CGFloat = 16, resetTrigger: Binding<Bool>, action: @escaping () -> Void) -> some View {
+        modifier(SwipeToDeleteModifier(cornerRadius: cornerRadius, action: action, resetTrigger: resetTrigger))
     }
 }
 

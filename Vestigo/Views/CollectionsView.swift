@@ -22,6 +22,10 @@ struct CollectionsView: View {
     @State private var newCollectionName = ""
     @State private var collectionToDelete: MediaCollection?
     @State private var showDeleteAlert = false
+    @State private var resetCollectionSwipe = false
+    @State private var collectionToRename: MediaCollection?
+    @State private var showRenameAlert = false
+    @State private var renameText = ""
 
     private enum CollectionsTab: String, CaseIterable {
         case collections = "Collections"
@@ -160,9 +164,24 @@ struct CollectionsView: View {
                                     .id(Self.collectionRowIdentity(for: collection, iconItem: iconItem))
                                 }
                                 .buttonStyle(.plain)
-                                .swipeToDelete(cornerRadius: 22) {
+                                .swipeToDelete(cornerRadius: 22, resetTrigger: $resetCollectionSwipe) {
                                     collectionToDelete = collection
                                     showDeleteAlert = true
+                                }
+                                .contextMenu {
+                                    Button {
+                                        collectionToRename = collection
+                                        renameText = collection.name
+                                        showRenameAlert = true
+                                    } label: {
+                                        Label("Rename", systemImage: "pencil")
+                                    }
+                                    Button(role: .destructive) {
+                                        collectionToDelete = collection
+                                        showDeleteAlert = true
+                                    } label: {
+                                        Label("Delete", systemImage: "trash")
+                                    }
                                 }
                             }
                         }
@@ -243,9 +262,24 @@ struct CollectionsView: View {
                 if let c = collectionToDelete { model.deleteCollection(id: c.id) }
                 collectionToDelete = nil
             }
-            Button("Cancel", role: .cancel) { collectionToDelete = nil }
+            Button("Cancel", role: .cancel) {
+                collectionToDelete = nil
+                resetCollectionSwipe = true
+            }
         } message: {
             Text("This cannot be undone. The collection's contents won't be affected.")
+        }
+        .alert("Rename Collection", isPresented: $showRenameAlert) {
+            TextField("Name", text: $renameText)
+            Button("Rename") {
+                if let c = collectionToRename { model.renameCollection(id: c.id, name: renameText) }
+                collectionToRename = nil
+                renameText = ""
+            }
+            Button("Cancel", role: .cancel) {
+                collectionToRename = nil
+                renameText = ""
+            }
         }
     }
 }
@@ -1304,6 +1338,8 @@ struct CollectionDetailView: View {
     @State private var mode: CollectionDetailMode = .myList
     @State private var isEditing = false
     @State private var selectedKeys = Set<MediaKey>()
+    @State private var showRenameAlert = false
+    @State private var renameText = ""
 
     private var collection: MediaCollection? {
         model.library.collections.first { $0.id == collectionID }
@@ -1355,22 +1391,37 @@ struct CollectionDetailView: View {
             filter: .constant(.both),
             settings: model.settings,
             headerAccessory: AnyView(
-                Button {
+                HStack(spacing: 8) {
                     if isEditing {
-                        isEditing = false
-                        selectedKeys.removeAll()
-                    } else {
-                        isEditing = true
+                        Button {
+                            renameText = collection?.name ?? ""
+                            showRenameAlert = true
+                        } label: {
+                            Image(systemName: "pencil")
+                                .font(.body)
+                                .foregroundStyle(.primary)
+                                .frame(width: 42, height: 42)
+                                .liquidGlass(cornerRadius: 21)
+                        }
+                        .buttonStyle(.plain)
                     }
-                } label: {
-                    Text(isEditing ? "Cancel" : "Edit")
-                        .font(.body)
-                        .foregroundStyle(.primary)
-                        .padding(.horizontal, 14)
-                        .frame(height: 42)
-                        .liquidGlass(cornerRadius: 21)
+                    Button {
+                        if isEditing {
+                            isEditing = false
+                            selectedKeys.removeAll()
+                        } else {
+                            isEditing = true
+                        }
+                    } label: {
+                        Text(isEditing ? "Cancel" : "Edit")
+                            .font(.body)
+                            .foregroundStyle(.primary)
+                            .padding(.horizontal, 14)
+                            .frame(height: 42)
+                            .liquidGlass(cornerRadius: 21)
+                    }
+                    .buttonStyle(.plain)
                 }
-                .buttonStyle(.plain)
             ),
             onRefresh: {
                 await model.loadCollectionRecommendations(for: collectionID)
@@ -1433,6 +1484,14 @@ struct CollectionDetailView: View {
             if mode == .recommended {
                 Task { await model.loadCollectionRecommendations(for: collectionID) }
             }
+        }
+        .alert("Rename Collection", isPresented: $showRenameAlert) {
+            TextField("Name", text: $renameText)
+            Button("Rename") {
+                model.renameCollection(id: collectionID, name: renameText)
+                renameText = ""
+            }
+            Button("Cancel", role: .cancel) { renameText = "" }
         }
     }
 }

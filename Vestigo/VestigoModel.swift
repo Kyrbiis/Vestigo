@@ -5,11 +5,15 @@ import Combine
 import FoundationModels
 #endif
 
+struct PendingFriendAdd {
+    let id: String
+    let name: String
+}
+
 @MainActor
 final class VestigoModel: ObservableObject {
     @Published var selectedTab: AppTab = .home
     @Published var tabTransitionDirection: TabTransitionDirection = .forward
-    @Published var pendingPickForMe = false
     @Published var mediaFilter: MediaFilter = .both
     @Published var homeViewMode: ViewMode = .tile
     @Published var searchViewMode: ViewMode = .tile
@@ -60,9 +64,11 @@ final class VestigoModel: ObservableObject {
     
     @Published var library = UserLibrary()
     @Published var settings = AppSettings()
-    @Published var selectedItem: MediaItem?
+    @Published var selectedItem: MediaItem? {
+        didSet { if let item = selectedItem { recordRecentlyViewed(item) } }
+    }
     @Published var selectedPerson: PersonSummary?
-    @Published var homePath: [SectionRoute] = []
+    @Published var homePath: [HomeRoute] = []
     @Published var searchPath: [SearchRoute] = []
     @Published var isLoading = false
     @Published var errorText: String?
@@ -71,13 +77,22 @@ final class VestigoModel: ObservableObject {
     @Published var showExporter = false
     @Published var pendingFavouriteReplacement: MediaItem?
     @Published var showFavouriteReplacementAlert = false
-    @Published var forYouResetToken = UUID()
+    @Published var friendDetailContext: FriendProfile? = nil
+    @Published var friendsResetToken = UUID()
     @Published var watchlistResetToken = UUID()
     @Published var collectionsResetToken = UUID()
     @Published var imageRefreshToken = 0
     @Published var showStreamingSetup = false
     @Published var calendarEventIDs: [MediaKey: String] = [:]
     @Published var showOMDbLimitAlert = false
+    @Published var friends: [FriendProfile] = []
+    @Published var friendsLoading = false
+    @Published var friendsDiagnostic: String = ""
+    @Published var publishDiagnostic: String = ""
+    @Published var pendingFriendAdd: PendingFriendAdd? = nil
+    @Published var userAvatarData: Data? = nil
+
+    var myInviteURL: String { "vestigo://friend?id=\(settings.socialInviteID)" }
 
 
     struct HomeSectionLoadResult {
@@ -95,12 +110,14 @@ final class VestigoModel: ObservableObject {
     private let relatedMedia = RelatedMediaService()
     private let backend = VestigoBackendClient()
     private let releaseCalendar = ReleaseCalendarService()
+    private let publicSync = CloudPublicSyncService()
     private let externalRatingBatchLimit = 8
     private var externalRatingEmptyRefreshes: Set<MediaKey> = []
     private var externalRatingInFlight: Set<MediaKey> = []
     private var searchTask: Task<Void, Never>?
     private var saveTask: Task<Void, Never>?
     private var recommendationsRefreshTask: Task<Void, Never>?
+    private var publishTask: Task<Void, Never>?
     private var searchRequestID = UUID()
     private var isApplyingCloudSnapshot = false
     private var mediaSearchCache: [String: [MediaItem]] = [:]
@@ -328,6 +345,7 @@ final class VestigoModel: ObservableObject {
         )
 
         loadLocal()
+        loadUserAvatar()
         offerStreamingSetupIfNeeded()
 
         NotificationCenter.default.addObserver(
@@ -490,6 +508,7 @@ final class VestigoModel: ObservableObject {
         if !cache.popular.isEmpty { popular = cache.popular }
         if !cache.newReleases.isEmpty { newReleases = cache.newReleases }
         if !cache.upcoming.isEmpty { upcoming = cache.upcoming }
+        if !cache.recommendations.isEmpty { recommendations = cache.recommendations }
     }
 
     private func saveCurrentHomeFeedCache() {
@@ -499,7 +518,8 @@ final class VestigoModel: ObservableObject {
             trending: trending,
             popular: popular,
             newReleases: newReleases,
-            upcoming: upcoming
+            upcoming: upcoming,
+            recommendations: recommendations
         )
         Storage.saveHomeFeedCache(cache)
     }
@@ -544,11 +564,12 @@ final class VestigoModel: ObservableObject {
                 for url in urls {
                     group.addTask {
                         #if canImport(UIKit)
-                        guard ImageCache.shared[url] == nil else { return }
+                        let already = await MainActor.run { ImageCache.shared[url] != nil }
+                        guard !already else { return }
                         guard let (data, _) = try? await URLSession.shared.data(from: url),
                               let raw = UIImage(data: data) else { return }
                         let decoded = raw.preparingForDisplay() ?? raw
-                        ImageCache.shared[url] = decoded
+                        await MainActor.run { ImageCache.shared[url] = decoded }
                         #endif
                     }
                 }
@@ -791,6 +812,7 @@ final class VestigoModel: ObservableObject {
             hideExtrasAndPromos: settings.hideExtrasAndPromosFromRecommended
         )
 
+        saveCurrentHomeFeedCache()
     }
 
     func loadTopRated(kind: MediaKind) async {
@@ -825,6 +847,12 @@ final class VestigoModel: ObservableObject {
 
     func pickForMeRecommendations(for answers: PickForMeAnswers) async -> [MediaItem] {
         let effectiveFilter = answers.effectiveMediaFilter
+        let watchProviderIDs: Set<Int>? = {
+            guard answers.myServicesOnly == true, !settings.subscribedServiceNames.isEmpty else { return nil }
+            let ids = KnownStreamingService.tmdbProviderIDs(for: settings.subscribedServiceNames)
+            return ids.isEmpty ? nil : ids
+        }()
+        let watchRegion = settings.streamingRegion.rawValue
         let wantsNewReleaseResults = answers.releaseAge == .newReleases
         var sourceMaterialCandidateKeys: Set<MediaKey> = []
         var sourceMaterialItems: [MediaItem] = []
@@ -866,7 +894,9 @@ final class VestigoModel: ObservableObject {
                         runtimeRange: answers.runtimeRange,
                         minimumRating: 0,
                         includeAdult: !self.settings.hideAdultResults,
-                        sortBy: "vote_average.desc"
+                        sortBy: "vote_average.desc",
+                        watchProviderIDs: watchProviderIDs,
+                        watchRegion: watchRegion
                     )) ?? []
                 }
             }
@@ -879,7 +909,9 @@ final class VestigoModel: ObservableObject {
                         personIDs: [],
                         keywordIDs: [],
                         genreIDs: ids,
-                        filter: effectiveFilter
+                        filter: effectiveFilter,
+                        watchProviderIDs: watchProviderIDs,
+                        watchRegion: watchRegion
                     )) ?? []
                 }
             }
@@ -897,7 +929,9 @@ final class VestigoModel: ObservableObject {
                             personIDs: [],
                             keywordIDs: kwIDs,
                             genreIDs: [],
-                            filter: effectiveFilter
+                            filter: effectiveFilter,
+                            watchProviderIDs: watchProviderIDs,
+                            watchRegion: watchRegion
                         )) ?? []
                     }
                 }
@@ -982,6 +1016,17 @@ final class VestigoModel: ObservableObject {
 
                 if !pickForMePrimaryArchetypeAllows(item, answers: answers) {
                     return false
+                }
+
+                if answers.myServicesOnly == true, !settings.subscribedServiceNames.isEmpty {
+                    if let options = providerCache[item.key] {
+                        let subscribed = settings.subscribedServiceNames
+                        let available = options.contains { option in
+                            let t = option.type.lowercased()
+                            return ["subscription", "sub", "free"].contains(t) && option.isSubscribed(in: subscribed)
+                        }
+                        if !available { return false }
+                    }
                 }
 
                 return true
@@ -2147,6 +2192,11 @@ final class VestigoModel: ObservableObject {
         }
     }
 
+    func quickSearch(query: String) async -> [MediaItem] {
+        guard !query.isEmpty else { return [] }
+        return (try? await searchMediaResults(query: query, filter: .both)) ?? []
+    }
+
     private func searchMediaResults(query: String, filter: MediaFilter) async throws -> [MediaItem] {
         let searchQueries = fuzzySearchQueries(from: query)
         var collectedResults: [MediaItem] = []
@@ -2695,6 +2745,30 @@ final class VestigoModel: ObservableObject {
         }
     }
 
+    func loadProvidersForWatchlistItems() {
+        let uncached = library.watchlistItems.filter { providerCache[$0.key] == nil }
+        guard !uncached.isEmpty else { return }
+        Task {
+            for item in uncached {
+                guard providerCache[item.key] == nil else { continue }
+                do {
+                    let providers = try await streaming.providers(for: item, imdbID: detailsCache[item.key]?.imdbID, regionCode: settings.streamingRegion.rawValue)
+                    await MainActor.run {
+                        if providers.isEmpty, let tmdb = detailsCache[item.key]?.tmdbProviders, !tmdb.isEmpty {
+                            providerCache[item.key] = tmdb
+                            tmdbFallbackKeys.insert(item.key)
+                        } else {
+                            providerCache[item.key] = providers
+                        }
+                    }
+                } catch {
+                    // Leave providerCache[item.key] as nil on error so the filter shows the item by default
+                }
+                try? await Task.sleep(nanoseconds: 250_000_000)
+            }
+        }
+    }
+
     private func universalMoreLikeThis(for item: MediaItem, hideWatched: Bool, limit: Int) async -> [MediaItem] {
         await loadBasicDetailIfNeeded(item)
         guard let detail = detailsCache[item.key] else {
@@ -3178,6 +3252,63 @@ final class VestigoModel: ObservableObject {
         saveLocalSoon()
     }
 
+    func clearWatchedDate(for item: MediaItem) {
+        library.watchedDates.removeValue(forKey: item.key)
+        saveLocalSoon()
+    }
+
+    // MARK: - User Avatar
+
+    private var avatarFileURL: URL {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("vestigo-user-avatar.jpg")
+    }
+
+    func loadUserAvatar() {
+        userAvatarData = try? Data(contentsOf: avatarFileURL)
+    }
+
+    func saveUserAvatar(_ data: Data) {
+        userAvatarData = data
+        try? data.write(to: avatarFileURL, options: .atomic)
+        schedulePublicProfilePublish()
+    }
+
+    #if canImport(UIKit)
+    func saveUserAvatar(image: UIImage) {
+        let maxDim: CGFloat = 300
+        let scale = min(maxDim / image.size.width, maxDim / image.size.height, 1.0)
+        let sized: UIImage
+        if scale < 1.0 {
+            let newSize = CGSize(width: (image.size.width * scale).rounded(), height: (image.size.height * scale).rounded())
+            let renderer = UIGraphicsImageRenderer(size: newSize)
+            sized = renderer.image { _ in image.draw(in: CGRect(origin: .zero, size: newSize)) }
+        } else {
+            sized = image
+        }
+        if let jpeg = sized.jpegData(compressionQuality: 0.8) {
+            saveUserAvatar(jpeg)
+        }
+    }
+    #endif
+
+    func clearUserAvatar() {
+        userAvatarData = nil
+        try? FileManager.default.removeItem(at: avatarFileURL)
+        schedulePublicProfilePublish()
+    }
+
+    // MARK: - Recently Viewed
+
+    func recordRecentlyViewed(_ item: MediaItem) {
+        var recent = settings.recentlyViewedItems
+        recent.removeAll { $0.key == item.key }
+        recent.insert(item, at: 0)
+        if recent.count > 10 { recent = Array(recent.prefix(10)) }
+        settings.recentlyViewedItems = recent
+        saveSettings()
+    }
+
     func setRating(_ rating: Double, for item: MediaItem) {
         guard library.isWatched(item.key) else { return }
         library.items[item.key] = item
@@ -3273,6 +3404,14 @@ final class VestigoModel: ObservableObject {
     func deleteCollection(id: UUID) {
         library.collections.removeAll { $0.id == id }
         collectionRecommendations.removeValue(forKey: id)
+        saveLocalSoon()
+    }
+
+    func renameCollection(id: UUID, name: String) {
+        let clean = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty else { return }
+        guard let idx = library.collections.firstIndex(where: { $0.id == id }) else { return }
+        library.collections[idx].name = clean
         saveLocalSoon()
     }
 
@@ -3470,6 +3609,10 @@ final class VestigoModel: ObservableObject {
     }
 
     func reselectCurrentTab() {
+        if selectedTab == .search && searchFieldIsFocused {
+            searchFieldIsFocused = false
+            return
+        }
         if isAtRoot(selectedTab) {
             reloadRoot(for: selectedTab)
         } else {
@@ -3493,7 +3636,7 @@ final class VestigoModel: ObservableObject {
             if !homePath.isEmpty { homePath.removeLast() }
         case .search:
             if !searchPath.isEmpty { searchPath.removeLast() }
-        case .forYou, .watchlist, .collections:
+        case .watchlist, .collections, .friends:
             break
         }
     }
@@ -3504,7 +3647,7 @@ final class VestigoModel: ObservableObject {
             return homePath.isEmpty && selectedItem == nil && selectedPerson == nil
         case .search:
             return searchPath.isEmpty && selectedItem == nil && selectedPerson == nil
-        case .forYou, .watchlist, .collections:
+        case .watchlist, .collections, .friends:
             return selectedItem == nil && selectedPerson == nil
         }
     }
@@ -3518,7 +3661,7 @@ final class VestigoModel: ObservableObject {
             homePath.removeAll()
         case .search:
             searchPath.removeAll()
-        case .forYou, .watchlist, .collections:
+        case .watchlist, .collections, .friends:
             break
         }
     }
@@ -3533,6 +3676,7 @@ final class VestigoModel: ObservableObject {
             mediaFilter = settings.defaultHomeFilter
             homeViewMode = .tile
             Task { await loadHome() }
+            Task { await loadSmartRecommendations() }
 
         case .search:
             searchPath.removeAll()
@@ -3548,9 +3692,8 @@ final class VestigoModel: ObservableObject {
             minimumTMDbRatingFilter = nil
             searchFilter = settings.defaultSearchFilter
 
-        case .forYou:
-            forYouResetToken = UUID()
-            Task { await loadSmartRecommendations() }
+        case .friends:
+            friendsResetToken = UUID()
 
         case .watchlist:
             sortOption = .tmdbRating
@@ -3587,6 +3730,21 @@ final class VestigoModel: ObservableObject {
         providerCache = Storage.load([MediaKey: [StreamingOption]].self, key: "Vestigo.providerCache") ?? [:]
         searchFilter = settings.defaultSearchFilter
         mediaFilter = settings.defaultHomeFilter
+
+        // Ensure .recommendations appears before .newReleases (migration for existing installs)
+        if let recIdx = settings.homeCarouselOrder.firstIndex(of: .recommendations),
+           let newRelIdx = settings.homeCarouselOrder.firstIndex(of: .newReleases),
+           recIdx > newRelIdx {
+            settings.homeCarouselOrder.remove(at: recIdx)
+            let insertAt = settings.homeCarouselOrder.firstIndex(of: .newReleases) ?? min(1, settings.homeCarouselOrder.count)
+            settings.homeCarouselOrder.insert(.recommendations, at: insertAt)
+        }
+
+        // Ensure all non-forYou sub-carousels are hidden by default for existing installs
+        let subCarousels: Set<ForYouCarousel> = [.moreLikeLast, .moreLikeFavourite, .watchlistPicks, .seriesNext]
+        if settings.forYouCarouselHidden.isDisjoint(with: subCarousels) {
+            settings.forYouCarouselHidden.formUnion(subCarousels)
+        }
     }
 
     private func syncFromCloudOnLaunch() async {
@@ -3638,6 +3796,54 @@ final class VestigoModel: ObservableObject {
 
     func saveSettings() {
         saveLocalSoon()
+        schedulePublicProfilePublish()
+    }
+
+    private func schedulePublicProfilePublish() {
+        publishTask?.cancel()
+        publishTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            guard !Task.isCancelled, let self else { return }
+            let result = await self.publicSync.publishProfile(settings: self.settings, library: self.library, avatarData: self.userAvatarData)
+            await MainActor.run { self.publishDiagnostic = result }
+        }
+    }
+
+    func publishPublicProfile() async {
+        publishDiagnostic = await publicSync.publishProfile(settings: settings, library: library, avatarData: userAvatarData)
+    }
+
+    func loadFriends() async {
+        friendsLoading = true
+        let (profiles, diagnostic) = await publicSync.fetchFriends(recordIDs: settings.socialConfirmedFriendIDs)
+        friends = profiles
+        friendsDiagnostic = diagnostic
+        friendsLoading = false
+    }
+
+    func handleFriendLink(inviteID: String) async {
+        guard let result = await publicSync.fetchProfile(byInviteID: inviteID) else {
+            pendingFriendAdd = PendingFriendAdd(id: inviteID, name: "this person")
+            return
+        }
+        pendingFriendAdd = PendingFriendAdd(id: result.recordID, name: result.name)
+    }
+
+    func addFriend(recordID: String) {
+        guard !settings.socialConfirmedFriendIDs.contains(recordID) else {
+            pendingFriendAdd = nil
+            return
+        }
+        settings.socialConfirmedFriendIDs.append(recordID)
+        saveSettings()
+        Task { await loadFriends() }
+        pendingFriendAdd = nil
+    }
+
+    func removeFriend(recordID: String) {
+        settings.socialConfirmedFriendIDs.removeAll { $0 == recordID }
+        friends.removeAll { $0.id == recordID }
+        saveSettings()
     }
 
     private func scheduleRecommendationsRefresh() {
@@ -3692,7 +3898,7 @@ final class VestigoModel: ObservableObject {
         Storage.save(settings, key: "Vestigo.settings")
         Storage.save(externalRatingsCache, key: "Vestigo.externalRatings")
         Storage.save(calendarEventIDs, key: "Vestigo.calendarEventIDs")
-        Storage.save(describeItResultsCache, key: "Vestigo.describeItCache")
+        Storage.save(describeItResultsCache.filter { !$0.value.isEmpty }, key: "Vestigo.describeItCache")
         let watchmodeOnly = providerCache.filter { !tmdbFallbackKeys.contains($0.key) }
         Storage.save(watchmodeOnly, key: "Vestigo.providerCache")
 

@@ -49,7 +49,7 @@ struct TMDbService {
 
         if filter != .tv {
             do {
-                items += try await fetchList(path: "/movie/upcoming", query: [URLQueryItem(name: "region", value: "US")])
+                items += try await fetchListPages(path: "/movie/upcoming", query: [URLQueryItem(name: "region", value: "US")], pages: 3)
             } catch {
                 firstError = firstError ?? error
             }
@@ -57,11 +57,11 @@ struct TMDbService {
 
         if filter != .movie {
             do {
-                items += try await fetchList(path: "/discover/tv", query: [
+                items += try await fetchListPages(path: "/discover/tv", query: [
                     URLQueryItem(name: "first_air_date.gte", value: DateParser.tmdbDateString(from: Date())),
                     URLQueryItem(name: "sort_by", value: "popularity.desc"),
                     URLQueryItem(name: "include_null_first_air_dates", value: "false")
-                ])
+                ], pages: 2)
             } catch {
                 firstError = firstError ?? error
             }
@@ -459,27 +459,27 @@ struct TMDbService {
         return Array((response.results ?? []).prefix(3).map(\.id))
     }
 
-    func discoverThematic(personIDs: [Int], keywordIDs: [Int], genreIDs: Set<Int>, filter: MediaFilter, releaseYear: Int? = nil) async throws -> [MediaItem] {
+    func discoverThematic(personIDs: [Int], keywordIDs: [Int], genreIDs: Set<Int>, filter: MediaFilter, releaseYear: Int? = nil, watchProviderIDs: Set<Int>? = nil, watchRegion: String = "US") async throws -> [MediaItem] {
         switch filter {
         case .movie:
-            return try await discoverThematicSingleMedia(media: "movie", personIDs: personIDs, keywordIDs: keywordIDs, genreIDs: genreIDs, releaseYear: releaseYear)
+            return try await discoverThematicSingleMedia(media: "movie", personIDs: personIDs, keywordIDs: keywordIDs, genreIDs: genreIDs, releaseYear: releaseYear, watchProviderIDs: watchProviderIDs, watchRegion: watchRegion)
         case .tv:
-            return try await discoverThematicSingleMedia(media: "tv", personIDs: personIDs, keywordIDs: keywordIDs, genreIDs: genreIDs, releaseYear: releaseYear)
+            return try await discoverThematicSingleMedia(media: "tv", personIDs: personIDs, keywordIDs: keywordIDs, genreIDs: genreIDs, releaseYear: releaseYear, watchProviderIDs: watchProviderIDs, watchRegion: watchRegion)
         case .both:
-            async let movies = discoverThematicSingleMedia(media: "movie", personIDs: personIDs, keywordIDs: keywordIDs, genreIDs: genreIDs, releaseYear: releaseYear)
-            async let series = discoverThematicSingleMedia(media: "tv", personIDs: personIDs, keywordIDs: keywordIDs, genreIDs: genreIDs, releaseYear: releaseYear)
+            async let movies = discoverThematicSingleMedia(media: "movie", personIDs: personIDs, keywordIDs: keywordIDs, genreIDs: genreIDs, releaseYear: releaseYear, watchProviderIDs: watchProviderIDs, watchRegion: watchRegion)
+            async let series = discoverThematicSingleMedia(media: "tv", personIDs: personIDs, keywordIDs: keywordIDs, genreIDs: genreIDs, releaseYear: releaseYear, watchProviderIDs: watchProviderIDs, watchRegion: watchRegion)
             return try await (movies + series).uniqued()
         }
     }
 
-    private func discoverThematicSingleMedia(media: String, personIDs: [Int], keywordIDs: [Int], genreIDs: Set<Int>, releaseYear: Int? = nil) async throws -> [MediaItem] {
+    private func discoverThematicSingleMedia(media: String, personIDs: [Int], keywordIDs: [Int], genreIDs: Set<Int>, releaseYear: Int? = nil, watchProviderIDs: Set<Int>? = nil, watchRegion: String = "US") async throws -> [MediaItem] {
         guard !personIDs.isEmpty || !keywordIDs.isEmpty || !genreIDs.isEmpty else { return [] }
         var query: [URLQueryItem] = [
             URLQueryItem(name: "sort_by", value: "vote_average.desc"),
             URLQueryItem(name: "include_adult", value: "false"),
             URLQueryItem(name: "include_video", value: "false"),
             URLQueryItem(name: "vote_count.gte", value: media == "movie" ? "80" : "50"),
-            URLQueryItem(name: "region", value: "US")
+            URLQueryItem(name: "region", value: watchRegion)
         ]
         if let year = releaseYear {
             let yearParam = media == "movie" ? "primary_release_year" : "first_air_date_year"
@@ -494,18 +494,22 @@ struct TMDbService {
         if !genreIDs.isEmpty {
             query.append(URLQueryItem(name: "with_genres", value: genreIDs.map(String.init).sorted().joined(separator: ",")))
         }
+        if let ids = watchProviderIDs, !ids.isEmpty {
+            query.append(URLQueryItem(name: "with_watch_providers", value: ids.map(String.init).sorted().joined(separator: "|")))
+            query.append(URLQueryItem(name: "with_watch_monetization_types", value: "flatrate|free"))
+        }
         return try await fetchListPages(path: "/discover/\(media)", query: query, pages: 2)
     }
 
-    func discoverPickForMe(filter: MediaFilter, genreIDs: Set<Int>, runtimeRange: PickForMeRuntimeRange, minimumRating: Double, includeAdult: Bool, sortBy: String) async throws -> [MediaItem] {
+    func discoverPickForMe(filter: MediaFilter, genreIDs: Set<Int>, runtimeRange: PickForMeRuntimeRange, minimumRating: Double, includeAdult: Bool, sortBy: String, watchProviderIDs: Set<Int>? = nil, watchRegion: String = "US") async throws -> [MediaItem] {
         switch filter {
         case .movie:
-            return try await discoverPickForMeSingleMedia(media: "movie", genreIDs: genreIDs, runtimeRange: runtimeRange, minimumRating: minimumRating, includeAdult: includeAdult, sortBy: sortBy)
+            return try await discoverPickForMeSingleMedia(media: "movie", genreIDs: genreIDs, runtimeRange: runtimeRange, minimumRating: minimumRating, includeAdult: includeAdult, sortBy: sortBy, watchProviderIDs: watchProviderIDs, watchRegion: watchRegion)
         case .tv:
-            return try await discoverPickForMeSingleMedia(media: "tv", genreIDs: genreIDs, runtimeRange: runtimeRange, minimumRating: minimumRating, includeAdult: includeAdult, sortBy: sortBy)
+            return try await discoverPickForMeSingleMedia(media: "tv", genreIDs: genreIDs, runtimeRange: runtimeRange, minimumRating: minimumRating, includeAdult: includeAdult, sortBy: sortBy, watchProviderIDs: watchProviderIDs, watchRegion: watchRegion)
         case .both:
-            async let movies = discoverPickForMeSingleMedia(media: "movie", genreIDs: genreIDs, runtimeRange: runtimeRange, minimumRating: minimumRating, includeAdult: includeAdult, sortBy: sortBy)
-            async let series = discoverPickForMeSingleMedia(media: "tv", genreIDs: genreIDs, runtimeRange: runtimeRange, minimumRating: minimumRating, includeAdult: includeAdult, sortBy: sortBy)
+            async let movies = discoverPickForMeSingleMedia(media: "movie", genreIDs: genreIDs, runtimeRange: runtimeRange, minimumRating: minimumRating, includeAdult: includeAdult, sortBy: sortBy, watchProviderIDs: watchProviderIDs, watchRegion: watchRegion)
+            async let series = discoverPickForMeSingleMedia(media: "tv", genreIDs: genreIDs, runtimeRange: runtimeRange, minimumRating: minimumRating, includeAdult: includeAdult, sortBy: sortBy, watchProviderIDs: watchProviderIDs, watchRegion: watchRegion)
             return try await movies + series
         }
     }
@@ -539,13 +543,13 @@ struct TMDbService {
         ], pages: 2)
     }
 
-    private func discoverPickForMeSingleMedia(media: String, genreIDs: Set<Int>, runtimeRange: PickForMeRuntimeRange, minimumRating: Double, includeAdult: Bool, sortBy: String) async throws -> [MediaItem] {
+    private func discoverPickForMeSingleMedia(media: String, genreIDs: Set<Int>, runtimeRange: PickForMeRuntimeRange, minimumRating: Double, includeAdult: Bool, sortBy: String, watchProviderIDs: Set<Int>? = nil, watchRegion: String = "US") async throws -> [MediaItem] {
         var query: [URLQueryItem] = [
             URLQueryItem(name: "sort_by", value: sortBy),
             URLQueryItem(name: "include_adult", value: includeAdult ? "true" : "false"),
             URLQueryItem(name: "include_video", value: "false"),
-            URLQueryItem(name: "region", value: "US"),
-            URLQueryItem(name: "watch_region", value: "US"),
+            URLQueryItem(name: "region", value: watchRegion),
+            URLQueryItem(name: "watch_region", value: watchRegion),
             URLQueryItem(name: "vote_count.gte", value: media == "movie" ? "120" : "80")
         ]
 
@@ -563,6 +567,11 @@ struct TMDbService {
 
         if runtimeRange.maxMinutes > 0 {
             query.append(URLQueryItem(name: "with_runtime.lte", value: String(runtimeRange.maxMinutes)))
+        }
+
+        if let ids = watchProviderIDs, !ids.isEmpty {
+            query.append(URLQueryItem(name: "with_watch_providers", value: ids.map(String.init).sorted().joined(separator: "|")))
+            query.append(URLQueryItem(name: "with_watch_monetization_types", value: "flatrate|free"))
         }
 
         return try await fetchListPages(path: "/discover/\(media)", query: query, pages: 3)

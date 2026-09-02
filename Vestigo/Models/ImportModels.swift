@@ -174,6 +174,28 @@ struct HomeFeedCache: Codable {
     let popular: [MediaItem]
     let newReleases: [MediaItem]
     let upcoming: [MediaItem]
+    let recommendations: [MediaItem]
+
+    init(cachedAt: Date, filter: MediaFilter, trending: [MediaItem], popular: [MediaItem], newReleases: [MediaItem], upcoming: [MediaItem], recommendations: [MediaItem] = []) {
+        self.cachedAt = cachedAt
+        self.filter = filter
+        self.trending = trending
+        self.popular = popular
+        self.newReleases = newReleases
+        self.upcoming = upcoming
+        self.recommendations = recommendations
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        cachedAt = try c.decode(Date.self, forKey: .cachedAt)
+        filter = try c.decode(MediaFilter.self, forKey: .filter)
+        trending = try c.decode([MediaItem].self, forKey: .trending)
+        popular = try c.decode([MediaItem].self, forKey: .popular)
+        newReleases = try c.decode([MediaItem].self, forKey: .newReleases)
+        upcoming = try c.decode([MediaItem].self, forKey: .upcoming)
+        recommendations = try c.decodeIfPresent([MediaItem].self, forKey: .recommendations) ?? []
+    }
 
     var hasContent: Bool {
         !trending.isEmpty || !popular.isEmpty || !newReleases.isEmpty || !upcoming.isEmpty

@@ -9,7 +9,7 @@ struct CloudPublicSyncService {
 
     // MARK: - Publish own profile
 
-    func publishProfile(settings: AppSettings, library: UserLibrary) async -> String {
+    func publishProfile(settings: AppSettings, library: UserLibrary, avatarData: Data? = nil) async -> String {
         #if canImport(CloudKit)
         do {
             let userID = try await CKContainer.default().userRecordID()
@@ -22,6 +22,7 @@ struct CloudPublicSyncService {
                 record = CKRecord(recordType: recordType, recordID: recordID)
             }
 
+            record["inviteID"] = settings.socialInviteID as CKRecordValue
             record["displayName"] = settings.name as CKRecordValue
             record["sharesWatchlist"] = (!settings.socialDontShare && settings.socialShareWatchlist) as CKRecordValue
             record["sharesWatched"] = (!settings.socialDontShare && settings.socialShareWatched) as CKRecordValue
@@ -67,6 +68,12 @@ struct CloudPublicSyncService {
                 record["watchedPayload"] = nil as CKAsset?
             }
 
+            if let avatarData {
+                record["avatarPayload"] = CKAsset(fileURL: try writeTemp(avatarData, name: "avatar"))
+            } else {
+                record["avatarPayload"] = nil as CKAsset?
+            }
+
             _ = try await publicDB.save(record)
             return "publish OK · name: \(settings.name)"
         } catch {
@@ -105,24 +112,27 @@ struct CloudPublicSyncService {
         #endif
     }
 
-    // MARK: - Fetch display name for add-friend confirmation
+    // MARK: - Find a profile by invite ID (for add-friend confirmation)
 
-    func fetchDisplayName(recordID: String) async -> String? {
+    func fetchProfile(byInviteID inviteID: String) async -> (recordID: String, name: String)? {
         #if canImport(CloudKit)
-        let ckID = CKRecord.ID(recordName: recordID)
-        guard let record = try? await publicDB.record(for: ckID) else { return nil }
-        return record["displayName"] as? String
-        #else
-        return nil
-        #endif
-    }
-
-    // MARK: - Fetch own invite record name
-
-    func fetchMyRecordName() async -> String? {
-        #if canImport(CloudKit)
-        guard let userID = try? await CKContainer.default().userRecordID() else { return nil }
-        return "vp-\(userID.recordName)"
+        do {
+            let query = CKQuery(recordType: recordType, predicate: NSPredicate(value: true))
+            var cursor: CKQueryOperation.Cursor? = nil
+            var (results, next) = try await publicDB.records(matching: query, resultsLimit: 200)
+            cursor = next
+            var allRecords: [CKRecord] = results.compactMap { (_, result) in try? result.get() }
+            while let c = cursor {
+                let (more, nextCursor) = try await publicDB.records(continuingMatchFrom: c)
+                allRecords += more.compactMap { (_, result) in try? result.get() }
+                cursor = nextCursor
+            }
+            guard let match = allRecords.first(where: { ($0["inviteID"] as? String) == inviteID }) else { return nil }
+            let name = (match["displayName"] as? String) ?? ""
+            return (match.recordID.recordName, name)
+        } catch {
+            return nil
+        }
         #else
         return nil
         #endif
@@ -172,10 +182,16 @@ struct CloudPublicSyncService {
             if let r = ratingsBySid[item.key.stableID] { ratings[item.key] = r }
         }
 
+        var imageData: Data? = nil
+        if let asset = record["avatarPayload"] as? CKAsset,
+           let url = asset.fileURL {
+            imageData = try? Data(contentsOf: url)
+        }
+
         return FriendProfile(
             id: record.recordID.recordName,
             name: name,
-            imageData: nil,
+            imageData: imageData,
             recentActivity: lastActiveAt,
             featuredItems: featuredItems,
             excitedForItems: excitedForItems,
