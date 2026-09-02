@@ -7,7 +7,7 @@ import UIKit
 
 // MARK: - Social Models
 
-struct FriendProfile: Identifiable, Hashable {
+struct FriendProfile: Identifiable, Hashable, Codable {
     let id: String
     let name: String
     let imageData: Data?
@@ -20,6 +20,7 @@ struct FriendProfile: Identifiable, Hashable {
     var watchedItems: [MediaItem] = []
     var ratings: [MediaKey: Double] = [:]
     var favouriteKeys: Set<String> = []
+    var watchedDates: [String: Date] = [:]
 
     func hash(into hasher: inout Hasher) { hasher.combine(id) }
     static func == (lhs: FriendProfile, rhs: FriendProfile) -> Bool { lhs.id == rhs.id }
@@ -118,8 +119,8 @@ struct FriendsView: View {
         }
         .sheet(isPresented: $showSendLink) {
             #if canImport(UIKit)
-            let message = "Add me on Vestigo!\n\(myInviteURL)\nDon't have Vestigo yet? https://testflight.apple.com/join/zbvP2WEx"
-            ActivityView(activityItems: [message])
+            let shareItems: [Any] = URL(string: myInviteURL).map { [$0 as Any] } ?? [myInviteURL as Any]
+            ActivityView(activityItems: shareItems)
             #else
             EmptyView()
             #endif
@@ -132,7 +133,9 @@ struct FriendsView: View {
     }
 
     private func startFriendsLoadAsync() async {
-        await model.publishPublicProfile()
+        async let publish: Void = model.publishPublicProfile()
+        async let requests: Void = model.checkIncomingFriendRequests()
+        _ = await (publish, requests)
         await model.loadFriends()
     }
 }
@@ -264,7 +267,11 @@ private struct MeSectionView: View {
                 guard let item = friend.watchedItems.first else { return nil }
                 return ActivityEntry(friend: friend, item: item)
             }
-            .sorted { ($0.friend.recentActivity ?? .distantPast) > ($1.friend.recentActivity ?? .distantPast) }
+            .sorted { a, b in
+                let aDate = a.friend.watchedDates[a.item.key.stableID] ?? a.friend.recentActivity ?? .distantPast
+                let bDate = b.friend.watchedDates[b.item.key.stableID] ?? b.friend.recentActivity ?? .distantPast
+                return aDate > bDate
+            }
     }
 
     var body: some View {
@@ -475,6 +482,7 @@ private struct SocialPosterRow: View {
     var onEdit: (() -> Void)? = nil
     var emptyMessage: String = ""
     var showRating: Bool = true
+    var friendContext: FriendProfile? = nil
     @ObservedObject var model: VestigoModel
 
     var body: some View {
@@ -487,7 +495,7 @@ private struct SocialPosterRow: View {
                     Button { onEdit() } label: {
                         Image(systemName: editIcon)
                             .font(.subheadline.bold())
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(.primary)
                     }
                 }
             }
@@ -504,7 +512,10 @@ private struct SocialPosterRow: View {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(alignment: .top, spacing: 10) {
                         ForEach(items) { item in
-                            Button { model.selectedItem = item } label: {
+                            Button {
+                                if let friendContext { model.friendDetailContext = friendContext }
+                                model.selectedItem = item
+                            } label: {
                                 VStack(alignment: .leading, spacing: 5) {
                                     PosterView(
                                         item: item,
@@ -528,7 +539,7 @@ private struct SocialPosterRow: View {
                                                     .foregroundStyle(.secondary)
                                             }
                                         } else {
-                                            Text("Unrated")
+                                            Text(model.library.isWatched(item.key) ? "Unrated" : "Watchlist")
                                                 .font(.caption2)
                                                 .foregroundStyle(.tertiary)
                                         }
@@ -572,6 +583,9 @@ private struct SharingRow: View {
     }
 }
 
+private enum PickerSource { case watched, watchlist, both }
+private enum PickerKind { case movies, series, both }
+
 // MARK: - Featured Picker Sheet
 
 private struct FeaturedPickerSheet: View {
@@ -579,14 +593,32 @@ private struct FeaturedPickerSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var selected: Set<String> = []
     @State private var searchText = ""
+    @State private var sourceFilter: PickerSource = .both
+    @State private var kindFilter: PickerKind = .both
 
     private let maxItems = 6
     private let columns = [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())]
 
     private var libraryItems: [MediaItem] {
-        let all = (model.library.watchedItems + model.library.watchlistItems)
+        let sourceItems: [MediaItem]
+        switch sourceFilter {
+        case .watched:   sourceItems = model.library.watchedItems
+        case .watchlist: sourceItems = model.library.watchlistItems
+        case .both:      sourceItems = model.library.watchedItems + model.library.watchlistItems
+        }
+        let all = sourceItems
             .uniqued()
+            .filter { item in
+                switch kindFilter {
+                case .movies: return item.key.kind == .movie
+                case .series: return item.key.kind == .tv
+                case .both:   return true
+                }
+            }
             .sorted {
+                let aSel = selected.contains($0.key.stableID)
+                let bSel = selected.contains($1.key.stableID)
+                if aSel != bSel { return aSel }
                 let aFav = model.library.isFavourite($0)
                 let bFav = model.library.isFavourite($1)
                 if aFav != bFav { return aFav }
@@ -597,6 +629,11 @@ private struct FeaturedPickerSheet: View {
         return all.filter { $0.title.lowercased().contains(q) }
     }
 
+    private func save() {
+        model.settings.socialFeaturedItemKeys = Array(selected)
+        model.saveSettings()
+    }
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
@@ -605,8 +642,7 @@ private struct FeaturedPickerSheet: View {
                         .font(.title2.bold())
                     Spacer()
                     Button("Done") {
-                        model.settings.socialFeaturedItemKeys = Array(selected)
-                        model.saveSettings()
+                        save()
                         dismiss()
                     }
                     .fontWeight(.semibold)
@@ -632,6 +668,20 @@ private struct FeaturedPickerSheet: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 }
+
+                Picker("Source", selection: $sourceFilter) {
+                    Text("Watched").tag(PickerSource.watched)
+                    Text("Watchlist").tag(PickerSource.watchlist)
+                    Text("Both").tag(PickerSource.both)
+                }
+                .pickerStyle(.segmented)
+
+                Picker("Type", selection: $kindFilter) {
+                    Text("Movies").tag(PickerKind.movies)
+                    Text("Series").tag(PickerKind.series)
+                    Text("Both").tag(PickerKind.both)
+                }
+                .pickerStyle(.segmented)
 
                 LazyVGrid(columns: columns, spacing: 14) {
                     ForEach(libraryItems) { item in
@@ -699,6 +749,7 @@ private struct FeaturedPickerSheet: View {
         .presentationBackground(.clear)
         .presentationCornerRadius(54)
         .onAppear { selected = Set(model.settings.socialFeaturedItemKeys) }
+        .onDisappear { save() }
     }
 }
 
@@ -712,8 +763,30 @@ private struct ExcitedForPickerSheet: View {
     @State private var remoteResults: [MediaItem] = []
     @State private var isSearchingRemote = false
     @State private var remoteTask: Task<Void, Never>? = nil
+    @State private var kindFilter: PickerKind = .both
 
+    private let maxItems = 6
     private let columns = [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())]
+
+    private func save() {
+        model.settings.socialExcitedForKeys = Array(selected)
+        let selectedItems = displayItems.filter { selected.contains($0.key.stableID) }
+        var cache = model.settings.socialExcitedForItemCache
+        for item in selectedItems {
+            cache.removeAll { $0.key == item.key }
+            cache.append(item)
+        }
+        model.settings.socialExcitedForItemCache = cache
+        model.saveSettings()
+    }
+
+    private func applyKind(_ items: [MediaItem]) -> [MediaItem] {
+        switch kindFilter {
+        case .movies: return items.filter { $0.key.kind == .movie }
+        case .series: return items.filter { $0.key.kind == .tv }
+        case .both:   return items
+        }
+    }
 
     private var localItems: [MediaItem] {
         let today = Calendar.current.startOfDay(for: Date())
@@ -722,8 +795,13 @@ private struct ExcitedForPickerSheet: View {
             guard let d = item.releaseDateValue else { return false }
             return d > today
         }
-        let merged = (fromFeed + Array(fromLibrary)).uniqued()
-            .sorted { ($0.releaseDateValue ?? .distantFuture) < ($1.releaseDateValue ?? .distantFuture) }
+        let merged = applyKind((fromFeed + Array(fromLibrary)).uniqued())
+            .sorted {
+                let aSel = selected.contains($0.key.stableID)
+                let bSel = selected.contains($1.key.stableID)
+                if aSel != bSel { return aSel }
+                return ($0.releaseDateValue ?? .distantFuture) < ($1.releaseDateValue ?? .distantFuture)
+            }
         guard !searchText.isEmpty else { return merged }
         let q = searchText.lowercased()
         return merged.filter { $0.title.lowercased().contains(q) }
@@ -733,12 +811,17 @@ private struct ExcitedForPickerSheet: View {
         guard !searchText.isEmpty else { return localItems }
         let localIDs = Set(localItems.map { $0.key.stableID })
         let today = Calendar.current.startOfDay(for: Date())
-        let remote = remoteResults.filter { item in
+        let remote = applyKind(remoteResults).filter { item in
             guard !localIDs.contains(item.key.stableID) else { return false }
             if let d = item.releaseDateValue { return d > today }
             return true
         }
-        return localItems + remote
+        return (localItems + remote).sorted {
+            let aSel = selected.contains($0.key.stableID)
+            let bSel = selected.contains($1.key.stableID)
+            if aSel != bSel { return aSel }
+            return ($0.releaseDateValue ?? .distantFuture) < ($1.releaseDateValue ?? .distantFuture)
+        }
     }
 
     var body: some View {
@@ -749,15 +832,7 @@ private struct ExcitedForPickerSheet: View {
                         .font(.title2.bold())
                     Spacer()
                     Button("Done") {
-                        model.settings.socialExcitedForKeys = Array(selected)
-                        let selectedItems = displayItems.filter { selected.contains($0.key.stableID) }
-                        var cache = model.settings.socialExcitedForItemCache
-                        for item in selectedItems {
-                            cache.removeAll { $0.key == item.key }
-                            cache.append(item)
-                        }
-                        model.settings.socialExcitedForItemCache = cache
-                        model.saveSettings()
+                        save()
                         dismiss()
                     }
                     .fontWeight(.semibold)
@@ -774,11 +849,16 @@ private struct ExcitedForPickerSheet: View {
                 .padding(12)
                 .liquidGlass(cornerRadius: 20)
 
-                if selected.count > 0 {
-                    Text("\(selected.count) selected")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                Text("\(selected.count)/\(maxItems) selected")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                Picker("Type", selection: $kindFilter) {
+                    Text("Movies").tag(PickerKind.movies)
+                    Text("Series").tag(PickerKind.series)
+                    Text("Both").tag(PickerKind.both)
                 }
+                .pickerStyle(.segmented)
 
                 if displayItems.isEmpty {
                     if isSearchingRemote {
@@ -795,7 +875,7 @@ private struct ExcitedForPickerSheet: View {
                             let stableID = item.key.stableID
                             let isSelected = selected.contains(stableID)
                             Button {
-                                if isSelected { selected.remove(stableID) } else { selected.insert(stableID) }
+                                if isSelected { selected.remove(stableID) } else if selected.count < maxItems { selected.insert(stableID) }
                             } label: {
                                 VStack(alignment: .leading, spacing: 5) {
                                     ZStack(alignment: .topTrailing) {
@@ -852,6 +932,7 @@ private struct ExcitedForPickerSheet: View {
         .presentationBackground(.clear)
         .presentationCornerRadius(54)
         .onAppear { selected = Set(model.settings.socialExcitedForKeys) }
+        .onDisappear { save() }
         .onChange(of: searchText) { _, text in
             remoteTask?.cancel()
             guard !text.isEmpty else { remoteResults = []; return }
@@ -860,7 +941,9 @@ private struct ExcitedForPickerSheet: View {
                 guard !Task.isCancelled else { return }
                 if localItems.count < 5 {
                     isSearchingRemote = true
-                    remoteResults = await model.quickSearch(query: text)
+                    let found = await model.quickSearch(query: text)
+                    remoteResults = found
+                    model.cacheUpcomingItems(from: found)
                     isSearchingRemote = false
                 }
             }
@@ -964,7 +1047,21 @@ private struct FriendFavouritesSection: View {
         var firstFriendMap: [String: FriendProfile] = [:]
         for friend in friends {
             let first = friend.name.components(separatedBy: " ").first ?? friend.name
-            for item in friend.featuredItems {
+            let favKeys = friend.favouriteKeys
+            var friendFavItems: [MediaItem]
+            if favKeys.isEmpty {
+                friendFavItems = friend.featuredItems
+            } else {
+                friendFavItems = friend.featuredItems.filter { favKeys.contains($0.key.stableID) }
+                if friend.sharesWatched {
+                    let existingIDs = Set(friendFavItems.map { $0.key.stableID })
+                    let watchedFavs = friend.watchedItems.filter {
+                        favKeys.contains($0.key.stableID) && !existingIDs.contains($0.key.stableID)
+                    }
+                    friendFavItems += watchedFavs
+                }
+            }
+            for item in friendFavItems {
                 let sid = item.key.stableID
                 counts[sid, default: 0] += 1
                 itemMap[sid] = item
@@ -1139,8 +1236,9 @@ private struct FriendActivityRow: View {
                         .font(.subheadline.bold())
                         .foregroundStyle(.primary)
                         .lineLimit(1)
-                    if let activity = friend.recentActivity {
-                        Text(activity.formatted(.relative(presentation: .named)))
+                    let watchDate = friend.watchedDates[item.key.stableID] ?? friend.recentActivity
+                    if let date = watchDate {
+                        Text(date.formatted(.relative(presentation: .named)))
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -1164,6 +1262,7 @@ struct FriendDetailPage: View {
     @ObservedObject var model: VestigoModel
     let onWatchlist: () -> Void
     let onWatched: () -> Void
+    @Environment(\.dismiss) private var dismiss
     @State private var dummyFilter: MediaFilter = .both
     @State private var showRemoveConfirm = false
     @State private var liveData: FriendProfile? = nil
@@ -1192,11 +1291,11 @@ struct FriendDetailPage: View {
                 .padding(.top, 4)
 
                 if !current.featuredItems.isEmpty {
-                    SocialPosterRow(title: "Featured", items: current.featuredItems, showRating: false, model: model)
+                    SocialPosterRow(title: "Featured", items: current.featuredItems, showRating: false, friendContext: current, model: model)
                 }
 
                 if !current.excitedForItems.isEmpty {
-                    SocialPosterRow(title: "Excited For", items: current.excitedForItems, showRating: false, model: model)
+                    SocialPosterRow(title: "Excited For", items: current.excitedForItems, showRating: false, friendContext: current, model: model)
                 }
 
                 VStack(spacing: 0) {
@@ -1264,7 +1363,10 @@ struct FriendDetailPage: View {
                 }
                 .buttonStyle(.plain)
                 .alert("Remove \(current.name)?", isPresented: $showRemoveConfirm) {
-                    Button("Remove", role: .destructive) { model.removeFriend(recordID: friend.id) }
+                    Button("Remove", role: .destructive) {
+                        model.removeFriend(recordID: friend.id)
+                        dismiss()
+                    }
                     Button("Cancel", role: .cancel) {}
                 } message: {
                     Text("You'll no longer see their profile. They won't be notified.")
@@ -1396,7 +1498,7 @@ struct AvatarView: View {
 
     private var initialsView: some View {
         ZStack {
-            Circle().fill(.secondary.opacity(0.25))
+            Circle().fill(.white.opacity(0.18))
             Text(initials)
                 .font(.system(size: size * 0.35, weight: .semibold))
                 .foregroundStyle(.primary)

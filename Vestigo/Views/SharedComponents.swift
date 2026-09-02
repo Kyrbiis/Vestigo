@@ -321,7 +321,7 @@ struct MediaTile: View {
             HStack(spacing: 7) {
                 TileIconButton(
                     systemName: model.library.isInWatchlist(item.key) ? "bookmark.fill" : "bookmark",
-                    tint: model.library.isInWatchlist(item.key) ? .white : .secondary
+                    tint: .white
                 ) {
                     model.toggleWatchlist(item)
                 }
@@ -329,7 +329,7 @@ struct MediaTile: View {
                 if !hideWatched && !item.isUpcoming {
                     TileIconButton(
                         systemName: model.library.isWatched(item.key) ? "checkmark.circle.fill" : "checkmark.circle",
-                        tint: model.library.isWatched(item.key) ? .white : .secondary
+                        tint: .white
                     ) {
                         model.toggleWatched(item)
                     }
@@ -855,6 +855,7 @@ struct TileIconButton: View {
     var body: some View {
         Button(action: action) {
             Image(systemName: systemName)
+                .symbolRenderingMode(.monochrome)
                 .font(.system(size: 14, weight: .bold))
                 .foregroundStyle(tint)
                 .frame(width: 32, height: 28)

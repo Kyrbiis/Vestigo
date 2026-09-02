@@ -109,6 +109,22 @@ struct HomeView: View {
                 }
             }
         }
+        .safeAreaInset(edge: .bottom) {
+            if model.homePath.isEmpty {
+                Button {
+                    model.homePath.append(.pickForMe)
+                } label: {
+                    Label("Pick for me", systemImage: "sparkles")
+                        .font(.headline.bold())
+                        .padding(.horizontal, 16)
+                        .frame(height: 46)
+                        .background(.white.opacity(0.1), in: Capsule())
+                        .liquidGlass(cornerRadius: 23)
+                }
+                .buttonStyle(.plain)
+                .padding(.bottom, 10)
+            }
+        }
         .onChange(of: model.mediaFilter) { _, _ in Task { await model.loadHome() } }
         .task { await model.loadSmartRecommendations() }
     }

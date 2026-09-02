@@ -39,6 +39,7 @@ struct CloudPublicSyncService {
                 }
             let excitedForItems: [MediaItem] = settings.socialExcitedForKeys.compactMap { k in
                 library.items.values.first { $0.key.stableID == k }
+                    ?? settings.socialExcitedForItemCache.first { $0.key.stableID == k }
             }
 
             if let data = try? JSONEncoder().encode(featuredItems) {
@@ -62,10 +63,23 @@ struct CloudPublicSyncService {
             } else {
                 record["watchlistPayload"] = nil as CKAsset?
             }
-            if sharing && settings.socialShareWatched, let data = try? JSONEncoder().encode(library.watchedItems) {
-                record["watchedPayload"] = CKAsset(fileURL: try writeTemp(data, name: "watched"))
+            if sharing && settings.socialShareWatched {
+                let sortedWatched = library.watchedItems.sorted {
+                    (library.watchedDates[$0.key] ?? .distantPast) > (library.watchedDates[$1.key] ?? .distantPast)
+                }
+                if let data = try? JSONEncoder().encode(sortedWatched) {
+                    record["watchedPayload"] = CKAsset(fileURL: try writeTemp(data, name: "watched"))
+                }
+                var datesDict: [String: Double] = [:]
+                for item in sortedWatched {
+                    if let d = library.watchedDates[item.key] { datesDict[item.key.stableID] = d.timeIntervalSince1970 }
+                }
+                if !datesDict.isEmpty, let data = try? JSONEncoder().encode(datesDict) {
+                    record["watchedDatesPayload"] = CKAsset(fileURL: try writeTemp(data, name: "watchedDates"))
+                }
             } else {
                 record["watchedPayload"] = nil as CKAsset?
+                record["watchedDatesPayload"] = nil as CKAsset?
             }
 
             if let avatarData {
@@ -83,6 +97,7 @@ struct CloudPublicSyncService {
                 record["favouriteKeys"] = nil as [String]?
                 record["inviteID"] = nil as String?
                 record["ratingsPayload"] = nil as CKAsset?
+                record["watchedDatesPayload"] = nil as CKAsset?
                 _ = try await publicDB.save(record)
                 return "publish OK (schema limited) · name: \(settings.name)"
             }
@@ -119,6 +134,65 @@ struct CloudPublicSyncService {
         return (sorted, "\(sorted.count) friends loaded")
         #else
         return ([], "CloudKit unavailable")
+        #endif
+    }
+
+    // MARK: - Find profile by invite ID (fallback when rid is missing from URL)
+
+    func findProfile(byInviteID inviteID: String) async -> FriendProfile? {
+        #if canImport(CloudKit)
+        let pred = NSPredicate(format: "inviteID == %@", inviteID)
+        let query = CKQuery(recordType: recordType, predicate: pred)
+        do {
+            let (results, _) = try await publicDB.records(matching: query, resultsLimit: 1)
+            for (_, result) in results {
+                if let record = try? result.get() { return makeProfile(from: record) }
+            }
+        } catch { }
+        return nil
+        #else
+        return nil
+        #endif
+    }
+
+    // MARK: - Send friend request (so the other person auto-adds us)
+
+    func sendFriendRequest(fromRecordName: String, fromDisplayName: String, toRecordName: String) async {
+        #if canImport(CloudKit)
+        let recordName = "vfr-\(fromRecordName)-\(toRecordName)"
+        let recordID = CKRecord.ID(recordName: recordName)
+        let record = CKRecord(recordType: "VestigoFriendRequest", recordID: recordID)
+        record["fromRecordName"] = fromRecordName as CKRecordValue
+        record["fromDisplayName"] = fromDisplayName as CKRecordValue
+        record["toRecordName"] = toRecordName as CKRecordValue
+        record["createdAt"] = Date() as CKRecordValue
+        _ = try? await publicDB.save(record)
+        #endif
+    }
+
+    // MARK: - Fetch incoming friend requests addressed to this user
+
+    func fetchIncomingRequests(myRecordName: String) async -> [(id: String, name: String, recordName: String)] {
+        #if canImport(CloudKit)
+        let pred = NSPredicate(format: "toRecordName == %@", myRecordName)
+        let query = CKQuery(recordType: "VestigoFriendRequest", predicate: pred)
+        var results: [(id: String, name: String, recordName: String)] = []
+        do {
+            let (matchResults, _) = try await publicDB.records(matching: query)
+            for (_, result) in matchResults {
+                guard let record = try? result.get() else { continue }
+                let fromName = (record["fromDisplayName"] as? String) ?? "Unknown"
+                let fromRID = (record["fromRecordName"] as? String) ?? ""
+                if !fromRID.isEmpty {
+                    results.append((id: record.recordID.recordName, name: fromName, recordName: fromRID))
+                }
+            }
+        } catch {
+            // VestigoFriendRequest record type may not exist yet in production schema — silently ignore
+        }
+        return results
+        #else
+        return []
         #endif
     }
 
@@ -183,6 +257,13 @@ struct CloudPublicSyncService {
             imageData = try? Data(contentsOf: url)
         }
 
+        var watchedDates: [String: Date] = [:]
+        if let asset = record["watchedDatesPayload"] as? CKAsset,
+           let url = asset.fileURL, let data = try? Data(contentsOf: url),
+           let rawDates = try? JSONDecoder().decode([String: Double].self, from: data) {
+            watchedDates = rawDates.mapValues { Date(timeIntervalSince1970: $0) }
+        }
+
         return FriendProfile(
             id: record.recordID.recordName,
             name: name,
@@ -195,7 +276,8 @@ struct CloudPublicSyncService {
             watchlistItems: watchlistItems,
             watchedItems: watchedItems,
             ratings: ratings,
-            favouriteKeys: favouriteKeys
+            favouriteKeys: favouriteKeys,
+            watchedDates: watchedDates
         )
     }
     #endif

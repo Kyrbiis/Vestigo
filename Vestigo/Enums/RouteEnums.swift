@@ -21,7 +21,6 @@ struct GenreRoute: Hashable { let genre: GenreDefinition }
 enum SearchRoute: Hashable {
     case genre(GenreRoute)
     case chart(MediaKind)
-    case pickForMe
 }
 
 struct GenreDefinition: Identifiable, Hashable {
@@ -88,6 +87,7 @@ struct GenreDefinition: Identifiable, Hashable {
 enum HomeRoute: Hashable {
     case section(SectionRoute)
     case forYouSection(ForYouSection)
+    case pickForMe
 }
 
 // MARK: - Carousel Enums

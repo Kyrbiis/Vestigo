@@ -97,6 +97,9 @@ final class VestigoModel: ObservableObject {
         if !settings.socialMyRecordName.isEmpty {
             url += "&rid=\(settings.socialMyRecordName)"
         }
+        if !settings.name.isEmpty, let encoded = settings.name.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) {
+            url += "&name=\(encoded)"
+        }
         return url
     }
 
@@ -351,6 +354,7 @@ final class VestigoModel: ObservableObject {
         )
 
         loadLocal()
+        loadFriendsCache()
         loadUserAvatar()
         offerStreamingSetupIfNeeded()
 
@@ -2139,6 +2143,7 @@ final class VestigoModel: ObservableObject {
                         self.mediaSearchCache[cacheKey] = rankedVisibleResults
                         self.searchResults = rankedVisibleResults
                         self.searchPeopleResults = []
+                        self.cacheUpcomingItems(from: rankedVisibleResults)
                         self.refreshSearchRatingsIfCurrent(
                             rankedVisibleResults,
                             query: query,
@@ -2183,6 +2188,7 @@ final class VestigoModel: ObservableObject {
                 mediaSearchCache[cacheKey] = results
                 searchResults = results
                 searchPeopleResults = []
+                cacheUpcomingItems(from: results)
                 refreshSearchRatingsIfCurrent(
                     results,
                     query: query,
@@ -2201,6 +2207,16 @@ final class VestigoModel: ObservableObject {
     func quickSearch(query: String) async -> [MediaItem] {
         guard !query.isEmpty else { return [] }
         return (try? await searchMediaResults(query: query, filter: .both)) ?? []
+    }
+
+    func cacheUpcomingItems(from results: [MediaItem]) {
+        let today = Calendar.current.startOfDay(for: Date())
+        let existingIDs = Set(upcoming.map { $0.key.stableID })
+        let newItems = results.filter { item in
+            !existingIDs.contains(item.key.stableID) &&
+            (item.releaseDateValue.map { $0 > today } ?? false)
+        }
+        if !newItems.isEmpty { upcoming.append(contentsOf: newItems) }
     }
 
     private func searchMediaResults(query: String, filter: MediaFilter) async throws -> [MediaItem] {
@@ -3263,6 +3279,26 @@ final class VestigoModel: ObservableObject {
         saveLocalSoon()
     }
 
+    // MARK: - Friends Cache
+
+    private var friendsCacheURL: URL {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("vestigo-friends-cache.json")
+    }
+
+    private func loadFriendsCache() {
+        guard let data = try? Data(contentsOf: friendsCacheURL),
+              let cached = try? JSONDecoder().decode([FriendProfile].self, from: data),
+              !cached.isEmpty else { return }
+        friends = cached
+    }
+
+    private func saveFriendsCache() {
+        guard !friends.isEmpty,
+              let data = try? JSONEncoder().encode(friends) else { return }
+        try? data.write(to: friendsCacheURL, options: .atomic)
+    }
+
     // MARK: - User Avatar
 
     private var avatarFileURL: URL {
@@ -3612,6 +3648,10 @@ final class VestigoModel: ObservableObject {
 
         tabTransitionDirection = tab.sortIndex > selectedTab.sortIndex ? .forward : .backward
         selectedTab = tab
+
+        if tab == .friends {
+            Task { await loadFriends() }
+        }
     }
 
     func reselectCurrentTab() {
@@ -3826,12 +3866,29 @@ final class VestigoModel: ObservableObject {
         publishDiagnostic = diagnostic
     }
 
+    func checkIncomingFriendRequests() async {
+        guard !settings.socialMyRecordName.isEmpty else { return }
+        let incoming = await publicSync.fetchIncomingRequests(myRecordName: settings.socialMyRecordName)
+        var didAdd = false
+        for req in incoming {
+            if !settings.socialConfirmedFriendIDs.contains(req.recordName) {
+                settings.socialConfirmedFriendIDs.append(req.recordName)
+                didAdd = true
+            }
+        }
+        if didAdd {
+            saveSettings()
+            await loadFriends()
+        }
+    }
+
     func loadFriends() async {
         friendsLoading = true
         let (profiles, diagnostic) = await publicSync.fetchFriends(recordIDs: settings.socialConfirmedFriendIDs)
         friends = profiles
         friendsDiagnostic = diagnostic
         friendsLoading = false
+        if !profiles.isEmpty { saveFriendsCache() }
         // Prune stored IDs that returned no record (stale adds from old broken links)
         let resolvedIDs = Set(profiles.map(\.id))
         let pruned = settings.socialConfirmedFriendIDs.filter { resolvedIDs.contains($0) || $0.hasPrefix("vp-") }
@@ -3841,11 +3898,28 @@ final class VestigoModel: ObservableObject {
         }
     }
 
-    func handleFriendLink(inviteID: String, recordID: String? = nil) async {
-        guard let rid = recordID, !rid.isEmpty else { return }
-        let (profiles, _) = await publicSync.fetchFriends(recordIDs: [rid])
-        let name = profiles.first?.name ?? "this person"
-        await MainActor.run { pendingFriendAdd = PendingFriendAdd(id: rid, name: name) }
+    func handleFriendLink(inviteID: String, recordID: String? = nil, displayName: String? = nil) async {
+        if let rid = recordID, !rid.isEmpty {
+            // Fast path: rid known, fetch profile for display name
+            let (profiles, _) = await publicSync.fetchFriends(recordIDs: [rid])
+            let name = profiles.first?.name ?? displayName ?? "this person"
+            await MainActor.run {
+                pendingFriendAdd = PendingFriendAdd(id: rid, name: name)
+                selectTab(.friends)
+            }
+        } else {
+            // Fallback: rid missing, query by inviteID
+            if let profile = await publicSync.findProfile(byInviteID: inviteID) {
+                await MainActor.run {
+                    pendingFriendAdd = PendingFriendAdd(id: profile.id, name: profile.name)
+                    selectTab(.friends)
+                }
+            } else if let name = displayName {
+                // CloudKit query failed but we have a name from URL — still show alert
+                // without a rid we can't add them, so skip
+                _ = name
+            }
+        }
     }
 
     func addFriend(recordID: String) {
@@ -3855,14 +3929,25 @@ final class VestigoModel: ObservableObject {
         }
         settings.socialConfirmedFriendIDs.append(recordID)
         saveSettings()
-        Task { await loadFriends() }
         pendingFriendAdd = nil
+        // Refresh list immediately; notify the other person in parallel
+        Task { await loadFriends() }
+        Task {
+            if !settings.socialMyRecordName.isEmpty {
+                await publicSync.sendFriendRequest(
+                    fromRecordName: settings.socialMyRecordName,
+                    fromDisplayName: settings.name,
+                    toRecordName: recordID
+                )
+            }
+        }
     }
 
     func removeFriend(recordID: String) {
         settings.socialConfirmedFriendIDs.removeAll { $0 == recordID }
         friends.removeAll { $0.id == recordID }
         saveSettings()
+        Task { await loadFriends() }
     }
 
     func refreshFriend(recordID: String) async -> FriendProfile? {

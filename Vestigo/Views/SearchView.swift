@@ -120,23 +120,6 @@ struct SearchView: View {
                 }
             }
         }
-        .safeAreaInset(edge: .bottom) {
-            if model.searchPath.isEmpty && model.searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                Button {
-                    searchIsFocused = false
-                    model.searchFieldIsFocused = false
-                    model.searchPath.append(.pickForMe)
-                } label: {
-                    Label("Pick for me", systemImage: "sparkles")
-                        .font(.headline.bold())
-                        .padding(.horizontal, 16)
-                        .frame(height: 46)
-                        .liquidGlass(cornerRadius: 23)
-                }
-                .buttonStyle(.plain)
-                .padding(.bottom, 10)
-            }
-        }
     }
 
     private func commitSearchInput() {

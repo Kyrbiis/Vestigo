@@ -39,8 +39,8 @@ struct ContentView: View {
         case "openSearch": model.selectTab(.search)
         case "openForYou": model.selectTab(.home)
         case "openPickForMe":
-            model.selectTab(.search)
-            model.searchPath = [.pickForMe]
+            model.selectTab(.home)
+            model.homePath = [.pickForMe]
         default: break
         }
     }
@@ -114,24 +114,24 @@ struct ContentView: View {
             Text("Your OMDb API key has made \(model.settings.omdbDailyRequestCount.formatted()) requests today, reaching its daily limit. IMDb and Rotten Tomato ratings will not load until midnight. You can view or change your key tier from the OMDb website.")
         }
         .onOpenURL { url in
-            // Legacy vestigo:// deep links
             guard url.scheme == "vestigo",
                   url.host == "friend",
                   let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
                   let id = components.queryItems?.first(where: { $0.name == "id" })?.value
             else { return }
             let rid = components.queryItems?.first(where: { $0.name == "rid" })?.value
-            Task { await model.handleFriendLink(inviteID: id, recordID: rid) }
+            let name = components.queryItems?.first(where: { $0.name == "name" })?.value
+            Task { await model.handleFriendLink(inviteID: id, recordID: rid, displayName: name) }
         }
         .onContinueUserActivity(NSUserActivityTypeBrowsingWeb) { activity in
-            // Universal Links from jbhswift.github.io/friend
             guard let url = activity.webpageURL,
                   let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
                   components.path == "/friend",
                   let id = components.queryItems?.first(where: { $0.name == "id" })?.value
             else { return }
             let rid = components.queryItems?.first(where: { $0.name == "rid" })?.value
-            Task { await model.handleFriendLink(inviteID: id, recordID: rid) }
+            let name = components.queryItems?.first(where: { $0.name == "name" })?.value
+            Task { await model.handleFriendLink(inviteID: id, recordID: rid, displayName: name) }
         }
         .alert(
             "Add Friend",
@@ -236,6 +236,9 @@ private struct AppTabRoot: View {
                                 case .forYouSection(let section):
                                     FullMediaListView(title: section.title, items: section.items, model: model)
                                         .background(AppBackground(settings: model.settings).ignoresSafeArea())
+                                case .pickForMe:
+                                    PickForMeView(model: model, startingFilter: model.mediaFilter)
+                                        .background(AppBackground(settings: model.settings).ignoresSafeArea())
                                 }
                             }
                     }
@@ -261,9 +264,6 @@ private struct AppTabRoot: View {
                                         .background(AppBackground(settings: model.settings).ignoresSafeArea())
                                 case .chart(let kind):
                                     ChartResultsView(kind: kind, model: model)
-                                        .background(AppBackground(settings: model.settings).ignoresSafeArea())
-                                case .pickForMe:
-                                    PickForMeView(model: model, startingFilter: model.mediaFilter)
                                         .background(AppBackground(settings: model.settings).ignoresSafeArea())
                                 }
                             }
