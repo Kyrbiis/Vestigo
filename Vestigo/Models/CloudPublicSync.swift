@@ -1,10 +1,6 @@
 import Foundation
-import CryptoKit
 #if canImport(CloudKit)
 import CloudKit
-#endif
-#if canImport(Contacts)
-import Contacts
 #endif
 
 struct CloudPublicSyncService {
@@ -13,11 +9,11 @@ struct CloudPublicSyncService {
 
     // MARK: - Publish own profile
 
-    func publishProfile(settings: AppSettings, library: UserLibrary) async {
+    func publishProfile(settings: AppSettings, library: UserLibrary) async -> String {
         #if canImport(CloudKit)
         do {
             let userID = try await CKContainer.default().userRecordID()
-            let recordID = CKRecord.ID(recordName: userID.recordName)
+            let recordID = CKRecord.ID(recordName: "vp-\(userID.recordName)")
 
             let record: CKRecord
             do {
@@ -26,12 +22,10 @@ struct CloudPublicSyncService {
                 record = CKRecord(recordType: recordType, recordID: recordID)
             }
 
-            let (phoneHashes, emailHashes) = await myContactHashes()
-            record["phoneHashes"] = phoneHashes as CKRecordValue
-            record["emailHashes"] = emailHashes as CKRecordValue
             record["displayName"] = settings.name as CKRecordValue
             record["sharesWatchlist"] = (!settings.socialDontShare && settings.socialShareWatchlist) as CKRecordValue
             record["sharesWatched"] = (!settings.socialDontShare && settings.socialShareWatched) as CKRecordValue
+            record["favouriteKeys"] = library.favouriteKeys.map { $0.stableID } as CKRecordValue
             record["lastActiveAt"] = Date() as CKRecordValue
 
             let featuredItems: [MediaItem] = settings.socialFeaturedItemKeys.isEmpty
@@ -53,6 +47,14 @@ struct CloudPublicSyncService {
                 record["excitedForPayload"] = CKAsset(fileURL: try writeTemp(data, name: "excitedFor"))
             }
 
+            var ratingsDict: [String: Double] = [:]
+            for item in library.watchedItems {
+                if let r = library.ratings[item.key] { ratingsDict[item.key.stableID] = r }
+            }
+            if !ratingsDict.isEmpty, let data = try? JSONEncoder().encode(ratingsDict) {
+                record["ratingsPayload"] = CKAsset(fileURL: try writeTemp(data, name: "ratings"))
+            }
+
             let sharing = !settings.socialDontShare
             if sharing && settings.socialShareWatchlist, let data = try? JSONEncoder().encode(library.watchlistItems) {
                 record["watchlistPayload"] = CKAsset(fileURL: try writeTemp(data, name: "watchlist"))
@@ -66,158 +68,126 @@ struct CloudPublicSyncService {
             }
 
             _ = try await publicDB.save(record)
+            return "publish OK · name: \(settings.name)"
         } catch {
-            // Non-critical — ignore silently
+            return "publish error: \(error.localizedDescription)"
         }
+        #else
+        return "CloudKit unavailable"
         #endif
     }
 
-    // MARK: - Discover friends
+    // MARK: - Fetch friends by confirmed record IDs
 
-    func fetchFriends(contacts: [CNContact]) async -> [FriendProfile] {
-        #if canImport(CloudKit) && canImport(Contacts)
-        guard !contacts.isEmpty else { return [] }
+    func fetchFriends(recordIDs: [String]) async -> ([FriendProfile], String) {
+        #if canImport(CloudKit)
+        guard !recordIDs.isEmpty else { return ([], "No friends added yet") }
 
-        var hashToContact: [String: CNContact] = [:]
-        for contact in contacts {
-            for phone in contact.phoneNumbers {
-                let h = sha256(normalizePhone(phone.value.stringValue))
-                if !h.isEmpty { hashToContact[h] = contact }
-            }
-            for email in contact.emailAddresses {
-                let h = sha256(normalizeEmail(email.value as String))
-                if !h.isEmpty { hashToContact[h] = contact }
-            }
-        }
-        guard !hashToContact.isEmpty else { return [] }
+        let ckIDs = recordIDs.map { CKRecord.ID(recordName: $0) }
+        var profiles: [FriendProfile] = []
 
-        let allHashes = Array(hashToContact.keys)
-        var fetchedRecords: [CKRecord] = []
-
-        // Batch into groups of 30 hashes, run concurrently
-        await withTaskGroup(of: [CKRecord].self) { group in
-            let batchSize = 30
-            for i in stride(from: 0, to: allHashes.count, by: batchSize) {
-                let batch = Array(allHashes[i..<min(i + batchSize, allHashes.count)])
-                group.addTask {
-                    var records: [CKRecord] = []
-                    let preds = batch.flatMap { h in [
-                        NSPredicate(format: "phoneHashes CONTAINS %@", h),
-                        NSPredicate(format: "emailHashes CONTAINS %@", h)
-                    ]}
-                    let compound = NSCompoundPredicate(orPredicateWithSubpredicates: preds)
-                    do {
-                        let query = CKQuery(recordType: self.recordType, predicate: compound)
-                        let (results, _) = try await self.publicDB.records(matching: query)
-                        for (_, result) in results {
-                            if let record = try? result.get() { records.append(record) }
-                        }
-                    } catch { }
-                    return records
+        do {
+            let results = try await publicDB.records(for: ckIDs)
+            for (_, result) in results {
+                guard let record = try? result.get() else { continue }
+                if let profile = makeProfile(from: record) {
+                    profiles.append(profile)
                 }
             }
-            for await records in group { fetchedRecords += records }
+        } catch {
+            return (profiles, "Error: \(error.localizedDescription)")
         }
 
-        // Deduplicate by record ID
-        var seenIDs = Set<String>()
-        fetchedRecords = fetchedRecords.filter { seenIDs.insert($0.recordID.recordName).inserted }
-
-        var profiles: [FriendProfile] = []
-        for record in fetchedRecords {
-            let name = (record["displayName"] as? String) ?? ""
-            let sharesWatchlist = (record["sharesWatchlist"] as? Bool) ?? false
-            let sharesWatched = (record["sharesWatched"] as? Bool) ?? false
-            let lastActiveAt = record["lastActiveAt"] as? Date
-
-            let phoneHashes = (record["phoneHashes"] as? [String]) ?? []
-            let emailHashes = (record["emailHashes"] as? [String]) ?? []
-            var matchedContact: CNContact? = nil
-            for h in phoneHashes + emailHashes {
-                if let c = hashToContact[h] { matchedContact = c; break }
-            }
-
-            let displayName: String
-            if !name.isEmpty {
-                displayName = name
-            } else if let c = matchedContact,
-                      let formatted = CNContactFormatter.string(from: c, style: .fullName),
-                      !formatted.isEmpty {
-                displayName = formatted
-            } else {
-                continue
-            }
-
-            let imageData = matchedContact.flatMap { c in
-                c.isKeyAvailable(CNContactImageDataKey) ? c.imageData : nil
-            }
-
-            var featuredItems: [MediaItem] = []
-            var excitedForItems: [MediaItem] = []
-            var watchlistItems: [MediaItem] = []
-            var watchedItems: [MediaItem] = []
-
-            if let asset = record["featuredPayload"] as? CKAsset,
-               let url = asset.fileURL, let data = try? Data(contentsOf: url) {
-                featuredItems = (try? JSONDecoder().decode([MediaItem].self, from: data)) ?? []
-            }
-            if let asset = record["excitedForPayload"] as? CKAsset,
-               let url = asset.fileURL, let data = try? Data(contentsOf: url) {
-                excitedForItems = (try? JSONDecoder().decode([MediaItem].self, from: data)) ?? []
-            }
-            if sharesWatchlist, let asset = record["watchlistPayload"] as? CKAsset,
-               let url = asset.fileURL, let data = try? Data(contentsOf: url) {
-                watchlistItems = (try? JSONDecoder().decode([MediaItem].self, from: data)) ?? []
-            }
-            if sharesWatched, let asset = record["watchedPayload"] as? CKAsset,
-               let url = asset.fileURL, let data = try? Data(contentsOf: url) {
-                watchedItems = (try? JSONDecoder().decode([MediaItem].self, from: data)) ?? []
-            }
-
-            profiles.append(FriendProfile(
-                id: record.recordID.recordName,
-                name: displayName,
-                imageData: imageData,
-                recentActivity: lastActiveAt,
-                featuredItems: featuredItems,
-                excitedForItems: excitedForItems,
-                sharesWatchlist: sharesWatchlist,
-                sharesWatched: sharesWatched,
-                watchlistItems: watchlistItems,
-                watchedItems: watchedItems
-            ))
-        }
-
-        return profiles.sorted { ($0.recentActivity ?? .distantPast) > ($1.recentActivity ?? .distantPast) }
+        let sorted = profiles.sorted { ($0.recentActivity ?? .distantPast) > ($1.recentActivity ?? .distantPast) }
+        return (sorted, "\(sorted.count) friends loaded")
         #else
-        return []
+        return ([], "CloudKit unavailable")
+        #endif
+    }
+
+    // MARK: - Fetch display name for add-friend confirmation
+
+    func fetchDisplayName(recordID: String) async -> String? {
+        #if canImport(CloudKit)
+        let ckID = CKRecord.ID(recordName: recordID)
+        guard let record = try? await publicDB.record(for: ckID) else { return nil }
+        return record["displayName"] as? String
+        #else
+        return nil
+        #endif
+    }
+
+    // MARK: - Fetch own invite record name
+
+    func fetchMyRecordName() async -> String? {
+        #if canImport(CloudKit)
+        guard let userID = try? await CKContainer.default().userRecordID() else { return nil }
+        return "vp-\(userID.recordName)"
+        #else
+        return nil
         #endif
     }
 
     // MARK: - Helpers
 
-    private func myContactHashes() async -> ([String], [String]) {
-        #if canImport(Contacts)
-        guard CNContactStore.authorizationStatus(for: .contacts) == .authorized else { return ([], []) }
-        guard let me = try? CNContactStore().unifiedMeContactWithKeysToFetch([
-            CNContactPhoneNumbersKey as CNKeyDescriptor,
-            CNContactEmailAddressesKey as CNKeyDescriptor
-        ]) else { return ([], []) }
-        let phones = me.phoneNumbers.map { sha256(normalizePhone($0.value.stringValue)) }.filter { !$0.isEmpty }
-        let emails = me.emailAddresses.map { sha256(normalizeEmail($0.value as String)) }.filter { !$0.isEmpty }
-        return (phones, emails)
-        #else
-        return ([], [])
-        #endif
-    }
+    #if canImport(CloudKit)
+    private func makeProfile(from record: CKRecord) -> FriendProfile? {
+        let name = (record["displayName"] as? String) ?? ""
+        guard !name.isEmpty else { return nil }
 
-    private func sha256(_ input: String) -> String {
-        guard !input.isEmpty else { return "" }
-        return SHA256.hash(data: Data(input.utf8)).compactMap { String(format: "%02x", $0) }.joined()
-    }
+        let sharesWatchlist = (record["sharesWatchlist"] as? Bool) ?? false
+        let sharesWatched = (record["sharesWatched"] as? Bool) ?? false
+        let lastActiveAt = record["lastActiveAt"] as? Date
+        let favouriteKeys = Set((record["favouriteKeys"] as? [String]) ?? [])
 
-    private func normalizePhone(_ phone: String) -> String { phone.filter(\.isNumber) }
-    private func normalizeEmail(_ email: String) -> String { email.lowercased().trimmingCharacters(in: .whitespaces) }
+        var featuredItems: [MediaItem] = []
+        var excitedForItems: [MediaItem] = []
+        var watchlistItems: [MediaItem] = []
+        var watchedItems: [MediaItem] = []
+
+        if let asset = record["featuredPayload"] as? CKAsset,
+           let url = asset.fileURL, let data = try? Data(contentsOf: url) {
+            featuredItems = (try? JSONDecoder().decode([MediaItem].self, from: data)) ?? []
+        }
+        if let asset = record["excitedForPayload"] as? CKAsset,
+           let url = asset.fileURL, let data = try? Data(contentsOf: url) {
+            excitedForItems = (try? JSONDecoder().decode([MediaItem].self, from: data)) ?? []
+        }
+        if sharesWatchlist, let asset = record["watchlistPayload"] as? CKAsset,
+           let url = asset.fileURL, let data = try? Data(contentsOf: url) {
+            watchlistItems = (try? JSONDecoder().decode([MediaItem].self, from: data)) ?? []
+        }
+        if sharesWatched, let asset = record["watchedPayload"] as? CKAsset,
+           let url = asset.fileURL, let data = try? Data(contentsOf: url) {
+            watchedItems = (try? JSONDecoder().decode([MediaItem].self, from: data)) ?? []
+        }
+
+        var ratingsBySid: [String: Double] = [:]
+        if let asset = record["ratingsPayload"] as? CKAsset,
+           let url = asset.fileURL, let data = try? Data(contentsOf: url) {
+            ratingsBySid = (try? JSONDecoder().decode([String: Double].self, from: data)) ?? [:]
+        }
+        var ratings: [MediaKey: Double] = [:]
+        for item in watchedItems + watchlistItems {
+            if let r = ratingsBySid[item.key.stableID] { ratings[item.key] = r }
+        }
+
+        return FriendProfile(
+            id: record.recordID.recordName,
+            name: name,
+            imageData: nil,
+            recentActivity: lastActiveAt,
+            featuredItems: featuredItems,
+            excitedForItems: excitedForItems,
+            sharesWatchlist: sharesWatchlist,
+            sharesWatched: sharesWatched,
+            watchlistItems: watchlistItems,
+            watchedItems: watchedItems,
+            ratings: ratings,
+            favouriteKeys: favouriteKeys
+        )
+    }
+    #endif
 
     private func writeTemp(_ data: Data, name: String) throws -> URL {
         let url = FileManager.default.temporaryDirectory
