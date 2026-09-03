@@ -373,41 +373,6 @@ struct DetailView: View {
                     }
                 }
                 Spacer()
-                if showingFriendRating {
-                    if let watchDate = friend.watchedDates[item.key.stableID] {
-                        Label(watchDate.formatted(.dateTime.day().month(.abbreviated).year()), systemImage: "calendar")
-                            .font(.caption.bold())
-                            .foregroundStyle(.blue)
-                    }
-                } else if model.library.isWatched(item.key) {
-                    Button {
-                        showWatchedDatePopover = true
-                    } label: {
-                        if let date = model.library.watchedDates[item.key] {
-                            Label(date.formatted(.dateTime.day().month(.abbreviated).year()), systemImage: "calendar")
-                                .font(.caption.bold())
-                                .foregroundStyle(.secondary)
-                        } else {
-                            Label("Add date", systemImage: "calendar.badge.plus")
-                                .font(.caption.bold())
-                                .foregroundStyle(.tertiary)
-                        }
-                    }
-                    .buttonStyle(.plain)
-                    .popover(isPresented: $showWatchedDatePopover) {
-                        WatchedDatePopover(
-                            date: Binding(
-                                get: { model.library.watchedDates[item.key] ?? .now },
-                                set: { model.setWatchedDate($0, for: item) }
-                            ),
-                            onClear: model.library.watchedDates[item.key] != nil ? {
-                                model.clearWatchedDate(for: item)
-                                showWatchedDatePopover = false
-                            } : nil
-                        )
-                        .presentationCompactAdaptation(.popover)
-                    }
-                }
                 let firstName = friend.name.components(separatedBy: " ").first ?? friend.name
                 Button {
                     withAnimation(.easeInOut(duration: 0.15)) { showingFriendRating.toggle() }
@@ -417,8 +382,8 @@ struct DetailView: View {
                         .font(.caption.bold())
                         .foregroundStyle(showingFriendRating ? Color.blue : Color.yellow)
                         .padding(.horizontal, 10)
-                        .frame(height: 32)
-                        .liquidGlass(cornerRadius: 16)
+                        .frame(height: 44)
+                        .liquidGlass(cornerRadius: 22)
                 }
                 .buttonStyle(.plain)
             }

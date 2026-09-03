@@ -410,6 +410,7 @@ struct PosterView: View {
     let width: CGFloat
     let height: CGFloat
     var isFavourite = false
+    var favouriteColor: Color = .yellow
     @Environment(\.imageRefreshToken) private var imageRefreshToken
     
     var body: some View {
@@ -428,7 +429,7 @@ struct PosterView: View {
             if isFavourite {
                 Image(systemName: "star.fill")
                     .font(.system(size: max(11, width * 0.095), weight: .black))
-                    .foregroundStyle(.yellow)
+                    .foregroundStyle(favouriteColor)
                     .padding(max(5, width * 0.045))
                     .background(.black.opacity(0.64), in: Circle())
                     .padding(max(5, width * 0.045))

@@ -45,6 +45,8 @@ struct FriendsView: View {
     @State private var showAddMenu = false
     @State private var showQRCode = false
     @State private var showSendLink = false
+    @State private var isPreparingInvite = false
+    @AppStorage("Vestigo.devMode") private var devMode: Bool = false
 
     private var myInviteURL: String { model.myInviteURL }
 
@@ -82,6 +84,28 @@ struct FriendsView: View {
                                 onSelect: { friend in friendsPath.append(.friendDetail(friend)) }
                             )
                         }
+
+                        if devMode && !model.linkLog.isEmpty {
+                            VStack(alignment: .leading, spacing: 4) {
+                                HStack {
+                                    Text("Link Log")
+                                        .font(.caption.bold())
+                                        .foregroundStyle(.secondary)
+                                    Spacer()
+                                    Button("Clear") { model.linkLog.removeAll() }
+                                        .font(.caption)
+                                        .foregroundStyle(.tertiary)
+                                }
+                                ForEach(model.linkLog, id: \.self) { entry in
+                                    Text(entry)
+                                        .font(.system(size: 10, design: .monospaced))
+                                        .foregroundStyle(.secondary)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                }
+                            }
+                            .padding(12)
+                            .liquidGlass(cornerRadius: 20)
+                        }
                     }
                 }
                 .navigationDestination(for: FriendsRoute.self) { route in
@@ -102,17 +126,51 @@ struct FriendsView: View {
                     friendsPath.removeAll()
                     selectedTab = .me
                 }
+                .onChange(of: model.pendingFriendAdd) { _, newValue in
+                    if newValue != nil { selectedTab = .friends }
+                }
+                .onAppear {
+                    // Handle the case where pendingFriendAdd was set before this view appeared
+                    if model.pendingFriendAdd != nil { selectedTab = .friends }
+                }
             }
 
             if showQRCode {
                 QRCodeOverlay(inviteURL: myInviteURL, onDismiss: { showQRCode = false })
                     .transition(.opacity.animation(.easeInOut(duration: 0.2)))
             }
+
+            if isPreparingInvite {
+                Color.black.opacity(0.45)
+                    .ignoresSafeArea()
+                    .transition(.opacity)
+                ProgressView()
+                    .progressViewStyle(.circular)
+                    .tint(.white)
+                    .scaleEffect(1.6)
+                    .transition(.opacity)
+            }
         }
         .task { await startFriendsLoadAsync() }
         .alert("Add a Friend", isPresented: $showAddMenu) {
-            Button("QR Code") { showQRCode = true }
-            Button("Send Link") { showSendLink = true }
+            Button("QR Code") {
+                Task {
+                    try? await Task.sleep(nanoseconds: 300_000_000) // let alert finish dismissing
+                    withAnimation(.easeInOut(duration: 0.22)) { isPreparingInvite = true }
+                    await model.publishPublicProfile()
+                    withAnimation(.easeInOut(duration: 0.22)) { isPreparingInvite = false }
+                    showQRCode = true
+                }
+            }
+            Button("Send Link") {
+                Task {
+                    try? await Task.sleep(nanoseconds: 300_000_000)
+                    withAnimation(.easeInOut(duration: 0.22)) { isPreparingInvite = true }
+                    await model.publishPublicProfile()
+                    withAnimation(.easeInOut(duration: 0.22)) { isPreparingInvite = false }
+                    showSendLink = true
+                }
+            }
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("Share your Vestigo profile so friends can add you.")
@@ -512,6 +570,8 @@ private struct SocialPosterRow: View {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(alignment: .top, spacing: 10) {
                         ForEach(items) { item in
+                            let isFriendFav = friendContext?.favouriteKeys.contains(item.key.stableID) ?? false
+                            let isMyFav = model.library.isFavourite(item)
                             Button {
                                 if let friendContext { model.friendDetailContext = friendContext }
                                 model.selectedItem = item
@@ -521,12 +581,13 @@ private struct SocialPosterRow: View {
                                         item: item,
                                         width: 110,
                                         height: 160,
-                                        isFavourite: model.library.isFavourite(item)
+                                        isFavourite: isFriendFav || isMyFav,
+                                        favouriteColor: (isFriendFav && !isMyFav) ? .blue : .yellow
                                     )
                                     Text(item.title)
                                         .font(.caption.bold())
                                         .foregroundStyle(.primary)
-                                        .lineLimit(1)
+                                        .lineLimit(2)
                                         .frame(width: 110, alignment: .leading)
                                     if showRating {
                                         if let rating = model.library.ratings[item.key], rating > 0 {
@@ -595,18 +656,19 @@ private struct FeaturedPickerSheet: View {
     @State private var searchText = ""
     @State private var sourceFilter: PickerSource = .both
     @State private var kindFilter: PickerKind = .both
+    @State private var sortedItems: [MediaItem] = []
 
     private let maxItems = 6
     private let columns = [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())]
 
-    private var libraryItems: [MediaItem] {
+    private func recomputeSortedItems() {
         let sourceItems: [MediaItem]
         switch sourceFilter {
         case .watched:   sourceItems = model.library.watchedItems
         case .watchlist: sourceItems = model.library.watchlistItems
         case .both:      sourceItems = model.library.watchedItems + model.library.watchlistItems
         }
-        let all = sourceItems
+        sortedItems = sourceItems
             .uniqued()
             .filter { item in
                 switch kindFilter {
@@ -624,9 +686,12 @@ private struct FeaturedPickerSheet: View {
                 if aFav != bFav { return aFav }
                 return $0.voteAverage > $1.voteAverage
             }
-        if searchText.isEmpty { return all }
+    }
+
+    private var libraryItems: [MediaItem] {
+        if searchText.isEmpty { return sortedItems }
         let q = searchText.lowercased()
-        return all.filter { $0.title.lowercased().contains(q) }
+        return sortedItems.filter { $0.title.lowercased().contains(q) }
     }
 
     private func save() {
@@ -748,8 +813,13 @@ private struct FeaturedPickerSheet: View {
         .ignoresSafeArea(edges: .bottom)
         .presentationBackground(.clear)
         .presentationCornerRadius(54)
-        .onAppear { selected = Set(model.settings.socialFeaturedItemKeys) }
+        .onAppear {
+            selected = Set(model.settings.socialFeaturedItemKeys)
+            recomputeSortedItems()
+        }
         .onDisappear { save() }
+        .onChange(of: sourceFilter) { _, _ in recomputeSortedItems() }
+        .onChange(of: kindFilter) { _, _ in recomputeSortedItems() }
     }
 }
 
@@ -760,7 +830,7 @@ private struct ExcitedForPickerSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var selected: Set<String> = []
     @State private var searchText = ""
-    @State private var remoteResults: [MediaItem] = []
+    @State private var baseItems: [MediaItem] = []
     @State private var isSearchingRemote = false
     @State private var remoteTask: Task<Void, Never>? = nil
     @State private var kindFilter: PickerKind = .both
@@ -770,7 +840,7 @@ private struct ExcitedForPickerSheet: View {
 
     private func save() {
         model.settings.socialExcitedForKeys = Array(selected)
-        let selectedItems = displayItems.filter { selected.contains($0.key.stableID) }
+        let selectedItems = baseItems.filter { selected.contains($0.key.stableID) }
         var cache = model.settings.socialExcitedForItemCache
         for item in selectedItems {
             cache.removeAll { $0.key == item.key }
@@ -788,40 +858,33 @@ private struct ExcitedForPickerSheet: View {
         }
     }
 
-    private var localItems: [MediaItem] {
+    private func buildBaseItems() {
         let today = Calendar.current.startOfDay(for: Date())
         let fromFeed = model.upcoming
         let fromLibrary = model.library.items.values.filter { item in
             guard let d = item.releaseDateValue else { return false }
             return d > today
         }
-        let merged = applyKind((fromFeed + Array(fromLibrary)).uniqued())
+        let cacheItems = model.settings.socialExcitedForItemCache
+        baseItems = (fromFeed + Array(fromLibrary) + cacheItems)
+            .uniqued()
+            .filter { item in
+                if let d = item.releaseDateValue { return d > today }
+                return true
+            }
             .sorted {
                 let aSel = selected.contains($0.key.stableID)
                 let bSel = selected.contains($1.key.stableID)
                 if aSel != bSel { return aSel }
                 return ($0.releaseDateValue ?? .distantFuture) < ($1.releaseDateValue ?? .distantFuture)
             }
-        guard !searchText.isEmpty else { return merged }
-        let q = searchText.lowercased()
-        return merged.filter { $0.title.lowercased().contains(q) }
     }
 
     private var displayItems: [MediaItem] {
-        guard !searchText.isEmpty else { return localItems }
-        let localIDs = Set(localItems.map { $0.key.stableID })
-        let today = Calendar.current.startOfDay(for: Date())
-        let remote = applyKind(remoteResults).filter { item in
-            guard !localIDs.contains(item.key.stableID) else { return false }
-            if let d = item.releaseDateValue { return d > today }
-            return true
-        }
-        return (localItems + remote).sorted {
-            let aSel = selected.contains($0.key.stableID)
-            let bSel = selected.contains($1.key.stableID)
-            if aSel != bSel { return aSel }
-            return ($0.releaseDateValue ?? .distantFuture) < ($1.releaseDateValue ?? .distantFuture)
-        }
+        let kindFiltered = applyKind(baseItems)
+        if searchText.isEmpty { return kindFiltered }
+        let q = searchText.lowercased()
+        return kindFiltered.filter { $0.title.lowercased().contains(q) }
     }
 
     var body: some View {
@@ -931,19 +994,29 @@ private struct ExcitedForPickerSheet: View {
         .ignoresSafeArea(edges: .bottom)
         .presentationBackground(.clear)
         .presentationCornerRadius(54)
-        .onAppear { selected = Set(model.settings.socialExcitedForKeys) }
+        .onAppear {
+            selected = Set(model.settings.socialExcitedForKeys)
+            buildBaseItems()
+        }
         .onDisappear { save() }
         .onChange(of: searchText) { _, text in
             remoteTask?.cancel()
-            guard !text.isEmpty else { remoteResults = []; return }
+            guard !text.isEmpty else { return }
             remoteTask = Task {
-                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                try? await Task.sleep(nanoseconds: 600_000_000)
                 guard !Task.isCancelled else { return }
-                if localItems.count < 5 {
+                let q = text.lowercased()
+                let localCount = applyKind(baseItems).filter { $0.title.lowercased().contains(q) }.count
+                if localCount < 5 {
                     isSearchingRemote = true
                     let found = await model.quickSearch(query: text)
-                    remoteResults = found
                     model.cacheUpcomingItems(from: found)
+                    let today = Calendar.current.startOfDay(for: Date())
+                    for item in found {
+                        guard !baseItems.contains(where: { $0.key == item.key }) else { continue }
+                        if let d = item.releaseDateValue { guard d > today else { continue } }
+                        baseItems.append(item)
+                    }
                     isSearchingRemote = false
                 }
             }
@@ -960,6 +1033,7 @@ private struct FriendsListView: View {
     var diagnostic: String = ""
     let onSelect: (FriendProfile) -> Void
     @AppStorage("Vestigo.devMode") private var devMode: Bool = false
+    @State private var friendToRemove: FriendProfile? = nil
 
     var body: some View {
         VStack(spacing: 16) {
@@ -1016,12 +1090,31 @@ private struct FriendsListView: View {
                         }
                         .padding(.horizontal, 16)
                         .padding(.vertical, 13)
-                        .liquidGlass(cornerRadius: 22)
+                        .liquidGlass(cornerRadius: 30)
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
+                    .contextMenu {
+                        Button(role: .destructive) {
+                            friendToRemove = friend
+                        } label: {
+                            Label("Remove Friend", systemImage: "person.badge.minus")
+                        }
+                    }
                 }
             }
+        }
+        .alert("Remove \(friendToRemove?.name ?? "")?", isPresented: Binding(
+            get: { friendToRemove != nil },
+            set: { if !$0 { friendToRemove = nil } }
+        )) {
+            Button("Remove", role: .destructive) {
+                if let f = friendToRemove { model.removeFriend(recordID: f.id) }
+                friendToRemove = nil
+            }
+            Button("Cancel", role: .cancel) { friendToRemove = nil }
+        } message: {
+            Text("They will be removed from your friends list.")
         }
     }
 }
@@ -1106,12 +1199,13 @@ private struct FriendFavouritesSection: View {
                                         item: scored.item,
                                         width: 100,
                                         height: 150,
-                                        isFavourite: model.library.isFavourite(scored.item)
+                                        isFavourite: true,
+                                        favouriteColor: model.library.isFavourite(scored.item) ? .yellow : .blue
                                     )
                                     Text(scored.item.title)
                                         .font(.caption.bold())
                                         .foregroundStyle(.primary)
-                                        .lineLimit(1)
+                                        .lineLimit(2)
                                         .frame(width: 100, alignment: .leading)
                                     Text(scored.friendNames.prefix(2).joined(separator: ", "))
                                         .font(.caption2)
@@ -1179,7 +1273,7 @@ private struct FriendExcitedForSection: View {
     var body: some View {
         if !scoredItems.isEmpty {
             VStack(alignment: .leading, spacing: 12) {
-                Text("Friends Excited For")
+                Text("Friends are excited for")
                     .font(.headline.bold())
                     .padding(.horizontal, 2)
                 ScrollView(.horizontal, showsIndicators: false) {
@@ -1196,7 +1290,7 @@ private struct FriendExcitedForSection: View {
                                     Text(scored.item.title)
                                         .font(.caption.bold())
                                         .foregroundStyle(.primary)
-                                        .lineLimit(1)
+                                        .lineLimit(2)
                                         .frame(width: 100, alignment: .leading)
                                     Text(scored.friendLabels.prefix(2).joined(separator: ", "))
                                         .font(.caption2)
@@ -1280,12 +1374,20 @@ struct FriendDetailPage: View {
             VStack(spacing: 22) {
                 VStack(spacing: 12) {
                     AvatarView(name: current.name, imageData: current.imageData, size: 110)
-                    Text(current.name)
-                        .font(.title.bold())
-                        .minimumScaleFactor(0.6)
-                        .lineLimit(2)
-                        .multilineTextAlignment(.center)
-                        .frame(maxWidth: .infinity)
+                    VStack(spacing: 4) {
+                        Text(current.name)
+                            .font(.title.bold())
+                            .minimumScaleFactor(0.6)
+                            .lineLimit(2)
+                            .multilineTextAlignment(.center)
+                            .frame(maxWidth: .infinity)
+                        if let activity = current.recentActivity {
+                            Text("Active \(activity.formatted(.relative(presentation: .named)))")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .frame(maxWidth: .infinity)
                 }
                 .frame(maxWidth: .infinity)
                 .padding(.top, 4)
@@ -1302,7 +1404,7 @@ struct FriendDetailPage: View {
                     if current.sharesWatchlist {
                         Button { onWatchlist() } label: {
                             HStack {
-                                Label("View Watchlist", systemImage: "bookmark")
+                                Label("View Watchlist (\(current.watchlistItems.count))", systemImage: "bookmark")
                                     .font(.subheadline)
                                     .foregroundStyle(.primary)
                                 Spacer()
@@ -1312,6 +1414,7 @@ struct FriendDetailPage: View {
                             }
                             .padding(.horizontal, 16)
                             .padding(.vertical, 13)
+                            .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
                     }
@@ -1323,7 +1426,7 @@ struct FriendDetailPage: View {
                     if current.sharesWatched {
                         Button { onWatched() } label: {
                             HStack {
-                                Label("View Watched", systemImage: "checkmark.circle")
+                                Label("View Watched (\(current.watchedItems.count))", systemImage: "checkmark.circle")
                                     .font(.subheadline)
                                     .foregroundStyle(.primary)
                                 Spacer()
@@ -1333,6 +1436,7 @@ struct FriendDetailPage: View {
                             }
                             .padding(.horizontal, 16)
                             .padding(.vertical, 13)
+                            .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
                     }
@@ -1403,7 +1507,16 @@ struct FriendWatchlistPage: View {
     var body: some View {
         BaseScreen(title: "\(current.name)'s Watchlist", filter: $filter, settings: model.settings, onRefresh: { refresh() }) {
             VStack(spacing: 16) {
-                FilterPills(filter: $filter, options: [.movie, .tv, .both]) {}
+                HStack(spacing: 8) {
+                    FilterPills(filter: $filter, options: [.movie, .tv, .both]) {}
+                    Text("\(filteredItems.count)")
+                        .font(.caption2.bold())
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                        .padding(.horizontal, 7)
+                        .frame(maxHeight: .infinity)
+                        .liquidGlass(cornerRadius: 100)
+                }
                 if filteredItems.isEmpty {
                     StatusBubble(title: "Nothing here", text: "\(current.name)'s watchlist is empty.")
                 } else {
@@ -1446,7 +1559,16 @@ struct FriendWatchedPage: View {
     var body: some View {
         BaseScreen(title: "\(current.name)'s Watched", filter: $filter, settings: model.settings, onRefresh: { refresh() }) {
             VStack(spacing: 16) {
-                FilterPills(filter: $filter, options: [.movie, .tv, .both]) {}
+                HStack(spacing: 8) {
+                    FilterPills(filter: $filter, options: [.movie, .tv, .both]) {}
+                    Text("\(filteredItems.count)")
+                        .font(.caption2.bold())
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                        .padding(.horizontal, 7)
+                        .frame(maxHeight: .infinity)
+                        .liquidGlass(cornerRadius: 100)
+                }
                 Toggle("Hide items I've seen", isOn: $hideAlreadySeen)
                     .font(.subheadline)
                     .padding(.horizontal, 4)

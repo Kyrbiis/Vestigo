@@ -157,7 +157,8 @@ struct CloudPublicSyncService {
 
     // MARK: - Send friend request (so the other person auto-adds us)
 
-    func sendFriendRequest(fromRecordName: String, fromDisplayName: String, toRecordName: String) async {
+    @discardableResult
+    func sendFriendRequest(fromRecordName: String, fromDisplayName: String, toRecordName: String) async -> String {
         #if canImport(CloudKit)
         let recordName = "vfr-\(fromRecordName)-\(toRecordName)"
         let recordID = CKRecord.ID(recordName: recordName)
@@ -166,13 +167,20 @@ struct CloudPublicSyncService {
         record["fromDisplayName"] = fromDisplayName as CKRecordValue
         record["toRecordName"] = toRecordName as CKRecordValue
         record["createdAt"] = Date() as CKRecordValue
-        _ = try? await publicDB.save(record)
+        do {
+            _ = try await publicDB.save(record)
+            return "ok"
+        } catch {
+            return "error: \(error.localizedDescription)"
+        }
+        #else
+        return "no-cloudkit"
         #endif
     }
 
     // MARK: - Fetch incoming friend requests addressed to this user
 
-    func fetchIncomingRequests(myRecordName: String) async -> [(id: String, name: String, recordName: String)] {
+    func fetchIncomingRequests(myRecordName: String) async -> (results: [(id: String, name: String, recordName: String)], error: String?) {
         #if canImport(CloudKit)
         let pred = NSPredicate(format: "toRecordName == %@", myRecordName)
         let query = CKQuery(recordType: "VestigoFriendRequest", predicate: pred)
@@ -187,12 +195,12 @@ struct CloudPublicSyncService {
                     results.append((id: record.recordID.recordName, name: fromName, recordName: fromRID))
                 }
             }
+            return (results, nil)
         } catch {
-            // VestigoFriendRequest record type may not exist yet in production schema — silently ignore
+            return ([], error.localizedDescription)
         }
-        return results
         #else
-        return []
+        return ([], "no-cloudkit")
         #endif
     }
 

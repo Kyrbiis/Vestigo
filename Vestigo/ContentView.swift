@@ -25,6 +25,7 @@ import WebKit
 struct ContentView: View {
     @StateObject private var model = VestigoModel()
     @Namespace private var tabNamespace
+    @Environment(\.scenePhase) private var scenePhase
 
     private var selectedTabBinding: Binding<AppTab> {
         Binding(
@@ -114,24 +115,41 @@ struct ContentView: View {
             Text("Your OMDb API key has made \(model.settings.omdbDailyRequestCount.formatted()) requests today, reaching its daily limit. IMDb and Rotten Tomato ratings will not load until midnight. You can view or change your key tier from the OMDb website.")
         }
         .onOpenURL { url in
-            guard url.scheme == "vestigo",
-                  url.host == "friend",
-                  let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
-                  let id = components.queryItems?.first(where: { $0.name == "id" })?.value
-            else { return }
-            let rid = components.queryItems?.first(where: { $0.name == "rid" })?.value
-            let name = components.queryItems?.first(where: { $0.name == "name" })?.value
+            model.logLink("onOpenURL fired: \(url.absoluteString)")
+            let components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+            let isCustomScheme = url.scheme == "vestigo" && url.host == "friend"
+            let isUniversalLink = url.scheme == "https" && url.host == "jbhswift.github.io" && url.path == "/friend"
+            guard (isCustomScheme || isUniversalLink),
+                  let id = components?.queryItems?.first(where: { $0.name == "id" })?.value
+            else {
+                model.logLink("onOpenURL: no match (scheme=\(url.scheme ?? "nil") host=\(url.host ?? "nil") path=\(url.path))")
+                return
+            }
+            let rid = components?.queryItems?.first(where: { $0.name == "rid" })?.value
+            let name = components?.queryItems?.first(where: { $0.name == "name" })?.value
+            model.logLink("onOpenURL: matched id=\(id) rid=\(rid ?? "nil") name=\(name ?? "nil")")
             Task { await model.handleFriendLink(inviteID: id, recordID: rid, displayName: name) }
         }
         .onContinueUserActivity(NSUserActivityTypeBrowsingWeb) { activity in
+            let rawURL = activity.webpageURL?.absoluteString ?? "nil"
+            model.logLink("onContinueUserActivity fired: \(rawURL)")
             guard let url = activity.webpageURL,
                   let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
                   components.path == "/friend",
                   let id = components.queryItems?.first(where: { $0.name == "id" })?.value
-            else { return }
+            else {
+                model.logLink("onContinueUserActivity: guard failed (path=\(activity.webpageURL?.path ?? "nil"))")
+                return
+            }
             let rid = components.queryItems?.first(where: { $0.name == "rid" })?.value
             let name = components.queryItems?.first(where: { $0.name == "name" })?.value
+            model.logLink("onContinueUserActivity: id=\(id) rid=\(rid ?? "nil") name=\(name ?? "nil")")
             Task { await model.handleFriendLink(inviteID: id, recordID: rid, displayName: name) }
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active {
+                Task { await model.checkIncomingFriendRequests() }
+            }
         }
         .alert(
             "Add Friend",
