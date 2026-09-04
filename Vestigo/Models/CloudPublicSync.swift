@@ -49,15 +49,20 @@ struct CloudPublicSyncService {
                 record["excitedForPayload"] = CKAsset(fileURL: try writeTemp(data, name: "excitedFor"))
             }
 
-            var ratingsDict: [String: Double] = [:]
-            for item in library.watchedItems {
-                if let r = library.ratings[item.key] { ratingsDict[item.key.stableID] = r }
-            }
-            if !ratingsDict.isEmpty, let data = try? JSONEncoder().encode(ratingsDict) {
-                record["ratingsPayload"] = CKAsset(fileURL: try writeTemp(data, name: "ratings"))
-            }
-
             let sharing = !settings.socialDontShare
+            if sharing {
+                var ratingsDict: [String: Double] = [:]
+                for item in library.watchedItems {
+                    if let r = library.ratings[item.key] { ratingsDict[item.key.stableID] = r }
+                }
+                if !ratingsDict.isEmpty, let data = try? JSONEncoder().encode(ratingsDict) {
+                    record["ratingsPayload"] = CKAsset(fileURL: try writeTemp(data, name: "ratings"))
+                } else {
+                    record["ratingsPayload"] = nil as CKAsset?
+                }
+            } else {
+                record["ratingsPayload"] = nil as CKAsset?
+            }
             if sharing && settings.socialShareWatchlist, let data = try? JSONEncoder().encode(library.watchlistItems) {
                 record["watchlistPayload"] = CKAsset(fileURL: try writeTemp(data, name: "watchlist"))
             } else {
@@ -190,6 +195,54 @@ struct CloudPublicSyncService {
             for (_, result) in matchResults {
                 guard let record = try? result.get() else { continue }
                 let fromName = (record["fromDisplayName"] as? String) ?? "Unknown"
+                let fromRID = (record["fromRecordName"] as? String) ?? ""
+                if !fromRID.isEmpty {
+                    results.append((id: record.recordID.recordName, name: fromName, recordName: fromRID))
+                }
+            }
+            return (results, nil)
+        } catch {
+            return ([], error.localizedDescription)
+        }
+        #else
+        return ([], "no-cloudkit")
+        #endif
+    }
+
+    // MARK: - Send removal notice (so the removed person's app can clean up and show an alert)
+
+    @discardableResult
+    func sendRemovalNotice(fromRecordName: String, fromDisplayName: String, toRecordName: String) async -> String {
+        #if canImport(CloudKit)
+        let recordName = "vfrem-\(fromRecordName)-\(toRecordName)"
+        let recordID = CKRecord.ID(recordName: recordName)
+        let record = CKRecord(recordType: "VestigoFriendRemoval", recordID: recordID)
+        record["fromRecordName"] = fromRecordName as CKRecordValue
+        record["fromDisplayName"] = fromDisplayName as CKRecordValue
+        record["toRecordName"] = toRecordName as CKRecordValue
+        do {
+            _ = try await publicDB.save(record)
+            return "ok"
+        } catch {
+            return "error: \(error.localizedDescription)"
+        }
+        #else
+        return "no-cloudkit"
+        #endif
+    }
+
+    // MARK: - Fetch removal notices addressed to this user
+
+    func fetchRemovalNotices(myRecordName: String) async -> (results: [(id: String, name: String, recordName: String)], error: String?) {
+        #if canImport(CloudKit)
+        let pred = NSPredicate(format: "toRecordName == %@", myRecordName)
+        let query = CKQuery(recordType: "VestigoFriendRemoval", predicate: pred)
+        var results: [(id: String, name: String, recordName: String)] = []
+        do {
+            let (matchResults, _) = try await publicDB.records(matching: query)
+            for (_, result) in matchResults {
+                guard let record = try? result.get() else { continue }
+                let fromName = (record["fromDisplayName"] as? String) ?? "Someone"
                 let fromRID = (record["fromRecordName"] as? String) ?? ""
                 if !fromRID.isEmpty {
                     results.append((id: record.recordID.recordName, name: fromName, recordName: fromRID))

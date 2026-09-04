@@ -29,7 +29,7 @@ struct SearchView: View {
                 .onChange(of: model.searchText) { _, _ in
                     searchTask?.cancel()
                     searchTask = Task {
-                        try? await Task.sleep(for: .milliseconds(300))
+                        try? await Task.sleep(for: .milliseconds(1000))
                         guard !Task.isCancelled else { return }
                         model.updateSearch()
                     }

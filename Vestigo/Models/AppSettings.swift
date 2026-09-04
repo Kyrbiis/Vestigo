@@ -33,6 +33,7 @@ struct AppSettings: Codable, Hashable {
     var hideUpcomingFromCollectionRecommendations = false
     var warnBeforeReplacingFavourite = true
     var promptToRateAfterMarkingWatched = true
+    var autoTrackWatchDate: Bool = false
     var preferredRatingSource: RatingSource = .imdb
     var homeCarouselOrder: [HomeCarousel] = [.trending, .recommendations, .newReleases, .upcoming]
     var homeCarouselHidden: Set<HomeCarousel> = []
@@ -43,6 +44,8 @@ struct AppSettings: Codable, Hashable {
     var socialExcitedForKeys: [String] = []
     var socialInviteID: String = UUID().uuidString
     var socialConfirmedFriendIDs: [String] = []
+    var socialProcessedRequestIDs: [String] = []
+    var socialProcessedRemovalIDs: [String] = []
     var socialMyRecordName: String = ""
     var forYouCarouselOrder: [ForYouCarousel] = ForYouCarousel.allCases
     var forYouCarouselHidden: Set<ForYouCarousel> = [.moreLikeLast, .moreLikeFavourite, .watchlistPicks, .seriesNext]
@@ -92,6 +95,7 @@ struct AppSettings: Codable, Hashable {
         case hideUpcomingFromCollectionRecommendations
         case warnBeforeReplacingFavourite
         case promptToRateAfterMarkingWatched
+        case autoTrackWatchDate
         case preferredRatingSource
         case homeCarouselOrder
         case homeCarouselHidden
@@ -115,6 +119,8 @@ struct AppSettings: Codable, Hashable {
         case socialExcitedForKeys
         case socialInviteID
         case socialConfirmedFriendIDs
+        case socialProcessedRequestIDs
+        case socialProcessedRemovalIDs
         case socialMyRecordName
         case recentlyViewedItems
         case socialExcitedForItemCache
@@ -157,6 +163,7 @@ struct AppSettings: Codable, Hashable {
         hideUpcomingFromCollectionRecommendations = try container.decodeIfPresent(Bool.self, forKey: .hideUpcomingFromCollectionRecommendations) ?? hideUpcomingFromCollectionRecommendations
         warnBeforeReplacingFavourite = try container.decodeIfPresent(Bool.self, forKey: .warnBeforeReplacingFavourite) ?? warnBeforeReplacingFavourite
         promptToRateAfterMarkingWatched = try container.decodeIfPresent(Bool.self, forKey: .promptToRateAfterMarkingWatched) ?? promptToRateAfterMarkingWatched
+        autoTrackWatchDate = try container.decodeIfPresent(Bool.self, forKey: .autoTrackWatchDate) ?? autoTrackWatchDate
         preferredRatingSource = try container.decodeIfPresent(RatingSource.self, forKey: .preferredRatingSource) ?? preferredRatingSource
 
         let savedHomeOrder = try container.decodeIfPresent([HomeCarousel].self, forKey: .homeCarouselOrder) ?? []
@@ -195,6 +202,8 @@ struct AppSettings: Codable, Hashable {
         let storedInviteID = try container.decodeIfPresent(String.self, forKey: .socialInviteID) ?? ""
         socialInviteID = storedInviteID.isEmpty ? UUID().uuidString : storedInviteID
         socialConfirmedFriendIDs = try container.decodeIfPresent([String].self, forKey: .socialConfirmedFriendIDs) ?? socialConfirmedFriendIDs
+        socialProcessedRequestIDs = try container.decodeIfPresent([String].self, forKey: .socialProcessedRequestIDs) ?? socialProcessedRequestIDs
+        socialProcessedRemovalIDs = try container.decodeIfPresent([String].self, forKey: .socialProcessedRemovalIDs) ?? socialProcessedRemovalIDs
         socialMyRecordName = try container.decodeIfPresent(String.self, forKey: .socialMyRecordName) ?? socialMyRecordName
         recentlyViewedItems = try container.decodeIfPresent([MediaItem].self, forKey: .recentlyViewedItems) ?? recentlyViewedItems
         socialExcitedForItemCache = try container.decodeIfPresent([MediaItem].self, forKey: .socialExcitedForItemCache) ?? socialExcitedForItemCache

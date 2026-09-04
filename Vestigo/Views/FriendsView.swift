@@ -183,6 +183,24 @@ struct FriendsView: View {
             EmptyView()
             #endif
         }
+        .alert(
+            "Friend Removed",
+            isPresented: Binding(
+                get: { !model.pendingRemovalNames.isEmpty },
+                set: { if !$0 { model.pendingRemovalNames.removeAll() } }
+            )
+        ) {
+            Button("OK") { model.pendingRemovalNames.removeAll() }
+        } message: {
+            if let name = model.pendingRemovalNames.first {
+                let others = model.pendingRemovalNames.count - 1
+                if others == 0 {
+                    Text("\(name) has removed you as a friend on Vestigo.")
+                } else {
+                    Text("\(name) and \(others) other\(others == 1 ? "" : "s") have removed you as friends on Vestigo.")
+                }
+            }
+        }
     }
 
     private func startFriendsLoad() {
@@ -587,8 +605,8 @@ private struct SocialPosterRow: View {
                                     Text(item.title)
                                         .font(.caption.bold())
                                         .foregroundStyle(.primary)
-                                        .lineLimit(2)
-                                        .frame(width: 110, alignment: .leading)
+                                        .lineLimit(2, reservesSpace: true)
+                                        .frame(width: 110, alignment: .topLeading)
                                     if showRating {
                                         if let rating = model.library.ratings[item.key], rating > 0 {
                                             HStack(spacing: 3) {
@@ -776,12 +794,18 @@ private struct FeaturedPickerSheet: View {
                                     .foregroundStyle(.primary)
                                     .lineLimit(1)
                                     .frame(maxWidth: .infinity, alignment: .leading)
-                                if let rating = model.library.ratings[item.key] {
-                                    Text("\(rating.formatted(.number.precision(.fractionLength(0...1)))) stars")
-                                        .font(.caption2)
-                                        .foregroundStyle(.secondary)
+                                if model.library.isWatched(item.key) {
+                                    if let rating = model.library.ratings[item.key] {
+                                        Text("\(rating.formatted(.number.precision(.fractionLength(0...1)))) stars")
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary)
+                                    } else {
+                                        Text("Watched, unrated")
+                                            .font(.caption2)
+                                            .foregroundStyle(.tertiary)
+                                    }
                                 } else {
-                                    Text("Not rated")
+                                    Text("On watchlist")
                                         .font(.caption2)
                                         .foregroundStyle(.tertiary)
                                 }

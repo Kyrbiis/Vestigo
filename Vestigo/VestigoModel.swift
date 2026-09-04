@@ -59,6 +59,7 @@ final class VestigoModel: ObservableObject {
     @Published var collectionRecommendations: [UUID: [MediaItem]] = [:]
     @Published var pendingRatingPromptItem: MediaItem?
     @Published var pendingRatingPromptValue: Double = 0
+    @Published var pendingRatingPromptDate: Date? = nil
     @Published var pendingRatingPromptMakeFavourite = false
     @Published var pendingRatingPromptRestoreWatchlist = false
     
@@ -90,6 +91,7 @@ final class VestigoModel: ObservableObject {
     @Published var friendsDiagnostic: String = ""
     @Published var publishDiagnostic: String = ""
     @Published var pendingFriendAdd: PendingFriendAdd? = nil
+    @Published var pendingRemovalNames: [String] = []
     @Published var userAvatarData: Data? = nil
     @Published var linkLog: [String] = []
     private var lastIncomingCheck: Date = .distantPast
@@ -3121,7 +3123,7 @@ final class VestigoModel: ObservableObject {
         library.recordWatchOrderChange(for: item)
         
         if library.isWatched(item.key) {
-            library.setWatchedDateIfUnset(for: item.key)
+            if settings.autoTrackWatchDate { library.setWatchedDateIfUnset(for: item.key) }
             removeFromForYouRecommendations(item)
         }
         if library.isWatched(item.key) {
@@ -3170,6 +3172,7 @@ final class VestigoModel: ObservableObject {
 
         pendingRatingPromptItem = item
         pendingRatingPromptValue = library.ratings[item.key] ?? 0
+        pendingRatingPromptDate = library.watchedDates[item.key]
         pendingRatingPromptMakeFavourite = library.isFavourite(item)
         pendingRatingPromptRestoreWatchlist = restoreWatchlistOnCancel
     }
@@ -3179,12 +3182,18 @@ final class VestigoModel: ObservableObject {
         let shouldMakeFavourite = pendingRatingPromptMakeFavourite
 
         setRating(pendingRatingPromptValue, for: item)
+        if let date = pendingRatingPromptDate {
+            setWatchedDate(date, for: item)
+        }
         pendingRatingPromptItem = nil
         pendingRatingPromptValue = 0
+        pendingRatingPromptDate = nil
         pendingRatingPromptMakeFavourite = false
         pendingRatingPromptRestoreWatchlist = false
 
         if shouldMakeFavourite, !library.isFavourite(item) {
+            requestToggleFavourite(item)
+        } else if !shouldMakeFavourite, library.isFavourite(item) {
             requestToggleFavourite(item)
         }
     }
@@ -3196,6 +3205,7 @@ final class VestigoModel: ObservableObject {
 
         pendingRatingPromptItem = nil
         pendingRatingPromptValue = 0
+        pendingRatingPromptDate = nil
         pendingRatingPromptMakeFavourite = false
         pendingRatingPromptRestoreWatchlist = false
     }
@@ -3906,13 +3916,21 @@ final class VestigoModel: ObservableObject {
         logLink("checkIncoming: found \(incoming.count) request(s)")
         var newFriendIDs: [String] = []
         for req in incoming {
-            if settings.socialConfirmedFriendIDs.contains(req.recordName) {
-                logLink("checkIncoming: already friend \(req.name)")
+            if settings.socialProcessedRequestIDs.contains(req.id) {
+                // Already processed this specific request record — skip regardless of current friend status
+            } else if settings.socialConfirmedFriendIDs.contains(req.recordName) {
+                logLink("checkIncoming: already friend \(req.name), marking request processed")
+                settings.socialProcessedRequestIDs.append(req.id)
             } else {
                 logLink("checkIncoming: adding \(req.name)")
                 settings.socialConfirmedFriendIDs.append(req.recordName)
+                settings.socialProcessedRequestIDs.append(req.id)
                 newFriendIDs.append(req.recordName)
             }
+        }
+        // Prevent unbounded growth from request spam — keep only the most recent 500 processed IDs
+        if settings.socialProcessedRequestIDs.count > 500 {
+            settings.socialProcessedRequestIDs = Array(settings.socialProcessedRequestIDs.suffix(500))
         }
         if !newFriendIDs.isEmpty {
             saveSettings()
@@ -3930,6 +3948,7 @@ final class VestigoModel: ObservableObject {
 
     func loadFriends() async {
         friendsLoading = true
+        await checkRemovalNotices()
         let (profiles, diagnostic) = await publicSync.fetchFriends(recordIDs: settings.socialConfirmedFriendIDs)
         friends = profiles
         friendsDiagnostic = diagnostic
@@ -4002,6 +4021,38 @@ final class VestigoModel: ObservableObject {
         friends.removeAll { $0.id == recordID }
         saveSettings()
         Task { await loadFriends() }
+        guard !settings.socialMyRecordName.isEmpty else { return }
+        let myName = settings.name
+        let myRecord = settings.socialMyRecordName
+        Task {
+            await publicSync.sendRemovalNotice(
+                fromRecordName: myRecord,
+                fromDisplayName: myName,
+                toRecordName: recordID
+            )
+        }
+    }
+
+    func checkRemovalNotices() async {
+        guard !settings.socialMyRecordName.isEmpty else { return }
+        let (notices, _) = await publicSync.fetchRemovalNotices(myRecordName: settings.socialMyRecordName)
+        var newRemovals: [String] = []
+        for notice in notices {
+            guard !settings.socialProcessedRemovalIDs.contains(notice.id) else { continue }
+            settings.socialProcessedRemovalIDs.append(notice.id)
+            if settings.socialConfirmedFriendIDs.contains(notice.recordName) {
+                settings.socialConfirmedFriendIDs.removeAll { $0 == notice.recordName }
+                friends.removeAll { $0.id == notice.recordName }
+                newRemovals.append(notice.name)
+            }
+        }
+        if settings.socialProcessedRemovalIDs.count > 500 {
+            settings.socialProcessedRemovalIDs = Array(settings.socialProcessedRemovalIDs.suffix(500))
+        }
+        if !newRemovals.isEmpty {
+            saveSettings()
+            pendingRemovalNames.append(contentsOf: newRemovals)
+        }
     }
 
     func refreshFriend(recordID: String) async -> FriendProfile? {

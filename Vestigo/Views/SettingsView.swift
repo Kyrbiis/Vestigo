@@ -378,7 +378,7 @@ struct SettingsView: View {
                                 .tint(model.settings.accentColor)
                                 .padding(.trailing, 6)
 
-                            Toggle("For You / Recommended", isOn: $model.settings.hideUpcomingFromRecommended)
+                            Toggle("For You", isOn: $model.settings.hideUpcomingFromRecommended)
                                 .font(.subheadline.bold())
                                 .foregroundStyle(.primary)
                                 .tint(model.settings.accentColor)
@@ -445,13 +445,24 @@ struct SettingsView: View {
                         Toggle("Prompt to rate after marking watched", isOn: $model.settings.promptToRateAfterMarkingWatched)
                             .font(.headline.bold())
                             .tint(model.settings.accentColor)
-                        
+
                         Text("When this is on, marking a movie or series as watched opens a rating prompt right where you are.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
                     .settingBubble()
-                    
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        Toggle("Automatically track watch date", isOn: $model.settings.autoTrackWatchDate)
+                            .font(.headline.bold())
+                            .tint(model.settings.accentColor)
+
+                        Text("When off, watch dates are set manually. When on, the date is recorded automatically the moment you mark something as watched.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .settingBubble()
+
                     VStack(alignment: .leading, spacing: 6) {
                         Toggle("Show upcoming releases", isOn: $model.settings.showUpcomingReleases)
                             .font(.headline.bold())
@@ -2049,7 +2060,7 @@ struct ShortFilmsSettingsGroup: View {
                     .tint(model.settings.accentColor)
                     .padding(.trailing, 6)
                 
-                Toggle("Hide from Recommended", isOn: $model.settings.hideShortFilmsFromRecommended)
+                Toggle("Hide from For You", isOn: $model.settings.hideShortFilmsFromRecommended)
                     .font(.subheadline.bold())
                     .foregroundStyle(.primary)
                     .tint(model.settings.accentColor)
@@ -2132,7 +2143,7 @@ struct ExtrasAndPromosSettingsGroup: View {
                     .tint(model.settings.accentColor)
                     .padding(.trailing, 6)
 
-                Toggle("Hide from Recommended", isOn: $model.settings.hideExtrasAndPromosFromRecommended)
+                Toggle("Hide from For You", isOn: $model.settings.hideExtrasAndPromosFromRecommended)
                     .font(.subheadline.bold())
                     .foregroundStyle(.primary)
                     .tint(model.settings.accentColor)
@@ -2166,6 +2177,7 @@ struct ExtrasAndPromosSettingsGroup: View {
 struct RatingPromptOverlay: ViewModifier {
     @ObservedObject var model: VestigoModel
     var suppressedItemKey: MediaKey?
+    @State private var showDatePicker = false
     
     func body(content: Content) -> some View {
         ZStack {
@@ -2180,13 +2192,71 @@ struct RatingPromptOverlay: ViewModifier {
                     Text("Rate \(item.title)?")
                         .font(.title3.bold())
                         .foregroundStyle(.primary)
-                    
+
                     Text("This feature can be disabled in Settings.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    
-                    StarRatingView(rating: $model.pendingRatingPromptValue)
-                    
+
+                    HStack(alignment: .center, spacing: 12) {
+                        StarRatingView(rating: $model.pendingRatingPromptValue)
+
+                        Spacer(minLength: 0)
+
+                        Button {
+                            showDatePicker.toggle()
+                        } label: {
+                            if let date = model.pendingRatingPromptDate {
+                                Label(date.formatted(.dateTime.day().month(.abbreviated).year()), systemImage: "calendar")
+                                    .font(.caption.bold())
+                                    .foregroundStyle(.secondary)
+                            } else {
+                                Label("Add date", systemImage: "calendar.badge.plus")
+                                    .font(.caption.bold())
+                                    .foregroundStyle(.tertiary)
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        .popover(isPresented: $showDatePicker) {
+                            VStack(spacing: 0) {
+                                DatePicker(
+                                    "Watched on",
+                                    selection: Binding(
+                                        get: { model.pendingRatingPromptDate ?? .now },
+                                        set: { model.pendingRatingPromptDate = $0 }
+                                    ),
+                                    displayedComponents: .date
+                                )
+                                .datePickerStyle(.graphical)
+                                .padding()
+                                if model.pendingRatingPromptDate != nil {
+                                    Divider()
+                                    Button(role: .destructive) {
+                                        model.pendingRatingPromptDate = nil
+                                        showDatePicker = false
+                                    } label: {
+                                        Text("Clear date")
+                                            .font(.subheadline)
+                                            .frame(maxWidth: .infinity)
+                                            .padding(.vertical, 12)
+                                    }
+                                }
+                            }
+                            .frame(width: 320)
+                            .presentationCompactAdaptation(.popover)
+                        }
+
+                        if model.pendingRatingPromptDate != nil {
+                            Button {
+                                model.pendingRatingPromptDate = nil
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .font(.caption)
+                                    .foregroundStyle(.tertiary)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+
                     Button {
                         model.pendingRatingPromptMakeFavourite.toggle()
                     } label: {
